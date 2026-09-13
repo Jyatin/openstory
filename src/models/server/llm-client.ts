@@ -39,6 +39,12 @@ import {
   resolveNativeGrokModel,
   type LlmKeyInfo,
 } from './create-adapter';
+import { NonRetryableError } from 'cloudflare:workflows';
+import {
+  CONTENT_REJECTION_EVENT,
+  contentFilterLlmMessage,
+  isContentFilterFinish,
+} from '@/models/content-rejection';
 
 import { getLogger } from '@/platform/logger';
 
@@ -1048,6 +1054,7 @@ async function* callLLMStreamOnce<T>(
 
   const responseSchema = params.responseSchema;
   let runError: RunErrorDetail | null = null;
+  let contentFiltered = false;
   if (responseSchema) {
     validateStructuredOutputSupport(params.model);
     for await (const event of chat({
@@ -1055,6 +1062,7 @@ async function* callLLMStreamOnce<T>(
       outputSchema: responseSchema,
     })) {
       usageCapture.noteFromStreamEvent(event);
+      contentFiltered ||= isContentFilterFinish(event);
       const noted = extractRunError(event);
       if (noted) {
         runError ??= noted;
@@ -1081,6 +1089,7 @@ async function* callLLMStreamOnce<T>(
   } else {
     for await (const event of chat(baseOptions)) {
       usageCapture.noteFromStreamEvent(event);
+      contentFiltered ||= isContentFilterFinish(event);
       const noted = extractRunError(event);
       if (noted) {
         runError ??= noted;
@@ -1104,6 +1113,16 @@ async function* callLLMStreamOnce<T>(
         continue;
       }
     }
+  }
+  // A content-filter stop cuts the output mid-token, which TanStack reports
+  // as a JSON parse failure. It is a property of the input, not a transient
+  // fault: every retry stops the same way, so fail fast with the reason.
+  if (contentFiltered && parsed === undefined) {
+    logger.warn(`Content filter stopped ${params.model}`, {
+      event: CONTENT_REJECTION_EVENT,
+      observationName: params.observationName,
+    });
+    throw new NonRetryableError(contentFilterLlmMessage('Script'));
   }
   throwNotedRunError(runError);
 

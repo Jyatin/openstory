@@ -36,7 +36,7 @@ import {
 
 const baseSettings = {
   generationMode: 'quality' as const,
-  analysisModels: ['anthropic/claude-fable-5.1' as const],
+  analysisModels: ['openai/gpt-6-astra' as const],
   imageModels: ['gpt_image_2' as const],
   videoModels: ['seedance_v2' as const],
   audioModels: ['elevenlabs_music' as const],
@@ -87,8 +87,8 @@ describe('mode defaults', () => {
     expect(TURBO_DEFAULT_VIDEO).toBe('minimax_h3_max');
   });
 
-  it('quality defaults are Fable / GPT Image 2 / Seedance', () => {
-    expect(defaultAnalysisModel('quality')).toBe('anthropic/claude-fable-5.1');
+  it('quality defaults are Astra / GPT Image 2 / Seedance', () => {
+    expect(defaultAnalysisModel('quality')).toBe('openai/gpt-6-astra');
     expect(defaultImageModel('quality')).toBe('gpt_image_2');
     expect(defaultVideoModel('quality', '16:9')).toBe('seedance_v2');
   });
@@ -151,9 +151,11 @@ describe('isTurboAnalysisModel / isTurboImageModel / isTurboVideoModel', () => {
     expect(isTurboVideoModel('seedance_v2')).toBe(false);
   });
 
-  it('flags Luna, not Fable', () => {
+  it('flags Luna, not Fable or Astra', () => {
     expect(isTurboAnalysisModel('openai/gpt-5.6-luna')).toBe(true);
     expect(isTurboAnalysisModel('anthropic/claude-fable-5.1')).toBe(false);
+    expect(isTurboAnalysisModel('openai/gpt-6-astra')).toBe(false);
+    expect(isSelectableAnalysisModelId('openai/gpt-6-astra')).toBe(true);
   });
 });
 

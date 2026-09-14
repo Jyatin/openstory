@@ -28,7 +28,10 @@ import {
   voicedDialogueLines,
 } from '@/motion/dialogue-tts';
 import type { MotionAudioClip } from '@/platform/server/db/schema';
-import { assembleMotionPrompt } from '@/motion/server/assemble-motion-prompt';
+import {
+  assembleMotionPrompt,
+  packedSceneFromScene,
+} from '@/motion/server/assemble-motion-prompt';
 import { buildMotionReferenceImages } from '@/motion/server/build-motion-references';
 import { getLogger } from '@/platform/logger';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
@@ -71,7 +74,9 @@ export function buildStoryboardMotionBatchShots(input: {
   referenceOnly?: boolean;
   /** References-stage dialogue clips, keyed by shot id (#1554). */
   dialogueClipsByShotId?: Record<string, MotionAudioClip[]>;
+  leftoverGrokShotIds?: readonly string[];
 }): BatchMotionMusicWorkflowInput['shots'] {
+  const leftoverGrok = new Set(input.leftoverGrokShotIds ?? []);
   const items = shotWorkItems(input.scenes, input.shotMapping);
   return items.flatMap((item, index) => {
     const { scene, mapping } = item;
@@ -107,12 +112,16 @@ export function buildStoryboardMotionBatchShots(input: {
     // prompt would leave its token unsubstituted and its audio file off the
     // request. The single-shot path in `motion.fn.ts` already matched the
     // assembled text; this brings the batch in line with it.
+    const shotModel =
+      mapping.shotId && leftoverGrok.has(mapping.shotId)
+        ? 'grok_imagine_video_1_5'
+        : input.videoModel;
     const prompt = assembleMotionPrompt({
       motionPrompt: motionPromptData,
-      model: input.videoModel,
+      model: shotModel,
       characterTags,
     });
-    const voicedLines = modelTakesDialogueAudio(input.videoModel)
+    const voicedLines = modelTakesDialogueAudio(shotModel)
       ? voicedDialogueLines(motionPromptData.dialogue, input.characters)
       : [];
     const audioClips = matchingDialogueClips(
@@ -124,13 +133,16 @@ export function buildStoryboardMotionBatchShots(input: {
 
     return {
       shotId: mapping.shotId,
+      sceneId: scene.sceneId,
+      packedScene: packedSceneFromScene(scene),
+      attachSceneHeader: item.hasSiblingShots,
       ...(input.referenceOnly
         ? { referenceOnly: true as const }
         : { referenceOnly: false as const, imageUrl: imageUrl ?? undefined }),
       frameVersionId: input.frameVersionIds[index] ?? null,
       motionPromptVersionId,
       prompt,
-      model: input.videoModel,
+      model: shotModel,
       motionPrompt: motionPromptData,
       characterTags,
       duration: clipDurationSeconds(item),

@@ -1,10 +1,10 @@
 /**
  * N+M fan-out expansion for `MotionBatchWorkflow` (#545).
  *
- * Multi-model video generation runs one motion child per `(shot, model)` —
- * the motion analog of shot-images' per-`(scene, model)` fan-out. Pulled out
- * of the workflow body (mirroring `motion-workflow-persist`) so the expansion's
- * invariants are unit-testable without bootstrapping a `WorkflowEntrypoint`.
+ * Multi-model video generation runs one motion child per packed generation
+ * (and model); leftover / Grok jobs stay 1:1. Pulled out of the workflow
+ * body (mirroring `motion-workflow-persist`) so the expansion's invariants
+ * are unit-testable without bootstrapping a `WorkflowEntrypoint`.
  *
  * Resolution rules (kept deliberately distinct from `resolveVideoModels`, which
  * has different defaulting):
@@ -17,7 +17,11 @@
  * pair — and therefore each child's CF instance id — unique.
  */
 
-import { DEFAULT_VIDEO_MODEL, type ImageToVideoModel } from '@/models/models';
+import {
+  DEFAULT_VIDEO_MODEL,
+  videoModelSupportsInClipMultiShot,
+  type ImageToVideoModel,
+} from '@/models/models';
 
 export type MotionJob<F> = {
   shot: F;
@@ -33,8 +37,15 @@ export function buildMotionJobs<F extends { model?: ImageToVideoModel }>(
     videoModels && videoModels.length > 0 ? [...new Set(videoModels)] : null;
 
   return shots.flatMap((shot, shotIndex) => {
+    // Leftover Grok override: this shot opted out of the packing model.
+    // Top-level `videoModels` still applies to every packing-capable shot.
+    const leftoverModel = shot.model;
     const models: ImageToVideoModel[] =
-      topVideoModels ?? (shot.model ? [shot.model] : [DEFAULT_VIDEO_MODEL]);
+      leftoverModel !== undefined &&
+      !videoModelSupportsInClipMultiShot(leftoverModel)
+        ? [leftoverModel]
+        : (topVideoModels ??
+          (leftoverModel ? [leftoverModel] : [DEFAULT_VIDEO_MODEL]));
     return models.map((model) => ({ shot, shotIndex, model }));
   });
 }

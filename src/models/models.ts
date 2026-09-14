@@ -48,6 +48,8 @@ export const IMAGE_TO_VIDEO_MODELS = {
     qualityRank: 1,
     maxPromptLength: 2500,
     supportsAudio: false,
+    // One take per clip — packing would invent in-clip cuts Grok cannot follow.
+    supportsInClipMultiShot: false,
     performance: { estimatedGenerationTime: 33, quality: 'best' as const },
   },
   gemini_omni_flash: {
@@ -55,12 +57,14 @@ export const IMAGE_TO_VIDEO_MODELS = {
     name: 'Gemini Omni Flash 1.1',
     vendor: 'Google',
     license: 'proprietary' as const,
-    qualityRank: 2,
+    qualityRank: 3,
     // Always generates synchronized audio (dialogue, ambience, score). Neither
     // the fal schema nor the Interactions API expose a generate_audio toggle
     // (`videoModelSupportsAudio` is false), so audio direction is in-prompt
     // and the scene-editor SFX checkbox stays hidden.
     supportsAudio: false,
+    // Defaults to multi-shot; a 1-shot segment pins "single unbroken scene".
+    supportsInClipMultiShot: true,
     maxPromptLength: 20000,
     performance: { estimatedGenerationTime: 20, quality: 'best' as const },
   },
@@ -69,9 +73,11 @@ export const IMAGE_TO_VIDEO_MODELS = {
     name: 'Kling 3.0 Omni',
     vendor: 'Kling',
     license: 'proprietary' as const,
-    qualityRank: 3,
+    qualityRank: 4,
     maxPromptLength: 2500,
     supportsAudio: true,
+    // Packed via `multi_prompt[]` (1–15s per shot) + `shot_type: customize`.
+    supportsInClipMultiShot: true,
     performance: { estimatedGenerationTime: 306, quality: 'best' as const },
   },
   minimax_h3_max: {
@@ -84,6 +90,8 @@ export const IMAGE_TO_VIDEO_MODELS = {
     // API switch — the schema has no generate_audio, so the builder must
     // direct it in-prompt. See buildMinimaxH3Prompt.
     supportsAudio: true,
+    // Timed shot list in the prompt.
+    supportsInClipMultiShot: true,
     maxPromptLength: 2500,
     // PostHog p50 9.7s (n=74, 30d ending 2026-09-01).
     performance: { estimatedGenerationTime: 10, quality: 'best' as const },
@@ -93,9 +101,11 @@ export const IMAGE_TO_VIDEO_MODELS = {
     name: 'Seedance 2.0',
     vendor: 'ByteDance',
     license: 'proprietary' as const,
-    qualityRank: 4,
+    qualityRank: 2,
     maxPromptLength: 4096,
     supportsAudio: true,
+    // Shot 1/2/3 prose + `cut to`.
+    supportsInClipMultiShot: true,
     performance: { estimatedGenerationTime: 208, quality: 'best' as const },
     // Native BytePlus Ark route (#1519). fal enterprise 2.0 stays the fal via
     // (it takes photoreal faces without asset ingest, unlike public 2.0), so
@@ -107,9 +117,11 @@ export const IMAGE_TO_VIDEO_MODELS = {
     name: 'Seedance 2.5',
     vendor: 'ByteDance',
     license: 'proprietary' as const,
-    qualityRank: 2,
+    qualityRank: 1,
     maxPromptLength: 4096,
     supportsAudio: true,
+    // Shot N (0-Ns) paragraphs; 2.5 timestamps, no `cut to`.
+    supportsInClipMultiShot: true,
     performance: { estimatedGenerationTime: 208, quality: 'best' as const },
     // Offered only where the BytePlus via is live (#1519): public fal 2.5
     // 400s photoreal faces without Ark `asset://` ingest, so on a fal-only
@@ -131,6 +143,8 @@ export const IMAGE_TO_VIDEO_MODELS = {
     qualityRank: 6,
     maxPromptLength: 4096,
     supportsAudio: true,
+    // Same in-clip syntax as Seedance 2.0.
+    supportsInClipMultiShot: true,
     performance: { estimatedGenerationTime: 120, quality: 'best' as const },
     // Half the 2.0 rate, 720p ceiling, 4–15s. fal has no enterprise mini, so
     // like 2.5 the public fal endpoint 400s photoreal faces: offered only
@@ -364,6 +378,21 @@ export const DEFAULT_VIDEO_MODEL: ImageToVideoModel = 'seedance_v2';
 export function videoModelSupportsAudio(modelKey: ImageToVideoModel): boolean {
   const config = IMAGE_TO_VIDEO_MODELS[modelKey];
   return 'supportsAudio' in config && config.supportsAudio === true;
+}
+
+/**
+ * Can this model cut inside one generation — several shots of a scene packed
+ * into a single clip using their stored timings (#1510)? Missing or false
+ * stays unpacked. Grok Imagine is the only current `false` (one take per clip).
+ */
+export function videoModelSupportsInClipMultiShot(
+  modelKey: ImageToVideoModel
+): boolean {
+  const config = IMAGE_TO_VIDEO_MODELS[modelKey];
+  return (
+    'supportsInClipMultiShot' in config &&
+    config.supportsInClipMultiShot === true
+  );
 }
 
 /**

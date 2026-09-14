@@ -2,7 +2,7 @@
  * Render segments (#990) — tiling a scene into ≤cap render units.
  *
  * The render unit is NOT the scene: a render model caps a single render at a
- * per-model duration (15s for current models, 30s for newer ones), so a scene's
+ * per-model duration (Omni 10s, most 15s, Seedance 2.5 30s), so a scene's
  * video is an ordered tiling of **segments**, each a contiguous shot-subset
  * whose total duration is ≤ the model cap. The common case (scene ≤ cap) is one
  * segment = the whole scene; long scenes split; per-shot rendering is the
@@ -14,11 +14,17 @@
  *
  * The cap is sourced per-model from the model's JSON Schema duration set (the
  * same source `snapDuration` snaps to), never a hardcoded constant.
+ * `packMotionBatchShots` is the live caller (#1510).
  *
  * See docs/architecture/scene-shot-frame-redesign.md.
  */
 
 import { IMAGE_TO_VIDEO_MODELS, type ImageToVideoModel } from '@/models/models';
+import {
+  DEFAULT_SEGMENT_CAP_MS,
+  tileSceneIntoSegments,
+  type SegmentShot,
+} from '@/motion/tile-segments';
 import type {
   VideoManifest,
   VideoManifestEntry,
@@ -26,20 +32,13 @@ import type {
 import { MOTION_JSON_SCHEMAS } from './endpoint-map';
 import { getDurationValues, numericOf } from './motion-transform';
 
-/** Fallback segment cap when a model's schema exposes no duration set. */
-export const DEFAULT_SEGMENT_CAP_MS = 15_000;
+export { DEFAULT_SEGMENT_CAP_MS, tileSceneIntoSegments, type SegmentShot };
 
-/** A shot as the tiler sees it: an id and its duration. */
-export type SegmentShot = {
-  id: string;
-  durationMs: number;
-};
-
-/** A tiled segment: the ordered shots it covers and their summed duration. */
-export type TiledSegment = {
-  shotIds: string[];
-  durationMs: number;
-};
+function durationValuesForModel(model: ImageToVideoModel): number[] {
+  const endpointId = IMAGE_TO_VIDEO_MODELS[model].id;
+  const jsonSchema = MOTION_JSON_SCHEMAS[endpointId];
+  return getDurationValues(jsonSchema).map(numericOf);
+}
 
 /**
  * The maximum single-render duration (ms) for a model — the largest value in
@@ -48,43 +47,20 @@ export type TiledSegment = {
  * {@link DEFAULT_SEGMENT_CAP_MS} when the schema exposes no durations.
  */
 export function resolveSegmentCapMs(model: ImageToVideoModel): number {
-  const endpointId = IMAGE_TO_VIDEO_MODELS[model].id;
-  const jsonSchema = MOTION_JSON_SCHEMAS[endpointId];
-  const values = getDurationValues(jsonSchema).map(numericOf);
+  const values = durationValuesForModel(model);
   if (values.length === 0) return DEFAULT_SEGMENT_CAP_MS;
   return Math.max(...values) * 1000;
 }
 
 /**
- * Tile an ordered list of shots into contiguous segments, each ≤ `maxSegmentMs`.
- * Greedy contiguous fill: a shot joins the current segment while the running
- * total stays within the cap, otherwise it opens a new one. A single shot
- * longer than the cap becomes its own (over-cap) segment — that's the model's
- * problem to enforce, not the tiler's, and silently dropping or splitting it
- * would lose content.
- *
- * Order is preserved (segment identity depends on it); shots are never sorted.
+ * The shortest clip (ms) this model will accept. Leftover tiles under this
+ * floor snap up (or the leftover dropdown routes them to Grok). 0 when the
+ * schema exposes no durations — same "no floor" as a missing min on the tiler.
  */
-export function tileSceneIntoSegments(
-  shots: readonly SegmentShot[],
-  maxSegmentMs: number
-): TiledSegment[] {
-  const cap = maxSegmentMs > 0 ? maxSegmentMs : DEFAULT_SEGMENT_CAP_MS;
-  const segments: TiledSegment[] = [];
-  let current: TiledSegment | null = null;
-
-  for (const shot of shots) {
-    const dur = Math.max(0, shot.durationMs);
-    if (current && current.durationMs + dur <= cap) {
-      current.shotIds.push(shot.id);
-      current.durationMs += dur;
-    } else {
-      current = { shotIds: [shot.id], durationMs: dur };
-      segments.push(current);
-    }
-  }
-
-  return segments;
+export function resolveSegmentMinMs(model: ImageToVideoModel): number {
+  const values = durationValuesForModel(model).filter((n) => n > 0);
+  if (values.length === 0) return 0;
+  return Math.min(...values) * 1000;
 }
 
 /**

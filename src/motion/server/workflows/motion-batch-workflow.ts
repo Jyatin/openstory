@@ -1,9 +1,10 @@
 /**
  * The `motionBatchWorkflow` durable workflow.
  *
- * Spawns one `MOTION_WORKFLOW` child per shot (plus an optional
- * `MUSIC_WORKFLOW`) via Pattern 3. There is no merge step — playback is the
- * live canvas stitch; the downloadable MP4 is `SequenceExportWorkflow`.
+ * Spawns one `MOTION_WORKFLOW` child per packed generation (and model);
+ * leftover / Grok jobs stay 1:1. Optional `MUSIC_WORKFLOW` via Pattern 3.
+ * There is no merge step — playback is the live canvas stitch; the
+ * downloadable MP4 is `SequenceExportWorkflow`.
  *
  * Fan-out: `Promise.all` on spawn (the parent blocks until every child has
  * been queued, so a transient spawn failure surfaces as a workflow error
@@ -17,10 +18,18 @@ import {
 } from '@/models/server/byteplus-asset-pool';
 import { reportBytePlusAssetPool } from '@/models/server/byteplus-observability';
 import { isBytePlusAssetsConfigured } from '@/models/server/byteplus-config';
-import { isNativeBytePlusVideoModel } from '@/models/models';
+import {
+  IMAGE_TO_VIDEO_MODELS,
+  isNativeBytePlusVideoModel,
+} from '@/models/models';
 import { resolveAudioModels } from '@/models/resolve-audio-models';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
-import { assembleMotionPrompt } from '@/motion/server/assemble-motion-prompt';
+import {
+  assembleMotionPrompt,
+  assemblePackedMotionPrompt,
+  packedPromptFitsLimit,
+} from '@/motion/server/assemble-motion-prompt';
+import { packMotionBatchShots } from '@/motion/server/pack-motion-jobs';
 import { getGenerationChannel } from '@/platform/realtime';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
@@ -102,27 +111,82 @@ export class MotionBatchWorkflow extends OpenStoryWorkflowEntrypoint<BatchMotion
     await this.awaitBytePlusPoolAdmission(input, step, scopedDb);
 
     // Step 1: Fan out motion workflows + optional music workflow in parallel.
-    // Multi-model video (#545): one MOTION_WORKFLOW child per (shot, model)
-    // — the motion analog of shot-images' per-(scene, model) fan-out (see
-    // `buildMotionJobs` for the resolution/dedupe rules). The first model is
+    // Multi-model video (#545/#1510): one MOTION_WORKFLOW child per packed
+    // generation (and model); leftover / Grok jobs stay 1:1. See
+    // `buildMotionJobs` for the resolution/dedupe rules. The first model is
     // primary (its output also lands in the legacy `shots.video*` columns);
     // the rest are alternates in `shot_variants`. Pattern 3 spawns + awaits
     // each child via `spawnAndAwaitChild`; Promise.allSettled lets a single
     // failing (shot, model) not poison the rest of the batch.
-    const motionJobs = buildMotionJobs(input.shots, input.videoModels);
+    const packedShots = packMotionBatchShots(input.shots, input.videoModels, {
+      promptFits: (members) => {
+        const models = input.videoModels?.length
+          ? [...new Set(input.videoModels)]
+          : members[0]?.model
+            ? [members[0].model]
+            : [];
+        if (models.length === 0) return true;
+        return models.every((packModel) =>
+          packedPromptFitsLimit(
+            assemblePackedMotionPrompt({
+              shots: members.map((member) => ({
+                durationSeconds: member.duration ?? 3,
+                motionPrompt: member.motionPrompt,
+                prompt: member.prompt,
+                characterTags: member.characterTags,
+                generateAudio: member.generateAudio,
+              })),
+              model: packModel,
+              generateAudio: members[0]?.generateAudio,
+              scene: members[0]?.packedScene,
+            }),
+            IMAGE_TO_VIDEO_MODELS[packModel].maxPromptLength
+          )
+        );
+      },
+    });
+    const motionJobs = buildMotionJobs(packedShots, input.videoModels);
 
     const motionAwaits = motionJobs.map(({ shot, shotIndex, model }) => {
       // Per-model prompt: re-assemble from the structured motion prompt when
       // present so audio-capable models get dialogue/audio sections, falling
       // back to the pre-assembled `prompt` for manual single-model paths.
-      const prompt = shot.motionPrompt
-        ? assembleMotionPrompt({
-            motionPrompt: shot.motionPrompt,
-            model,
-            characterTags: shot.characterTags,
-            generateAudio: shot.generateAudio,
-          })
-        : shot.prompt;
+      // Packed in-clip jobs (#1510) compose every member's prompt with that
+      // model's cut syntax; a 1-shot job stays the existing path.
+      const members = shot.coveredShots;
+      const packed =
+        members && members.length > 1
+          ? assemblePackedMotionPrompt({
+              shots: members.map((member) => ({
+                durationSeconds: member.duration ?? shot.duration ?? 3,
+                motionPrompt: member.motionPrompt,
+                prompt: member.prompt ?? shot.prompt,
+                characterTags: member.characterTags ?? shot.characterTags,
+                generateAudio: shot.generateAudio,
+              })),
+              model,
+              generateAudio: shot.generateAudio,
+              scene: shot.packedScene ?? members[0]?.packedScene,
+            })
+          : null;
+      const prompt = packed
+        ? packed.prompt
+        : shot.motionPrompt
+          ? assembleMotionPrompt({
+              motionPrompt: shot.motionPrompt,
+              model,
+              characterTags: shot.characterTags,
+              generateAudio: shot.generateAudio,
+              attachSceneHeader: shot.attachSceneHeader,
+              scene: shot.packedScene,
+            })
+          : shot.prompt;
+      const voicedLines = members
+        ? members.flatMap((member) => member.voicedLines ?? [])
+        : shot.voicedLines;
+      const audioClips = members
+        ? members.flatMap((member) => member.audioClips ?? [])
+        : shot.audioClips;
 
       const motionBody: MotionWorkflowInput = {
         userId: input.userId,
@@ -151,14 +215,19 @@ export class MotionBatchWorkflow extends OpenStoryWorkflowEntrypoint<BatchMotion
         // Cast/element reference images (#873) — carried by every model, on
         // the wire or as substituted descriptions.
         referenceImages: shot.referenceImages,
-        voicedLines: shot.voicedLines,
-        audioClips: shot.audioClips,
+        voicedLines,
+        audioClips:
+          audioClips && audioClips.length > 0 ? audioClips : undefined,
         motionPrompt: shot.motionPrompt,
         characterTags: shot.characterTags,
+        packedScene: shot.packedScene,
+        attachSceneHeader: shot.attachSceneHeader,
         // Add-model (#547) batches generate alternates only — the child must
         // not write the legacy `shots.video*` columns.
         variantOnly: input.variantOnly,
         reservationId: input.reservationId,
+        coveredShots: members,
+        multiPrompt: packed?.multiPrompt,
       };
 
       return spawnAndAwaitChild<MotionWorkflowInput, MotionWorkflowResult>(

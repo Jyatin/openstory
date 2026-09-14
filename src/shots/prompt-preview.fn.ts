@@ -6,23 +6,35 @@
 
 import { withMeasuredDurations } from '@/cast/server/sequence-elements/media-duration';
 import { isBytePlusConfigured } from '@/models/server/byteplus-config';
+import {
+  assemblePackedMotionPrompt,
+  packedPromptFitsLimit,
+  packedSceneFromScene,
+} from '@/motion/server/assemble-motion-prompt';
+import { packMotionBatchShots } from '@/motion/server/pack-motion-jobs';
 import { motionPromptFromVersion } from '@/motion/server/resolve-motion-prompt';
+import { resolveShotDuration } from '@/motion/resolve-shot-duration';
 import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_VIDEO_MODEL,
+  IMAGE_TO_VIDEO_MODELS,
   safeImageToVideoModel,
   safeTextToImageModel,
+  videoModelSupportsInClipMultiShot,
+  type ImageToVideoModel,
 } from '@/models/models';
 import { usesStartFrame } from './use-start-frame';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import {
   buildShotPromptPreview,
+  type PackedPreviewMember,
   type ShotPromptPreview,
 } from '@/shots/server/optimised-prompt-preview';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
 import { z } from 'zod';
-import { shotAccessMiddleware } from '@/shots/shot-access.fn';
+import { shotAccessMiddleware, type ShotContext } from '@/shots/shot-access.fn';
+import type { AssemblableMotionPrompt } from '@/shots/scene-analysis.schema';
 
 const previewShotPromptsInputSchema = z.object({
   sequenceId: ulidSchema,
@@ -71,9 +83,25 @@ export const previewShotPromptsFn = createServerFn({ method: 'POST' })
         ? { fullPrompt: overrideText, dialogue: null, audio: null }
         : null;
 
+    const videoModel = safeImageToVideoModel(
+      data.videoModel,
+      DEFAULT_VIDEO_MODEL
+    );
+    const packedPreview = await loadPackedPreviewMembers({
+      scopedDb,
+      sequence,
+      scene,
+      shot,
+      videoModel,
+      motionPrompt,
+      selectedStillUrl: selectedStill?.url ?? null,
+      usesFrame,
+      generateAudio: data.generateAudio ?? true,
+    });
+
     return buildShotPromptPreview({
       imageModel: safeTextToImageModel(data.imageModel, DEFAULT_IMAGE_MODEL),
-      videoModel: safeImageToVideoModel(data.videoModel, DEFAULT_VIDEO_MODEL),
+      videoModel,
       imagePrompt: data.imagePrompt ?? selectedVisual?.text ?? '',
       motionPrompt,
       shotDurationMs: shot.durationMs,
@@ -88,5 +116,150 @@ export const previewShotPromptsFn = createServerFn({ method: 'POST' })
       locations,
       byteplusEnabled: isBytePlusConfigured(),
       audioClips: selectedMotion?.audioClips ?? shot.audioClips ?? [],
+      packedMembers: packedPreview?.members,
+      packedDurationShotNumbers: packedPreview?.durationShotNumbers,
     });
   });
+
+/**
+ * Scene siblings the selected model will pack into one generation (#1510).
+ * Grok and mixed batches stay one-shot; the inspector then shows the
+ * per-shot request. Membership is the same `packMotionBatchShots` tiling
+ * submit uses, so the preview cannot drift from the wire payload.
+ */
+async function loadPackedPreviewMembers(input: {
+  scopedDb: ShotContext['scopedDb'];
+  sequence: ShotContext['sequence'];
+  scene: ShotContext['scene'];
+  shot: ShotContext['shot'];
+  videoModel: ImageToVideoModel;
+  motionPrompt: AssemblableMotionPrompt | null;
+  selectedStillUrl: string | null;
+  usesFrame: boolean;
+  generateAudio: boolean;
+}): Promise<
+  | {
+      members: PackedPreviewMember[];
+      durationShotNumbers: number[];
+    }
+  | undefined
+> {
+  const { scopedDb, sequence, shot, videoModel, motionPrompt } = input;
+  if (!videoModelSupportsInClipMultiShot(videoModel) || !shot.sceneId) {
+    return undefined;
+  }
+
+  const sceneShots = (await scopedDb.shots.listBySequence(sequence.id)).filter(
+    (row) => row.sceneId === shot.sceneId
+  );
+  if (sceneShots.length < 2) return undefined;
+
+  const versions = await scopedDb.shotPromptVersions.getSelectedMotionByShots(
+    sceneShots.map((row) => row.id)
+  );
+  const packable = sceneShots.map((row) => ({
+    shotId: row.id,
+    sceneId: row.sceneId,
+    duration: (row.durationMs ?? 3000) / 1000,
+    durationMs: row.durationMs,
+    model: videoModel,
+    renderSegmentId: row.renderSegmentId,
+    shotNumber: row.shotNumber,
+  }));
+  const packedScene = packedSceneFromScene(input.scene);
+  const promptFits = (members: readonly (typeof packable)[number][]) =>
+    packedPromptFitsLimit(
+      assemblePackedMotionPrompt({
+        shots: members.map((member) => ({
+          durationSeconds: resolveShotDuration({
+            durationMs: member.durationMs,
+            model: videoModel,
+          }),
+          motionPrompt: packedMemberPrompt(
+            member.shotId === shot.id,
+            motionPrompt,
+            versions.get(member.shotId)
+          ),
+          characterTags: input.scene?.continuity?.characterTags,
+        })),
+        model: videoModel,
+        generateAudio: input.generateAudio,
+        scene: packedScene,
+      }),
+      IMAGE_TO_VIDEO_MODELS[videoModel].maxPromptLength
+    );
+  const durationPacked = packMotionBatchShots(packable, [videoModel]);
+  const packed = packMotionBatchShots(packable, [videoModel], { promptFits });
+  const job = packed.find(
+    (entry) =>
+      entry.shotId === shot.id ||
+      entry.coveredShots?.some((member) => member.shotId === shot.id)
+  );
+  const covered = job?.coveredShots;
+  if (!covered || covered.length < 2) return undefined;
+
+  const durationJob = durationPacked.find(
+    (entry) =>
+      entry.shotId === shot.id ||
+      entry.coveredShots?.some((member) => member.shotId === shot.id)
+  );
+  const durationMembers = durationJob?.coveredShots ?? covered;
+  const firstId = covered[0]?.shotId;
+  const firstRow = sceneShots.find((row) => row.id === firstId);
+  const firstUsesFrame = firstRow
+    ? usesStartFrame(firstRow, sequence)
+    : input.usesFrame;
+
+  let firstStartFrameUrl: string | null = null;
+  if (firstId === shot.id) {
+    firstStartFrameUrl = firstUsesFrame ? input.selectedStillUrl : null;
+  } else if (firstUsesFrame && firstId) {
+    const firstFrame = await scopedDb.frames.getAnchorByShot(firstId);
+    const firstStill = firstFrame
+      ? await scopedDb.frameVariants.getSelected(firstFrame.id)
+      : null;
+    firstStartFrameUrl = firstStill?.url ?? null;
+  }
+
+  return {
+    members: covered.map((member) => {
+      const row = sceneShots.find(
+        (sceneShot) => sceneShot.id === member.shotId
+      );
+      const isCurrent = member.shotId === shot.id;
+      const version = versions.get(member.shotId);
+      return {
+        shotId: member.shotId,
+        shotNumber: row?.shotNumber ?? 0,
+        durationMs: row?.durationMs ?? 3000,
+        motionPrompt: isCurrent
+          ? motionPrompt
+          : version
+            ? motionPromptFromVersion(version)
+            : null,
+        usesStartFrame:
+          member.shotId === firstId
+            ? firstUsesFrame
+            : row
+              ? usesStartFrame(row, sequence)
+              : false,
+        startFrameUrl: member.shotId === firstId ? firstStartFrameUrl : null,
+      };
+    }),
+    durationShotNumbers: durationMembers.map((member) => {
+      const row = sceneShots.find(
+        (sceneShot) => sceneShot.id === member.shotId
+      );
+      return row?.shotNumber ?? 0;
+    }),
+  };
+}
+
+function packedMemberPrompt(
+  isCurrent: boolean,
+  current: AssemblableMotionPrompt | null,
+  version: Parameters<typeof motionPromptFromVersion>[0] | undefined
+): AssemblableMotionPrompt | undefined {
+  if (isCurrent) return current ?? undefined;
+  return version ? motionPromptFromVersion(version) : undefined;
+}

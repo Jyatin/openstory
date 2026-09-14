@@ -5,21 +5,30 @@
  * The render unit is the **segment** (a contiguous shot-subset of one scene),
  * not the shot: a scene is tiled into ≤cap segments (`render_segments`) and each
  * segment's video accumulates versions in `video_variants`, with the segment's
- * `selectedVideoVersionId` pointing at the chosen one. Per-shot rendering is the
- * degenerate one-shot-per-segment case that's true for every scene today (the
- * analysis pipeline still emits one shot per scene), so this view degrades to
- * "one segment == one shot" until multi-shot analysis (#910) lands.
+ * `selectedVideoVersionId` pointing at the chosen one. Persisted
+ * `renderSegmentId` groups are the clip; unrendered runs are tiled as a
+ * generate preview. 1:1 is only the leftover / Grok / incapable-model case.
  *
  * `SequenceSegment` is what `getSequenceSegmentsFn` returns; membership
  * (`shotIds`) is authoritative and ordered. The UI groups its already-loaded
- * shots into segments via {@link groupShotsBySegment} and looks the video data
- * up by segment id.
+ * shots via {@link groupShotsForSceneList} (persisted clips + a generate
+ * preview of unrendered runs) and looks the video data up by segment id.
  */
 
+import {
+  videoModelSupportsInClipMultiShot,
+  type ImageToVideoModel,
+} from '@/models/models';
+import { durationGridForModel } from '@/motion/model-capabilities';
+import {
+  DEFAULT_SEGMENT_CAP_MS,
+  tileSceneIntoSegments,
+} from '@/motion/tile-segments';
 import type {
   VideoManifestEntry,
   VideoVariant,
 } from '@/platform/server/db/schema';
+import { durationSecondsOf } from './packed-clip-window';
 import type { ShotView } from './shot-view';
 
 /** One video render (version) of a segment, trimmed to what the editor shows. */
@@ -62,12 +71,22 @@ export type SequenceSegment = {
 /**
  * A contiguous run of scoped shots that share one segment. `segment` is null for
  * shots not yet assigned to a segment (never rendered) — each such shot is its
- * own singleton group so the strip still accounts for it.
+ * own singleton group so the strip still accounts for it, unless
+ * {@link groupShotsForSceneList} tiles a planned pack onto them.
  */
 export type SegmentGroup = {
   segmentId: string | null;
   segment: SequenceSegment | null;
   shots: ShotView[];
+  /**
+   * Generate-picker model when this wrap is a packing preview, not a
+   * persisted clip. Set on 2+ unrendered shots that fit under the cap, and
+   * on a 1-shot leftover (sum < model min) so the strip can show the
+   * snap/Grok dropdown.
+   */
+  plannedModel?: ImageToVideoModel;
+  /** Planned pack whose sum is under the model floor. */
+  belowMin?: true;
 };
 
 /**
@@ -103,6 +122,74 @@ export function groupShotsBySegment(
   }
 
   return groups;
+}
+
+/**
+ * Shot-list grouping: persisted render segments stay as they are; contiguous
+ * unrendered shots are tiled with the generate-picker model so the strip can
+ * preview the next pack (#1510). Grok stays unwrapped. A 1-shot tile that
+ * meets min stays flat; a 1-shot leftover is wrapped so the strip can offer
+ * snap vs Grok. A run that already has a `renderSegmentId` is never re-tiled
+ * — the existing clip's membership wins until a new render lands.
+ */
+export function groupShotsForSceneList(
+  shots: readonly ShotView[],
+  segmentsById: ReadonlyMap<string, SequenceSegment>,
+  videoModel: ImageToVideoModel
+): SegmentGroup[] {
+  const persisted = groupShotsBySegment(shots, segmentsById);
+  if (!videoModelSupportsInClipMultiShot(videoModel)) return persisted;
+
+  const grid = durationGridForModel(videoModel);
+  const capMs =
+    grid.length > 0 ? Math.max(...grid) * 1000 : DEFAULT_SEGMENT_CAP_MS;
+  const minMs = grid.length > 0 ? Math.min(...grid) * 1000 : 0;
+  const out: SegmentGroup[] = [];
+  let pending: ShotView[] = [];
+
+  const flushPending = () => {
+    if (pending.length === 0) return;
+    const tiles = tileSceneIntoSegments(
+      pending.map((shot) => ({
+        id: shot.id,
+        durationMs: Math.round(durationSecondsOf(shot.durationMs) * 1000),
+      })),
+      capMs,
+      minMs
+    );
+    const byId = new Map(pending.map((shot) => [shot.id, shot]));
+    for (const tile of tiles) {
+      const members = tile.shotIds.flatMap((id) => {
+        const member = byId.get(id);
+        return member ? [member] : [];
+      });
+      if (members.length === 0) continue;
+      const leftover = tile.belowMin === true;
+      out.push(
+        members.length > 1 || leftover
+          ? {
+              segmentId: null,
+              segment: null,
+              shots: members,
+              plannedModel: videoModel,
+              ...(leftover ? { belowMin: true as const } : {}),
+            }
+          : { segmentId: null, segment: null, shots: members }
+      );
+    }
+    pending = [];
+  };
+
+  for (const group of persisted) {
+    if (group.segmentId === null) {
+      pending.push(...group.shots);
+      continue;
+    }
+    flushPending();
+    out.push(group);
+  }
+  flushPending();
+  return out;
 }
 
 /**

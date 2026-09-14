@@ -18,7 +18,22 @@ import type { Shot } from '@/platform/server/db/schema';
 import { zodValidator } from '@tanstack/zod-adapter';
 import { z } from 'zod';
 
-import { AUDIO_MODELS } from '@/models/models';
+import {
+  AUDIO_MODELS,
+  DEFAULT_VIDEO_MODEL,
+  IMAGE_TO_VIDEO_MODELS,
+  safeImageToVideoModel,
+  videoModelSupportsInClipMultiShot,
+} from '@/models/models';
+import {
+  assemblePackedMotionPrompt,
+  packedPromptFitsLimit,
+  packedSceneFromScene,
+} from '@/motion/server/assemble-motion-prompt';
+import {
+  coveredMembersForShot,
+  packPayloadDurationSeconds,
+} from '@/motion/server/pack-motion-jobs';
 import { canRenderReferenceOnly } from '@/motion/server/motion-generation';
 import { toWorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import { REFERENCE_ONLY_MODEL_ERROR } from '@/sequences/server/sequence.schemas';
@@ -121,6 +136,109 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
       selectedVersionModel: selectedVersion?.model,
       sequenceModel: sequence.videoModel,
     });
+    // Same tiling the Optimised prompt preview uses (#1510): Generate
+    // Motion on one shot submits every sibling that clip covers. Persisted
+    // renderSegmentId membership is sticky (regenerate a 4-shot clip stays
+    // 4); prompt length can only shrink a tile, never grow it.
+    const sceneShots =
+      shot.sceneId && videoModelSupportsInClipMultiShot(model)
+        ? (await context.scopedDb.shots.listBySequence(sequence.id)).filter(
+            (row) => row.sceneId === shot.sceneId
+          )
+        : [shot];
+    const sceneMotionByShot =
+      sceneShots.length > 1
+        ? await context.scopedDb.shotPromptVersions.getSelectedMotionByShots(
+            sceneShots.map((row) => row.id)
+          )
+        : new Map();
+    const packedScene = packedSceneFromScene(context.scene);
+    const packableSceneShots = sceneShots.map((row) => ({
+      ...row,
+      shotId: row.id,
+      duration: packPayloadDurationSeconds(row.durationMs),
+      model,
+    }));
+    const promptFitsPacked = (
+      members: readonly (typeof packableSceneShots)[number][]
+    ) =>
+      packedPromptFitsLimit(
+        assemblePackedMotionPrompt({
+          shots: members.map((member) => {
+            const version = sceneMotionByShot.get(member.shotId);
+            return {
+              durationSeconds: resolveShotDuration({
+                durationMs: member.durationMs,
+                model,
+              }),
+              motionPrompt:
+                member.shotId === shot.id && data.prompt
+                  ? {
+                      fullPrompt: data.prompt,
+                      dialogue: version?.dialogue ?? null,
+                      audio: version?.audio ?? null,
+                    }
+                  : version
+                    ? motionPromptFromVersion(version)
+                    : undefined,
+              characterTags: context.scene?.continuity?.characterTags,
+            };
+          }),
+          model,
+          generateAudio: data.generateAudio,
+          scene: packedScene,
+        }),
+        IMAGE_TO_VIDEO_MODELS[model].maxPromptLength
+      );
+    const covered = coveredMembersForShot(
+      packableSceneShots,
+      shot.id,
+      [model],
+      { promptFits: promptFitsPacked }
+    );
+    const stickyId = covered[0]?.renderSegmentId ?? null;
+    if (
+      covered.length > 1 &&
+      stickyId &&
+      covered.every((member) => member.renderSegmentId === stickyId) &&
+      !promptFitsPacked(covered)
+    ) {
+      const config = IMAGE_TO_VIDEO_MODELS[model];
+      throw new Error(
+        `This ${covered.length}-shot clip's prompt exceeds ${config.name}'s ${config.maxPromptLength}-character limit. Shorten a shot prompt to generate it as one clip.`
+      );
+    }
+    const packedShotIds = covered.map((row) => row.shotId);
+    const firstMember = covered[0] ?? {
+      ...shot,
+      shotId: shot.id,
+      duration: packPayloadDurationSeconds(shot.durationMs),
+      model,
+    };
+    const anyReferenceOnly = covered.some((row) =>
+      rendersReferenceOnly(row, sequence)
+    );
+    const firstReferenceOnly = rendersReferenceOnly(firstMember, sequence);
+    let firstImageUrl = imageUrl;
+    let firstFrameVersionId = selectedStill?.id ?? null;
+    if (firstMember.shotId !== shot.id) {
+      if (firstReferenceOnly) {
+        firstImageUrl = undefined;
+        firstFrameVersionId = null;
+      } else {
+        const firstFrame = await context.scopedDb.frames.getAnchorByShot(
+          firstMember.shotId
+        );
+        const firstStill = firstFrame
+          ? await context.scopedDb.frameVariants.getSelected(firstFrame.id)
+          : null;
+        if (!firstStill?.url) {
+          throw new Error('Shot has no thumbnail to generate motion from');
+        }
+        firstImageUrl = firstStill.url;
+        firstFrameVersionId = firstStill.id;
+      }
+    }
     if (
       referenceOnly &&
       !(await canRenderReferenceOnly(
@@ -205,7 +323,7 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
           .then((rows) => withMeasuredDurations(context.scopedDb, rows)),
         // Reference-only additionally needs the location sheet: with no still,
         // it is the only thing establishing the set.
-        referenceOnly
+        anyReferenceOnly
           ? context.scopedDb.sequenceLocations.listWithReferences(sequence.id)
           : Promise.resolve([]),
       ]);
@@ -235,9 +353,16 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
     // unsnapped value (e.g. legacy `durationMs` from a different model) gets
     // priced at the raw seconds while the workflow bills against the snapped
     // value, leaving the two paths inconsistent.
+    const editorialMs = covered.reduce((sum, member) => {
+      const ms = member.durationMs;
+      return (
+        sum +
+        (typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : 3000)
+      );
+    }, 0);
     const duration = resolveShotDuration({
-      explicit: data.duration,
-      durationMs: shot.durationMs,
+      explicit: covered.length > 1 ? undefined : data.duration,
+      durationMs: editorialMs,
       model,
     });
 
@@ -245,7 +370,17 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
       ? voicedDialogueLines(selectedMotion?.dialogue, voiceCharacters)
       : [];
     const audioClips = matchingDialogueClips(shot.audioClips, voicedLines);
-    const ttsChars = audioClips.length > 0 ? 0 : ttsCharacterCount(voicedLines);
+    const ttsChars =
+      (audioClips.length > 0 ? 0 : ttsCharacterCount(voicedLines)) +
+      covered.reduce((sum, member) => {
+        if (member.shotId === shot.id || !modelTakesDialogueAudio(model)) {
+          return sum;
+        }
+        const version = sceneMotionByShot.get(member.shotId);
+        const lines = voicedDialogueLines(version?.dialogue, voiceCharacters);
+        const clips = matchingDialogueClips(member.audioClips, lines);
+        return sum + (clips.length > 0 ? 0 : ttsCharacterCount(lines));
+      }, 0);
 
     const reservationId = await reserveRunCredits(
       context.scopedDb,
@@ -255,7 +390,7 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
             pricing: await getEffectiveFalPricing(),
             resolution: sequence.resolution,
             hasReferenceImages: referenceImages.length > 0,
-            referenceOnly,
+            referenceOnly: firstReferenceOnly,
           }),
           { model, operation: 'motion' }
         ),
@@ -291,47 +426,145 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
             })
           : undefined;
 
+        const attachSceneHeader = sceneShots.length > 1;
+        const clickedPayload = {
+          shotId: shot.id,
+          sceneId: shot.sceneId,
+          renderSegmentId: shot.renderSegmentId,
+          packedScene,
+          attachSceneHeader,
+          imageUrl: firstMember.shotId === shot.id ? firstImageUrl : imageUrl,
+          referenceOnly,
+          frameVersionId:
+            firstMember.shotId === shot.id
+              ? firstFrameVersionId
+              : (selectedStill?.id ?? null),
+          motionPromptVersionId: selectedMotion?.id ?? null,
+          prompt,
+          model,
+          duration: packPayloadDurationSeconds(shot.durationMs),
+          fps: data.fps,
+          motionBucket: data.motionBucket,
+          aspectRatio: sequence.aspectRatio,
+          resolution: sequence.resolution,
+          generateAudio: data.generateAudio,
+          sceneTitle: context.scene?.metadata?.title,
+          sequenceTitle: sequence.title,
+          userEditProvenance,
+          userEditText: userEditProvenance ? data.prompt : undefined,
+          priorMotion: userEditProvenance
+            ? {
+                dialogue: selectedMotion?.dialogue ?? null,
+                audio: selectedMotion?.audio ?? null,
+              }
+            : undefined,
+          referenceImages,
+          voicedLines,
+          audioClips: audioClips.length > 0 ? audioClips : undefined,
+          motionPrompt: selectedMotion
+            ? motionPromptFromVersion(selectedMotion)
+            : undefined,
+          characterTags: context.scene?.continuity?.characterTags,
+        };
+
+        const siblingPayloads = await Promise.all(
+          covered
+            .filter((member) => member.shotId !== shot.id)
+            .map(async (member) => {
+              const version = sceneMotionByShot.get(member.shotId);
+              const memberReferenceOnly = rendersReferenceOnly(
+                member,
+                sequence
+              );
+              const memberPrompt = resolveMotionPromptFromVersion(
+                version,
+                {
+                  characterTags: context.scene?.continuity?.characterTags,
+                  description: context.scene?.originalScript.extract ?? null,
+                  generateAudio: data.generateAudio,
+                },
+                model
+              );
+              const memberVoiced = modelTakesDialogueAudio(model)
+                ? voicedDialogueLines(version?.dialogue, voiceCharacters)
+                : [];
+              const isFirst = member.shotId === firstMember.shotId;
+              let memberImageUrl: string | undefined;
+              let memberFrameVersionId: string | null = null;
+              if (isFirst) {
+                memberImageUrl = firstImageUrl;
+                memberFrameVersionId = firstFrameVersionId;
+              } else if (!memberReferenceOnly) {
+                const memberFrame =
+                  await context.scopedDb.frames.getAnchorByShot(member.shotId);
+                const memberStill = memberFrame
+                  ? await context.scopedDb.frameVariants.getSelected(
+                      memberFrame.id
+                    )
+                  : null;
+                memberImageUrl = memberStill?.url ?? undefined;
+                memberFrameVersionId = memberStill?.id ?? null;
+              }
+              return {
+                shotId: member.shotId,
+                sceneId: member.sceneId,
+                renderSegmentId: member.renderSegmentId,
+                packedScene,
+                attachSceneHeader,
+                imageUrl: memberImageUrl,
+                referenceOnly: memberReferenceOnly,
+                frameVersionId: memberFrameVersionId,
+                motionPromptVersionId: version?.id ?? null,
+                prompt: memberPrompt,
+                model,
+                duration: packPayloadDurationSeconds(member.durationMs),
+                fps: data.fps,
+                motionBucket: data.motionBucket,
+                aspectRatio: sequence.aspectRatio,
+                resolution: sequence.resolution,
+                generateAudio: data.generateAudio,
+                sceneTitle: context.scene?.metadata?.title,
+                sequenceTitle: sequence.title,
+                referenceImages: buildMotionReferenceImages({
+                  scene: context.scene
+                    ? { ...context.scene, continuity: effectiveContinuity }
+                    : null,
+                  characters,
+                  elements,
+                  motionPrompt: memberPrompt,
+                  referenceOnly: memberReferenceOnly,
+                  locations,
+                }),
+                voicedLines: memberVoiced,
+                audioClips: matchingDialogueClips(
+                  member.audioClips,
+                  memberVoiced
+                ),
+                motionPrompt: version
+                  ? motionPromptFromVersion(version)
+                  : undefined,
+                characterTags: context.scene?.continuity?.characterTags,
+              };
+            })
+        );
+
+        const shotsById = new Map(
+          [clickedPayload, ...siblingPayloads].map((payload) => [
+            payload.shotId,
+            payload,
+          ])
+        );
         const workflowInput: BatchMotionMusicWorkflowInput = {
           userId: context.user.id,
           teamId,
           sequenceId: sequence.id,
           reservationId,
           includeMusic: false,
-          shots: [
-            {
-              shotId: shot.id,
-              sceneId: shot.sceneId,
-              imageUrl,
-              referenceOnly,
-              frameVersionId: selectedStill?.id ?? null,
-              motionPromptVersionId: selectedMotion?.id ?? null,
-              prompt,
-              model,
-              duration,
-              fps: data.fps,
-              motionBucket: data.motionBucket,
-              aspectRatio: sequence.aspectRatio,
-              resolution: sequence.resolution,
-              generateAudio: data.generateAudio,
-              sceneTitle: context.scene?.metadata?.title,
-              sequenceTitle: sequence.title,
-              userEditProvenance,
-              userEditText: userEditProvenance ? data.prompt : undefined,
-              priorMotion: userEditProvenance
-                ? {
-                    dialogue: selectedMotion?.dialogue ?? null,
-                    audio: selectedMotion?.audio ?? null,
-                  }
-                : undefined,
-              referenceImages,
-              voicedLines,
-              audioClips: audioClips.length > 0 ? audioClips : undefined,
-              motionPrompt: selectedMotion
-                ? motionPromptFromVersion(selectedMotion)
-                : undefined,
-              characterTags: context.scene?.continuity?.characterTags,
-            },
-          ],
+          videoModels: [model],
+          shots: packedShotIds.flatMap((id) => {
+            const payload = shotsById.get(id);
+            return payload ? [payload] : [];
+          }),
         };
 
         const workflowRunId = await triggerWorkflow(
@@ -342,7 +575,7 @@ export const generateShotMotionFn = createServerFn({ method: 'POST' })
           }
         );
 
-        return { workflowRunId, shotId: shot.id };
+        return { workflowRunId, shotId: shot.id, packedShotIds };
       }
     );
   });
@@ -363,6 +596,7 @@ const batchGenerateMotionInputSchema = z.object({
   fps: generateMotionSchema.shape.fps,
   motionBucket: generateMotionSchema.shape.motionBucket,
   generateAudio: generateMotionSchema.shape.generateAudio,
+  leftoverGrokShotIds: z.array(ulidSchema).optional(),
 });
 
 export const batchGenerateMotionFn = createServerFn({ method: 'POST' })
@@ -455,8 +689,11 @@ export const batchGenerateMotionFn = createServerFn({ method: 'POST' })
       ),
     ]);
     const shotModels = { selected, lastFailed };
+    const leftoverGrok = new Set(data.leftoverGrokShotIds ?? []);
     const resolveShotVideoModel = (shot: (typeof allShots)[number]) =>
-      resolveBatchShotVideoModel(shot, shotModels, sequence, data.model);
+      leftoverGrok.has(shot.id)
+        ? 'grok_imagine_video_1_5'
+        : resolveBatchShotVideoModel(shot, shotModels, sequence, data.model);
 
     // Resolve cast/element reference images once for the whole batch (#873) —
     // before credit pre-flight so Seedance prices the reference-to-video
@@ -649,12 +886,16 @@ export const batchGenerateMotionFn = createServerFn({ method: 'POST' })
           };
         }
 
+        const packingModel =
+          data.model ??
+          safeImageToVideoModel(sequence.videoModel, DEFAULT_VIDEO_MODEL);
         const workflowInput: BatchMotionMusicWorkflowInput = {
           userId: user.id,
           teamId,
           sequenceId: sequence.id,
           reservationId,
           includeMusic,
+          videoModels: [packingModel],
           shots: eligibleShots.map((shot) => {
             const shotModel = resolveShotVideoModel(shot);
             const scene = sceneOf(shot);
@@ -665,6 +906,12 @@ export const batchGenerateMotionFn = createServerFn({ method: 'POST' })
             return {
               shotId: shot.id,
               sceneId: shot.sceneId,
+              renderSegmentId: shot.renderSegmentId,
+              packedScene: packedSceneFromScene(scene),
+              attachSceneHeader:
+                !!shot.sceneId &&
+                allShots.filter((row) => row.sceneId === shot.sceneId).length >
+                  1,
               // Reference-only carries no still; every other shot passed the
               // eligibility filter above, which requires one.
               imageUrl: shotIsReferenceOnly(shot)

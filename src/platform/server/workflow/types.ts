@@ -330,6 +330,14 @@ export interface StoryboardWorkflowInput extends SequenceWorkflowContext {
    * off.
    */
   generateVoices?: boolean;
+  /**
+   * Shot ids the user routed to Grok on leftover packs (sum under the
+   * packing model's min). Snap-to-min is the default; this is the
+   * stop-and-pick override. Omitted when the leftover dropdown is not
+   * used (storyboard / don't-stop generate); those packs snap up to the
+   * model min.
+   */
+  leftoverGrokShotIds?: string[];
 }
 
 /**
@@ -409,6 +417,8 @@ export interface AnalyzeScriptWorkflowInput extends SequenceWorkflowContext {
   referenceOnly: boolean;
   /** @see StoryboardWorkflowInput.generateVoices — passed straight through. */
   generateVoices?: boolean;
+  /** @see StoryboardWorkflowInput.leftoverGrokShotIds — passed straight through. */
+  leftoverGrokShotIds?: string[];
 }
 
 /**
@@ -502,8 +512,11 @@ export interface DialogueAudioWorkflowResult {
 export interface MotionWorkflowInput extends SequenceWorkflowContext {
   shotId?: string;
   /**
-   * The shot's scene, pinned at the trigger. Optional only until every trigger
-   * threads it — absent falls back to reading the shot.
+   * The shot's scene, pinned at the trigger. Storyboard pins the analysis
+   * ULID (packing key); Generate pins live `scenes.id`. `render_segments.sceneId`
+   * must be the live FK — see MotionWorkflow's ensureForShots comment.
+   * Optional only until every trigger threads it — absent falls back to
+   * reading the shot.
    */
   sceneId?: string | null;
   /**
@@ -621,7 +634,52 @@ export interface MotionWorkflowInput extends SequenceWorkflowContext {
    * primary video. Promotion happens later via an explicit "Set".
    */
   variantOnly?: boolean;
+  /**
+   * In-clip multi-shot (#1510). When this generation covers several shots of
+   * one scene, these are the members in story order. Shot 1 still anchors
+   * i2v (`imageUrl` / `referenceOnly` on this payload). Absent on 1-shot jobs.
+   */
+  coveredShots?: PackedMotionCoveredShot[];
+  /**
+   * Scene look for the packed prompt header (environment first, once).
+   * Snapshotted at the trigger — the run must not re-read the scene.
+   */
+  packedScene?: PackedMotionSceneHeader;
+  /**
+   * This shot belongs to a 2+ shot scene. A 1-shot job (Grok, or a tile
+   * that did not pack) still prepends the packed environment so lighting /
+   * palette / look are not lost when the stored body is framing+action only.
+   */
+  attachSceneHeader?: boolean;
+  /**
+   * Kling v3 packed `multi_prompt[]`. When set, submit sends this instead of
+   * `prompt`. Re-assembled after dialogue TTS the same way `prompt` is.
+   */
+  multiPrompt?: Array<{ prompt: string; duration: string }>;
 }
+
+/** Scene look stated once at the top of a packed in-clip prompt (#1510). */
+type PackedMotionSceneHeader = {
+  location?: string | null;
+  timeOfDay?: string | null;
+  lightingSetup?: string | null;
+  colorPalette?: string | null;
+  look?: string | null;
+};
+
+/** One member of a packed in-clip generation (#1510). */
+type PackedMotionCoveredShot = {
+  shotId: string;
+  duration?: number;
+  motionPrompt?: AssemblableMotionPrompt;
+  motionPromptVersionId?: string | null;
+  frameVersionId?: string | null;
+  referenceOnly: boolean;
+  audioClips?: MotionAudioClip[];
+  voicedLines?: VoicedDialogueLine[];
+  prompt?: string;
+  characterTags?: string[];
+};
 
 /**
  * Character sheet generation workflow input
@@ -1447,6 +1505,12 @@ export interface BatchMotionMusicWorkflowInput extends SequenceWorkflowContext {
     shotId: string;
     /** See `MotionWorkflowInput.sceneId`. */
     sceneId?: string | null;
+    /** Persisted clip membership — packing keeps this group on regenerate. */
+    renderSegmentId?: string | null;
+    /** See `MotionWorkflowInput.packedScene`. */
+    packedScene?: PackedMotionSceneHeader;
+    /** See `MotionWorkflowInput.attachSceneHeader`. */
+    attachSceneHeader?: boolean;
     /** The start frame. Absent only when `referenceOnly` is set. */
     imageUrl?: string;
     /** See `MotionWorkflowInput.referenceOnly`. Required for the same reason. */
@@ -1500,6 +1564,8 @@ export interface BatchMotionMusicWorkflowInput extends SequenceWorkflowContext {
     voicedLines?: VoicedDialogueLine[];
     /** See `MotionWorkflowInput.audioClips`. */
     audioClips?: MotionAudioClip[];
+    /** See `MotionWorkflowInput.coveredShots`. */
+    coveredShots?: PackedMotionCoveredShot[];
   }>;
   /**
    * Video models to generate for every shot (#545). First is primary (its

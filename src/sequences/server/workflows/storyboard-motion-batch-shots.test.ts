@@ -67,6 +67,7 @@ describe('buildStoryboardMotionBatchShots', () => {
     expect(shots).toHaveLength(2);
     expect(shots[0]).toMatchObject({
       shotId: 'shot-1',
+      sceneId: 'sc-1',
       imageUrl: 'https://cdn/a.png',
       frameVersionId: 'fv-1',
       motionPromptVersionId: 'mpv-1',
@@ -188,6 +189,88 @@ describe('buildStoryboardMotionBatchShots', () => {
       frameVersionId: 'fv-1b',
       motionPromptVersionId: 'mpv-1b',
       duration: 6,
+    });
+  });
+
+  it('stamps leftoverGrokShotIds onto Grok at 1s, not the packing model', () => {
+    const shots = buildStoryboardMotionBatchShots({
+      scenes: [
+        scene('sc-1', 16, {
+          shots: [
+            {
+              shotNumber: 1,
+              framing: {
+                shotSize: 'wide',
+                angle: 'eye level',
+                composition: '',
+                subjectStartState: '',
+              },
+              action: 'opens the door',
+              cameraMovement: { move: 'static', pacing: 'slow' },
+              soundCue: '',
+              dialogue: [],
+              durationSeconds: 15,
+            },
+            {
+              shotNumber: 2,
+              framing: {
+                shotSize: 'medium',
+                angle: 'eye level',
+                composition: '',
+                subjectStartState: '',
+              },
+              action: 'a leftover beat',
+              cameraMovement: { move: 'static', pacing: 'slow' },
+              soundCue: '',
+              dialogue: [],
+              durationSeconds: 1,
+            },
+          ],
+        }),
+      ],
+      shotMapping: [
+        {
+          analysisSceneId: 'sc-1',
+          shotId: 'shot-1',
+          frameId: 'fr-1',
+          shotNumber: 1,
+        },
+        {
+          analysisSceneId: 'sc-1',
+          shotId: 'shot-1b',
+          frameId: 'fr-1b',
+          shotNumber: 2,
+        },
+      ],
+      imageUrls: ['https://cdn/a.png', 'https://cdn/b.png'],
+      frameVersionIds: ['fv-1', 'fv-1b'],
+      motionPromptsByShotId: {
+        'shot-1': prompt('opens the door'),
+        'shot-1b': prompt('a leftover beat'),
+      },
+      motionPromptVersionIdsByShotId: {
+        'shot-1': 'mpv-1',
+        'shot-1b': 'mpv-1b',
+      },
+      motionPromptsBySceneId: {},
+      motionPromptVersionIdsBySceneId: {},
+      videoModel: 'minimax_h3_max',
+      leftoverGrokShotIds: ['shot-1b'],
+      aspectRatio: '16:9',
+      characters: [],
+      elements: [],
+    });
+
+    expect(shots).toHaveLength(2);
+    expect(shots[0]).toMatchObject({
+      shotId: 'shot-1',
+      model: 'minimax_h3_max',
+      duration: 15,
+    });
+    expect(shots[1]).toMatchObject({
+      shotId: 'shot-1b',
+      model: 'grok_imagine_video_1_5',
+      duration: 1,
     });
   });
 

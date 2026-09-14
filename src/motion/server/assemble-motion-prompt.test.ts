@@ -7,7 +7,11 @@ import {
   DIALOGUE_CLIP_TOKEN,
   VIDEO_MODEL_VOICE_TOKEN,
 } from '@/motion/dialogue-tts';
-import { assembleMotionPrompt } from './assemble-motion-prompt';
+import {
+  assembleMotionPrompt,
+  assemblePackedMotionPrompt,
+  packedPromptFitsLimit,
+} from './assemble-motion-prompt';
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -274,6 +278,17 @@ describe('assembleMotionPrompt', () => {
         );
       });
 
+      it('drops the no-cuts pin when the clip is a packed multi-shot', () => {
+        const result = assembleMotionPrompt({
+          motionPrompt: makeMotionPrompt(),
+          model,
+          singleTake: false,
+        });
+
+        expect(result).toContain('No BGM, no music.');
+        expect(result).not.toContain('Single continuous shot, no cuts.');
+      });
+
       it('adds the jitter guard only when the scene has characters', () => {
         const withCharacters = assembleMotionPrompt({
           motionPrompt: makeMotionPrompt(),
@@ -319,6 +334,25 @@ describe('assembleMotionPrompt', () => {
         model,
       });
 
+      expect(result).toBe(fullPromptText);
+    });
+  });
+
+  describe('Gemini Omni Flash (oner pin)', () => {
+    it('pins a 1-shot clip as a single unbroken scene', () => {
+      const result = assembleMotionPrompt({
+        motionPrompt: makeMotionPrompt(),
+        model: 'gemini_omni_flash',
+      });
+      expect(result).toBe(`${fullPromptText}\n\nSingle unbroken scene.`);
+    });
+
+    it('does not pin a packed multi-shot', () => {
+      const result = assembleMotionPrompt({
+        motionPrompt: makeMotionPrompt(),
+        model: 'gemini_omni_flash',
+        singleTake: false,
+      });
       expect(result).toBe(fullPromptText);
     });
   });
@@ -464,5 +498,207 @@ describe('assembleMotionPrompt', () => {
 
       expect(result).not.toContain('No BGM');
     });
+  });
+
+  it('attachSceneHeader prepends environment without repeating it in the body', () => {
+    const result = assembleMotionPrompt({
+      motionPrompt: makeMotionPrompt({
+        fullPrompt: 'opens the door',
+        dialogue: { presence: false, lines: [] },
+        audio: { ambientSound: '', soundEffects: [] },
+      }),
+      model: 'minimax_h3_max',
+      attachSceneHeader: true,
+      scene: {
+        lightingSetup: 'single overhead bulb',
+        colorPalette: 'cold blues',
+      },
+    });
+    expect(result).toMatch(/^single overhead bulb\. cold blues\./);
+    expect(result).toContain('opens the door');
+    expect(result.split('single overhead bulb').length).toBe(2);
+  });
+});
+
+describe('assemblePackedMotionPrompt', () => {
+  const shot = (
+    fullPrompt: string,
+    durationSeconds: number
+  ): {
+    durationSeconds: number;
+    motionPrompt: MotionPrompt;
+  } => ({
+    durationSeconds,
+    motionPrompt: {
+      fullPrompt,
+      dialogue: { presence: false, lines: [] },
+      audio: { ambientSound: '', soundEffects: [] },
+    },
+  });
+
+  it('a 1-shot list is the existing single-take Seedance path', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4)],
+      model: 'seedance_v2',
+    });
+    expect(packed.prompt).toContain('Single continuous shot, no cuts.');
+    expect(packed.multiPrompt).toBeUndefined();
+  });
+
+  it('a 1-shot sibling of a packed scene prepends environment once', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [
+        {
+          ...shot('opens the door', 4),
+          attachSceneHeader: true,
+        },
+      ],
+      model: 'minimax_h3_max',
+      scene: {
+        lightingSetup: 'single overhead bulb',
+        colorPalette: 'cold blues',
+      },
+    });
+    expect(packed.prompt).toMatch(/^single overhead bulb\. cold blues\./);
+    expect(packed.prompt).toContain('opens the door');
+    expect(packed.prompt.split('single overhead bulb').length).toBe(2);
+  });
+
+  it('Seedance 2.0 packs with Shot N prose and cut to, no oner pin', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'seedance_v2',
+    });
+    expect(packed.prompt).toContain('Shot 1: opens the door');
+    expect(packed.prompt).toContain('cut to');
+    expect(packed.prompt).toContain('Shot 2: the hallway beyond');
+    expect(packed.prompt).not.toContain('Single continuous shot, no cuts.');
+  });
+
+  it('Seedance 2.5 packs Shot N (timestamps) as paragraphs, no cut to', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'seedance_v2_5',
+    });
+    expect(packed.prompt).toContain('Shot 1 (0-4s): opens the door');
+    expect(packed.prompt).toContain('Shot 2 (4-10s): the hallway beyond');
+    expect(packed.prompt).toContain(
+      'Shot 1 (0-4s): opens the door\n\nShot 2 (4-10s): the hallway beyond'
+    );
+    expect(packed.prompt).not.toContain('cut to');
+    expect(packed.prompt).toContain(
+      'No BGM; generate only environmental sounds and action sounds.'
+    );
+  });
+
+  it('H3 Max uses a timed shot list', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'minimax_h3_max',
+    });
+    expect(packed.prompt).toContain('Shot 1 (0-4s):');
+    expect(packed.prompt).toContain('Shot 2 (4-10s):');
+  });
+
+  it('Kling v3 returns multi_prompt with per-shot durations', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'kling_v3_pro',
+    });
+    expect(packed.multiPrompt).toEqual([
+      { prompt: expect.stringContaining('opens the door'), duration: '4' },
+      {
+        prompt: expect.stringContaining('the hallway beyond'),
+        duration: '6',
+      },
+    ]);
+  });
+
+  it('Omni Flash packed list has no oner pin', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'gemini_omni_flash',
+    });
+    expect(packed.prompt).toContain('Shot 1: opens the door');
+    expect(packed.prompt).toContain('cut to');
+    expect(packed.prompt).not.toContain('Single unbroken scene.');
+  });
+
+  it('states environment and clip-wide guards once, then short shot bodies', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [
+        {
+          ...shot('opens the door', 4),
+          characterTags: ['sarah'],
+        },
+        {
+          ...shot('the hallway beyond', 6),
+          characterTags: ['sarah'],
+        },
+      ],
+      model: 'seedance_v2_5',
+      scene: {
+        location: 'INT. HALLWAY - NIGHT',
+        lightingSetup: 'single overhead bulb',
+        look: 'neo-noir',
+      },
+    });
+    expect(packed.prompt).toMatch(
+      /^INT\. HALLWAY - NIGHT\. single overhead bulb\. neo-noir\./
+    );
+    expect(packed.prompt.split('No BGM').length).toBe(2);
+    expect(packed.prompt.split('Avoid jitter and bent limbs.').length).toBe(2);
+    expect(packed.prompt.indexOf('INT. HALLWAY')).toBeLessThan(
+      packed.prompt.indexOf('Shot 1 (')
+    );
+    expect(packed.prompt.indexOf('Shot 2 (')).toBeLessThan(
+      packed.prompt.indexOf('No BGM')
+    );
+    expect(packed.prompt).not.toContain('Single continuous shot, no cuts.');
+  });
+
+  it('puts the Kling header on the first multi_prompt element only', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'kling_v3_pro',
+      scene: { location: 'INT. HALLWAY - NIGHT' },
+    });
+    expect(packed.multiPrompt?.[0]?.prompt).toContain('INT. HALLWAY - NIGHT');
+    expect(packed.multiPrompt?.[0]?.prompt).toContain('No BGM');
+    expect(packed.multiPrompt?.[1]?.prompt).not.toContain('INT. HALLWAY');
+    expect(packed.multiPrompt?.[1]?.prompt).not.toContain('No BGM');
+    expect(packed.multiPrompt?.[1]?.prompt).toContain('the hallway beyond');
+  });
+
+  it('packedPromptFitsLimit leaves headroom under the model cap', () => {
+    const packed = assemblePackedMotionPrompt({
+      shots: [shot('opens the door', 4), shot('the hallway beyond', 6)],
+      model: 'seedance_v2_5',
+    });
+    expect(packedPromptFitsLimit(packed, 4096)).toBe(true);
+    expect(packedPromptFitsLimit(packed, packed.prompt.length)).toBe(false);
+  });
+
+  it('two reference-only derived bodies fit H3 Max with the scene header', () => {
+    const lighting =
+      'At dawn, cool natural light enters through the stairwell windows and mixes with weak interior light. At night, a warm bedside lamp and the cold glow of Mara’s phone illuminate the room before the lamp is switched off and the space falls into blue darkness.';
+    const palette =
+      'Muted gray, off-white, warm wood, faded black, and worn neutrals, with occasional saturated color from Mara’s artwork and paint marks.';
+    const packed = assemblePackedMotionPrompt({
+      shots: [
+        shot(
+          "extreme close-up, eye level, The alarm clock displays 5:59, buzzing beside the bed; Mara's hand is just outside frame. Mara slaps the alarm off as the digits flip to 6:00. Camera: smooth static",
+          5
+        ),
+        shot(
+          'medium close-up, eye level, Mara sits on the edge of the bed, paint-stained fingers braced beside her, face tense and sleep-deprived. Mara swings out of bed, grabs the clean hoodie, and pulls it over her head. Camera: smooth truck',
+          6
+        ),
+      ],
+      model: 'minimax_h3_max',
+      scene: { lightingSetup: lighting, colorPalette: palette },
+    });
+    expect(packedPromptFitsLimit(packed, 2500)).toBe(true);
+    expect(packed.prompt.split(lighting).length).toBe(2);
   });
 });

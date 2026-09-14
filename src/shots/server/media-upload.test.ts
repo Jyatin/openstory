@@ -12,7 +12,10 @@
  */
 
 import { DEFAULT_IMAGE_MODEL, safeTextToImageModel } from '@/models/models';
-import { computeVideoManifestInputHash } from '@/shots/input-hash';
+import {
+  computeVideoManifestInputHash,
+  shotImageInputHash,
+} from '@/shots/input-hash';
 import type { Scene } from '@/shots/scene-analysis.schema';
 import type { Database } from '@/platform/server/db/client';
 import { generateId } from '@/platform/id';
@@ -157,7 +160,7 @@ async function seedSelectedImage(inputHash: string) {
     url: '/r2/thumbnails/old.png',
     storagePath: 'old.png',
     generatedAt: new Date(),
-    inputHash,
+    inputHash: shotImageInputHash(inputHash),
   });
   await images.select(frameId, version.id, { actorId });
   return version;
@@ -190,6 +193,8 @@ async function seedSegmentAndVideo(frameVersionId: string) {
       frameVersionId,
       usesStartFrame: true,
       durationMs: 4000,
+      audioClipIds: [],
+      audioSourceKey: null,
     },
   ];
   const videos = createVideoVariantsMethods(db);
@@ -512,6 +517,8 @@ describe('§4.3 B — image-only upload (appendUploadedVersion + select)', () =>
         frameVersionId: uploaded.id,
         usesStartFrame: true,
         durationMs: 4000,
+        audioClipIds: [],
+        audioSourceKey: null,
       },
     ];
     expect(
@@ -770,6 +777,8 @@ describe('video upload (appendUploadedVersion + select)', () => {
         frameVersionId: still.id,
         usesStartFrame: true,
         durationMs: 4000,
+        audioClipIds: [],
+        audioSourceKey: null,
       },
     ];
     const inputHash = await computeVideoManifestInputHash(
@@ -819,6 +828,8 @@ describe('video upload (appendUploadedVersion + select)', () => {
         frameVersionId: nextStill.id,
         usesStartFrame: true,
         durationMs: 4000,
+        audioClipIds: [],
+        audioSourceKey: null,
       },
     ];
     expect(

@@ -23,6 +23,10 @@
 import type { Database } from '@/platform/server/db/client';
 import { generateId } from '@/platform/id';
 import {
+  motionPromptInputHash,
+  musicPromptInputHash,
+} from '@/shots/input-hash';
+import {
   shotPromptVersions,
   shots,
   sequenceMusicPromptVersions,
@@ -177,7 +181,6 @@ describe('shot_prompt_variants helper', () => {
       versionId: pending.id,
       shotId,
       text: 'animates the still',
-      inputHash: 'live-hash',
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     expect(completed?.usesStartFrame).toBe(true);
@@ -192,7 +195,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'User edited prompt',
       source: 'user-edit',
-      inputHash: 'hash-at-edit-time',
+      inputHash: motionPromptInputHash('hash-at-edit-time'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -214,7 +217,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v2',
       source: 'regenerated',
-      inputHash: 'context-hash-abc',
+      inputHash: motionPromptInputHash('context-hash-abc'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -239,7 +242,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     await methods.write({
@@ -280,7 +283,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: firstSource,
-      inputHash: 'hash-v1',
+      inputHash: motionPromptInputHash('hash-v1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -294,7 +297,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v2',
       source: secondSource,
-      inputHash: 'hash-v2',
+      inputHash: motionPromptInputHash('hash-v2'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -331,7 +334,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -341,7 +344,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -366,7 +369,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -376,7 +379,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Fresh LLM completion against same inputs',
       source: 'regenerated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -413,7 +416,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -423,7 +426,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'regenerated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -447,7 +450,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Handheld push-in on Mateo.',
       source: 'user-edit' as const,
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: null,
     };
 
@@ -491,7 +494,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI v1',
       source: 'ai-generated',
-      inputHash: 'hash-a',
+      inputHash: motionPromptInputHash('hash-a'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     await methods.write({
@@ -500,7 +503,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI v2',
       source: 'regenerated',
-      inputHash: 'hash-b',
+      inputHash: motionPromptInputHash('hash-b'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -528,7 +531,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'belongs to shot A',
       source: 'ai-generated',
-      inputHash: 'hash-A',
+      inputHash: motionPromptInputHash('hash-A'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -554,7 +557,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -618,7 +621,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'User prompt',
       source: 'user-edit',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -664,7 +667,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt v1',
       source: 'ai-generated',
-      inputHash: 'context-hash-1',
+      inputHash: motionPromptInputHash('context-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -728,7 +731,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'AI prompt',
       source: 'ai-generated',
-      inputHash: 'ai-hash-1',
+      inputHash: motionPromptInputHash('ai-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     // 2) A later user-edit with no upstream context (null hash).
@@ -760,7 +763,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Selected motion prompt',
       source: 'ai-generated',
-      inputHash: 'sel-hash-1',
+      inputHash: motionPromptInputHash('sel-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -788,7 +791,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Motion v1',
       source: 'ai-generated',
-      inputHash: 'hash-1',
+      inputHash: motionPromptInputHash('hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     await methods.write({
@@ -797,7 +800,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Motion v2',
       source: 'regenerated',
-      inputHash: 'hash-2',
+      inputHash: motionPromptInputHash('hash-2'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -823,7 +826,7 @@ describe('shot_prompt_variants helper', () => {
       usesStartFrame: true,
       text: 'Foreign motion prompt',
       source: 'ai-generated',
-      inputHash: 'foreign-hash',
+      inputHash: motionPromptInputHash('foreign-hash'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -848,16 +851,60 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'Regenerated motion prompt',
-      inputHash: 'live-hash',
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
     expect(completed?.id).toBe(claim.id);
     expect(completed?.status).toBe('completed');
+    expect(completed?.inputHash).toBe('live-hash');
 
     const selected = await selectedMotionVersion();
     expect(selected?.id).toBe(claim.id);
     expect(selected?.text).toBe('Regenerated motion prompt');
+  });
+
+  it('persists the claim pendingInputHash, not a caller-supplied digest (#1616)', async () => {
+    const m = createShotPromptVersionsMethods(db);
+    const claim = await m.createPending({
+      usesStartFrame: true,
+      shotId,
+      pendingInputHash: 'verify-hash-at-trigger',
+    });
+    await m.markGenerating(claim.id, 'run-1');
+
+    const completed = await m.completePendingAiVersion({
+      usesStartFrame: true,
+      versionId: claim.id,
+      shotId,
+      text: 'Regenerated motion prompt',
+      analysisModel: 'anthropic/claude-haiku-4.5',
+      inputHash: motionPromptInputHash('voiceless-payload-recompute'),
+    });
+
+    expect(completed?.inputHash).toBe('verify-hash-at-trigger');
+  });
+
+  it('refuses to complete a row with no pendingInputHash', async () => {
+    const m = createShotPromptVersionsMethods(db);
+    const written = await m.write({
+      shotId,
+      promptType: 'motion',
+      usesStartFrame: true,
+      text: 'already complete',
+      source: 'ai-generated',
+      inputHash: motionPromptInputHash('hash-1'),
+      analysisModel: 'anthropic/claude-haiku-4.5',
+    });
+
+    await expect(
+      m.completePendingAiVersion({
+        usesStartFrame: true,
+        versionId: written.id,
+        shotId,
+        text: 'should not land',
+        analysisModel: 'anthropic/claude-haiku-4.5',
+      })
+    ).rejects.toThrow(/no pendingInputHash/);
   });
 
   it('a post-click user edit keeps the selection — the run completes to history only', async () => {
@@ -884,7 +931,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'Older run output',
-      inputHash: 'other-hash',
+      inputHash: motionPromptInputHash('live-hash'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -905,7 +952,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       usesStartFrame: true,
       text: 'Original',
       source: 'ai-generated',
-      inputHash: 'hash-0',
+      inputHash: motionPromptInputHash('hash-0'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     const claim = await m.createPending({
@@ -921,7 +968,6 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'Should be discarded',
-      inputHash: 'live-hash',
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -943,7 +989,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       usesStartFrame: true,
       text: 'Same output',
       source: 'ai-generated',
-      inputHash: 'hash-1',
+      inputHash: motionPromptInputHash('hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     const claim = await m.createPending({
@@ -958,7 +1004,6 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'Same output',
-      inputHash: 'hash-1',
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -983,7 +1028,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       usesStartFrame: true,
       text: 'Old output',
       source: 'ai-generated',
-      inputHash: 'hash-1',
+      inputHash: motionPromptInputHash('hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     const claim = await m.createPending({
@@ -998,7 +1043,6 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'New output',
-      inputHash: 'hash-1',
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1020,7 +1064,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       usesStartFrame: true,
       text: 'Original motion',
       source: 'ai-generated',
-      inputHash: 'hash-0',
+      inputHash: motionPromptInputHash('hash-0'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
     const claim = await m.createPending({
@@ -1043,7 +1087,7 @@ describe('shotPromptVersions.completePendingAiVersion', () => {
       versionId: claim.id,
       shotId,
       text: 'Would clobber restore',
-      inputHash: 'live-hash',
+      inputHash: motionPromptInputHash('live-hash'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1097,7 +1141,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music v1',
       tags: 'epic',
       source: firstSource,
-      inputHash: 'music-hash-v1',
+      inputHash: musicPromptInputHash('music-hash-v1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1110,7 +1154,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music v2',
       tags: 'epic,driving',
       source: secondSource,
-      inputHash: 'music-hash-v2',
+      inputHash: musicPromptInputHash('music-hash-v2'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1137,7 +1181,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music',
       tags: 'epic',
       source: 'ai-generated',
-      inputHash: 'music-hash-1',
+      inputHash: musicPromptInputHash('music-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1146,7 +1190,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music',
       tags: 'epic',
       source: 'ai-generated',
-      inputHash: 'music-hash-1',
+      inputHash: musicPromptInputHash('music-hash-1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1164,7 +1208,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music v2',
       tags: 'epic',
       source: 'regenerated',
-      inputHash: 'music-context-hash',
+      inputHash: musicPromptInputHash('music-context-hash'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1201,7 +1245,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'belongs to sequence A',
       tags: 'epic',
       source: 'ai-generated',
-      inputHash: 'music-hash-A',
+      inputHash: musicPromptInputHash('music-hash-A'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 
@@ -1226,7 +1270,7 @@ describe('sequence_music_prompt_variants helper', () => {
       prompt: 'AI music v1',
       tags: 'epic',
       source: 'ai-generated',
-      inputHash: 'music-hash-v1',
+      inputHash: musicPromptInputHash('music-hash-v1'),
       analysisModel: 'anthropic/claude-haiku-4.5',
     });
 

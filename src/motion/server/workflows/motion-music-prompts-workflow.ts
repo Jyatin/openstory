@@ -54,7 +54,7 @@ export class MotionMusicPromptsWorkflow extends OpenStoryWorkflowEntrypoint<Moti
       shotMapping,
       startingFrameImageUrls,
       visualSummaryBySceneId,
-      referenceOnly = false,
+      referenceOnly,
     } = input;
 
     // Snap durations against the primary video model. The structured motion

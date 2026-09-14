@@ -22,6 +22,13 @@ import type {
   Scene,
   VisualPrompt,
 } from '@/shots/scene-analysis.schema';
+import type {
+  CharacterSheetInputHash,
+  LibraryLocationReferenceInputHash,
+  LocationSheetInputHash,
+  ShotImageInputHash,
+  TalentSheetInputHash,
+} from '@/shots/input-hash';
 
 /**
  * Structured motion direction (dialogue + audio) carried forward onto a
@@ -151,7 +158,7 @@ export interface ImageWorkflowInput extends SequenceWorkflowContext {
   aspectRatio?: AspectRatio;
   resolution?: Resolution;
   /** Hash over `(prompt, model, aspectRatio, sceneSnapshot)`; validated at start. */
-  snapshotInputHash?: string;
+  snapshotInputHash?: ShotImageInputHash;
   /**
    * Present when `prompt` is a real user edit (typed in the UI, and different
    * from the prompt version currently selected) — absent on auto paths
@@ -313,9 +320,10 @@ export interface StoryboardWorkflowInput extends SequenceWorkflowContext {
    * Reference-only mode: render straight to video from the cast / location /
    * element reference sheets, skipping start-frame generation entirely.
    * Snapshotted from `!sequences.generateStartFrames` by the launcher and passed
-   * straight through to analyze-script.
+   * straight through to analyze-script. Required — omitting it defaulted to
+   * image-to-video at destructure while verify hashed the live mode (#1616).
    */
-  referenceOnly?: boolean;
+  referenceOnly: boolean;
   /**
    * Design a voice per speaking character (#1553). Snapshotted from
    * `sequences.generateVoices` by the launcher; absent on legacy payloads =
@@ -346,6 +354,7 @@ export type StoryboardTriggerInput = Omit<
   | 'suggestedLocations'
   | 'ownerEmail'
   | 'sequenceUrl'
+  | 'referenceOnly'
 > & {
   /** This click's choice; absent, the launcher falls back to the sequence snapshot. */
   stopAt?: GenerationStage;
@@ -394,9 +403,10 @@ export interface AnalyzeScriptWorkflowInput extends SequenceWorkflowContext {
    * element reference sheets, skipping start-frame generation entirely. Pinned
    * onto the payload at the trigger from `!sequences.generateStartFrames` like every
    * other generation setting, so a mid-run toggle cannot change what this run
-   * is doing.
+   * is doing. Required — omitting it defaulted to image-to-video at
+   * destructure while verify hashed the live mode (#1616).
    */
-  referenceOnly?: boolean;
+  referenceOnly: boolean;
   /** @see StoryboardWorkflowInput.generateVoices — passed straight through. */
   generateVoices?: boolean;
 }
@@ -647,7 +657,7 @@ export interface CharacterSheetWorkflowInput extends SequenceWorkflowContext {
    */
   talentSheetInputHash?: string | null;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: string;
+  snapshotInputHash?: CharacterSheetInputHash;
 }
 
 /**
@@ -690,7 +700,7 @@ export type RegenerateShotSnapshot = {
    * at write time and compared to a freshly recomputed hash to detect
    * divergence.
    */
-  snapshotInputHash: string;
+  snapshotInputHash: ShotImageInputHash;
 };
 
 /**
@@ -941,7 +951,11 @@ export interface FramePromptBatchWorkflowInput extends SequenceWorkflowContext {
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
-  elementBible?: ElementBibleEntry[];
+  /**
+   * Required (`[]` if the sequence has none). Omitting it defaulted to `[]`
+   * at destructure and hashed a different shape than verify (#1616).
+   */
+  elementBible: ElementBibleEntry[];
   styleConfig: StyleConfig;
   analysisModelId: AnalysisModelId;
   /** Maps sceneId to shotId for DB persistence after visual prompt generation */
@@ -968,7 +982,11 @@ export interface FramePromptWorkflowInput extends SequenceWorkflowContext {
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
-  elementBible?: ElementBibleEntry[];
+  /**
+   * Required (`[]` if the sequence has none). Omitting it defaulted to `[]`
+   * at destructure and hashed a different shape than verify (#1616).
+   */
+  elementBible: ElementBibleEntry[];
   styleConfig: StyleConfig;
   analysisModelId: AnalysisModelId;
   shotId?: string;
@@ -1003,7 +1021,11 @@ export interface MotionPromptBatchWorkflowInput extends SequenceWorkflowContext 
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
-  elementBible?: ElementBibleEntry[];
+  /**
+   * Required (`[]` if the sequence has none). Omitting it defaulted to `[]`
+   * at destructure and hashed a different shape than verify (#1616).
+   */
+  elementBible: ElementBibleEntry[];
   styleConfig: StyleConfig;
   analysisModelId: AnalysisModelId;
   shotMapping?: ShotMapping;
@@ -1018,8 +1040,9 @@ export interface MotionPromptBatchWorkflowInput extends SequenceWorkflowContext 
    * Reference-only mode (see {@link MotionPromptWorkflowInput.referenceOnly}).
    * The batch's "every scene must have a rendered still" guard is lifted here:
    * in this mode a missing still is the design, not a failed image.
+   * Required — omitting it defaulted to `false` before the hasher ran (#1616).
    */
-  referenceOnly?: boolean;
+  referenceOnly: boolean;
 }
 
 export interface MotionPromptWorkflowInput extends SequenceWorkflowContext {
@@ -1029,7 +1052,11 @@ export interface MotionPromptWorkflowInput extends SequenceWorkflowContext {
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
-  elementBible?: ElementBibleEntry[];
+  /**
+   * Required (`[]` if the sequence has none). Omitting it defaulted to `[]`
+   * at destructure and hashed a different shape than verify (#1616).
+   */
+  elementBible: ElementBibleEntry[];
   styleConfig: StyleConfig;
   analysisModelId: AnalysisModelId;
   shotId?: string;
@@ -1047,8 +1074,9 @@ export interface MotionPromptWorkflowInput extends SequenceWorkflowContext {
    * prompt is written against a different template — one that composes the
    * opening frame in words instead of animating a still. Distinct from a
    * merely absent `startingFrameImageUrl`, which means "no still YET".
+   * Required — omitting it defaulted to `false` before the hasher ran (#1616).
    */
-  referenceOnly?: boolean;
+  referenceOnly: boolean;
   /** See {@link FramePromptWorkflowInput.emitStreaming}. */
   emitStreaming?: boolean;
   /**
@@ -1162,7 +1190,7 @@ export interface LibraryTalentSheetWorkflowInput extends UserWorkflowContext {
   /** Appearance metadata extracted from the uploaded sheet, when available. */
   uploadedSheetMetadata?: CharacterBibleEntry;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: string;
+  snapshotInputHash?: TalentSheetInputHash;
 }
 
 export interface LibraryTalentSheetWorkflowResult {
@@ -1198,7 +1226,7 @@ export interface LocationSheetWorkflowInput extends SequenceWorkflowContext {
    */
   libraryLocationReferenceHash?: string | null;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: string;
+  snapshotInputHash?: LocationSheetInputHash;
 }
 
 export interface LocationSheetWorkflowResult {
@@ -1237,7 +1265,7 @@ export interface LibraryLocationSheetWorkflowInput extends UserWorkflowContext {
    * gated on it: if the location was renamed/re-described mid-run the sheet is
    * parked as a divergent variant instead of becoming the live reference.
    */
-  snapshotInputHash?: string;
+  snapshotInputHash?: LibraryLocationReferenceInputHash;
 }
 
 export interface LibraryLocationSheetWorkflowResult {
@@ -1580,7 +1608,11 @@ export interface MotionMusicPromptsWorkflowInput extends SequenceWorkflowContext
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
-  elementBible?: ElementBibleEntry[];
+  /**
+   * Required (`[]` if the sequence has none). Omitting it defaulted to `[]`
+   * at destructure and hashed a different shape than verify (#1616).
+   */
+  elementBible: ElementBibleEntry[];
   styleConfig: StyleConfig;
   analysisModelId: AnalysisModelId;
   videoModel?: ImageToVideoModel;
@@ -1610,9 +1642,10 @@ export interface MotionMusicPromptsWorkflowInput extends SequenceWorkflowContext
   /**
    * Reference-only mode (see {@link MotionPromptWorkflowInput.referenceOnly}),
    * forwarded to the motion-prompt batch. Music is unaffected — it has never
-   * depended on the still.
+   * depended on the still. Required — omitting it defaulted to `false` before
+   * the hasher ran (#1616).
    */
-  referenceOnly?: boolean;
+  referenceOnly: boolean;
 }
 
 export interface MotionMusicPromptsWorkflowResult {

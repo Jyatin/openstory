@@ -16,11 +16,11 @@
 
 import {
   computeCharacterSheetInputHash,
-  computeMotionPromptInputHash,
+  hashMotionPromptInput,
   computeVideoManifestInputHash,
-  computeVisualPromptInputHash,
+  hashVisualPromptInput,
   type CharacterBibleHashFields,
-  type PromptSceneContextHashInput,
+  type VisualPromptHashInput,
 } from '@/shots/input-hash';
 import type {
   CharacterBibleEntry,
@@ -84,6 +84,8 @@ function videoHash(state: PipelineState): Promise<string | null> {
       frameVersionId: state.selectedFrameVersionId,
       usesStartFrame: true,
       durationMs: state.durationMs,
+      audioClipIds: [],
+      audioSourceKey: null,
     },
   ];
   return computeVideoManifestInputHash(manifest, state.videoModel);
@@ -296,7 +298,7 @@ type BibleState = {
 };
 
 function promptHash(state: BibleState): Promise<string> {
-  const input: PromptSceneContextHashInput = {
+  const input: VisualPromptHashInput = {
     scene: SCENE,
     styleConfig: STYLE,
     characterBible: state.characterBible,
@@ -305,7 +307,7 @@ function promptHash(state: BibleState): Promise<string> {
     aspectRatio: '16:9',
     analysisModel: 'anthropic/claude-haiku-4.5',
   };
-  return computeVisualPromptInputHash(input);
+  return hashVisualPromptInput(input);
 }
 
 function sheetHash(bible: CharacterBibleHashFields): Promise<string> {
@@ -409,7 +411,7 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
     // scene's continuity, so his presence, his edit, and his soft-delete all
     // hash identically for this scene's prompt.
     const hashNarrowed = (bible: CharacterBibleEntry[]) =>
-      computeVisualPromptInputHash(
+      hashVisualPromptInput(
         narrowShotPromptContext({
           scene: SCENE,
           styleConfig: STYLE,
@@ -466,7 +468,7 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
       ],
     };
     const motionHash = (state: BibleState) =>
-      computeMotionPromptInputHash({
+      hashMotionPromptInput({
         scene: SCENE,
         styleConfig: STYLE,
         characterBible: state.characterBible,
@@ -474,6 +476,8 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
         elementBible: [],
         aspectRatio: '16:9',
         analysisModel: 'anthropic/claude-haiku-4.5',
+        startingFrameImageUrl: null,
+        referenceOnly: false,
       });
     expect(await motionHash(edited)).not.toBe(await motionHash(BIBLE_BASE));
     expect(await promptHash(edited)).toBe(await promptHash(BIBLE_BASE));
@@ -512,7 +516,7 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
 
 describe('staleness matrix — structure mutations (§4.2, Phase 1)', () => {
   const hashScene = (scene: Scene) =>
-    computeVisualPromptInputHash({
+    hashVisualPromptInput({
       scene,
       styleConfig: STYLE,
       characterBible: [ALICE],

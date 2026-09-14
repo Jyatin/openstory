@@ -6,7 +6,7 @@
  * `durableStreamingLLMCallCf`, driven by `step.do`. Spawned per scene by
  * `MotionPromptBatchWorkflow`. */
 
-import { computeMotionPromptInputHash } from '@/shots/input-hash';
+import { hashMotionPromptInput } from '@/shots/input-hash';
 import { narrowShotPromptContext } from '@/shots/server/prompt-context';
 import {
   motionPromptSchema,
@@ -56,13 +56,13 @@ export class MotionPromptWorkflow extends OpenStoryWorkflowEntrypoint<MotionProm
       aspectRatio,
       characterBible,
       locationBible,
-      elementBible = [],
+      elementBible,
       styleConfig,
       analysisModelId,
       sequenceId,
       shotId,
       startingFrameImageUrl,
-      referenceOnly = false,
+      referenceOnly,
     } = input;
 
     // ============================================================
@@ -188,9 +188,10 @@ export class MotionPromptWorkflow extends OpenStoryWorkflowEntrypoint<MotionProm
         );
       }
 
-      // Hash the same scene-scoped `narrowed` context the LLM was given above,
-      // so the stored hash equals the verify-time recompute by construction.
-      const inputHash = await computeMotionPromptInputHash(narrowed);
+      // One hasher for stamp and verify (#1616). completePending prefers
+      // the claim's pendingInputHash (verify digest at trigger) and uses
+      // this as fallback when a concurrent edit demoted the claim.
+      const inputHash = await hashMotionPromptInput(narrowed);
 
       finalVersionId = await step.do(
         'save-motion-prompt-to-db',
@@ -204,6 +205,7 @@ export class MotionPromptWorkflow extends OpenStoryWorkflowEntrypoint<MotionProm
           if (input.targetVersionId) {
             // #1085: complete the pre-created pending claim in place. Null =
             // cancelled mid-flight; the output is deliberately discarded.
+            // Hash is the claim's pendingInputHash, not a payload recompute.
             const completed =
               await scopedDb.shotPromptVersions.completePendingAiVersion({
                 versionId: input.targetVersionId,

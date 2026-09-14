@@ -80,7 +80,8 @@ import {
   derivedShotForItem,
   shotWorkItems,
 } from '@/shots/server/shot-work-items';
-import { sha256Hex } from '@/shots/input-hash';
+import { hashVisualPromptInput } from '@/shots/input-hash';
+import { narrowShotPromptContext } from '@/shots/server/prompt-context';
 import {
   computeShotImagesHashFromDto,
   type ShotImageSceneSnapshot,
@@ -130,7 +131,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
       audioModels: audioModelsInput,
       suggestedTalentIds,
       suggestedLocationIds,
-      referenceOnly = false,
+      referenceOnly,
       generateVoices = false,
     } = input;
 
@@ -329,7 +330,9 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
       if (
         !checkpoint?.scenes ||
         !checkpoint.shotMapping ||
-        !checkpoint.characterBible
+        !checkpoint.characterBible ||
+        checkpoint.locationBible == null ||
+        checkpoint.elementBible == null
       ) {
         throw new WorkflowValidationError(
           'Cannot continue generation: missing script checkpoint'
@@ -340,8 +343,8 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         title: '',
         shotMapping: checkpoint.shotMapping,
         characterBible: checkpoint.characterBible,
-        locationBible: checkpoint.locationBible ?? [],
-        elementBible: checkpoint.elementBible ?? [],
+        locationBible: checkpoint.locationBible,
+        elementBible: checkpoint.elementBible,
       };
     }
 
@@ -462,7 +465,6 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
       characterBible,
       talentCharacterMatches
     );
-
     // Cast, locations and script-detected elements land NOW, sheet-less, so a
     // run stopped at Script shows the whole bible for review before any
     // reference image is billed. The References stage re-upserts the same
@@ -1030,11 +1032,17 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
           await scopedDb.framePromptVersions.writeAiVersion({
             frameId,
             text: derived.visualPrompt.fullPrompt,
-            inputHash: await sha256Hex({
-              kind: 'derived-shot-visual',
-              shotId: item.mapping.shotId,
-              text: derived.visualPrompt.fullPrompt,
-            }),
+            inputHash: await hashVisualPromptInput(
+              narrowShotPromptContext({
+                scene: item.scene,
+                styleConfig,
+                characterBible,
+                locationBible,
+                elementBible,
+                aspectRatio,
+                analysisModel: analysisModelId,
+              })
+            ),
             analysisModel: analysisModelId,
           });
           // Same refresh the frame-prompt child emits after its write: the

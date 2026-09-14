@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { migrateStyleConfigV1ToV2 } from '@/look/style-config';
 import type {
   CharacterBibleEntry,
@@ -16,7 +16,7 @@ import {
   computeShotVideoInputHash,
   computeLibraryLocationReferenceInputHash,
   computeLocationSheetInputHash,
-  computeMotionPromptInputHash,
+  hashMotionPromptInput,
   computeMotionPromptInputHashV4,
   computeMusicPromptInputHash,
   computeMusicPromptInputHashV4,
@@ -25,13 +25,17 @@ import {
   computeSequenceMusicInputHash,
   computeTalentSheetInputHash,
   computeTalentSheetInputHashLegacy,
-  computeVisualPromptInputHash,
+  assembleMotionPromptHashInput,
+  hashVisualPromptInput,
   computeVisualPromptInputHashV4,
   motionPromptInputHashMatches,
   musicPromptInputHashMatches,
+  sha256Hex,
   talentSheetInputHashMatches,
   visualPromptInputHashMatches,
   type CharacterSheetHashInput,
+  type MotionPromptHashInput,
+  type MotionPromptInputHash,
   type ShotAudioHashInput,
   type ShotImageHashInput,
   type ShotVideoHashInput,
@@ -53,6 +57,10 @@ const baseThumbnail: ShotImageHashInput = {
 };
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** Incomplete assembler payload for "omitted field throws" tests. */
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test-only incomplete DTO
+const incomplete = <T>(value: object): T => value as T;
 
 describe('computeShotImageInputHash (thumbnail)', () => {
   it('produces a 64-char hex SHA-256 digest', async () => {
@@ -141,22 +149,26 @@ describe('computeShotImageInputHash (thumbnail)', () => {
     expect(new Set([a, loc, el]).size).toBe(3);
   });
 
-  it('treats null and missing optional scalars identically', async () => {
+  it('rejects omitted size/seed; null is the explicit empty', async () => {
     const explicitNulls = await computeShotImageInputHash({
       ...baseThumbnail,
       size: null,
       seed: null,
     });
-    const omitted = await computeShotImageInputHash({
-      kind: baseThumbnail.kind,
-      visualPrompt: baseThumbnail.visualPrompt,
-      imageModel: baseThumbnail.imageModel,
-      aspectRatio: baseThumbnail.aspectRatio,
-      characterSheetHashes: baseThumbnail.characterSheetHashes,
-      locationSheetHashes: baseThumbnail.locationSheetHashes,
-      elementReferenceHashes: baseThumbnail.elementReferenceHashes,
-    });
-    expect(explicitNulls).toBe(omitted);
+    expect(() =>
+      computeShotImageInputHash(
+        incomplete<ShotImageHashInput>({
+          kind: baseThumbnail.kind,
+          visualPrompt: baseThumbnail.visualPrompt,
+          imageModel: baseThumbnail.imageModel,
+          aspectRatio: baseThumbnail.aspectRatio,
+          characterSheetHashes: baseThumbnail.characterSheetHashes,
+          locationSheetHashes: baseThumbnail.locationSheetHashes,
+          elementReferenceHashes: baseThumbnail.elementReferenceHashes,
+        })
+      )
+    ).toThrow();
+    expect(explicitNulls).toMatch(SHA256_HEX);
   });
 });
 
@@ -347,17 +359,21 @@ describe('computeCharacterSheetInputHash', () => {
     expect(new Set([a, talent, style, model]).size).toBe(4);
   });
 
-  it('treats null and missing talent hash identically', async () => {
+  it('rejects omitted talentSheetHash; null is the explicit empty', async () => {
     const nullHash = await computeCharacterSheetInputHash({
       ...base,
       talentSheetHash: null,
     });
-    const omitted = await computeCharacterSheetInputHash({
-      characterBible: base.characterBible,
-      styleConfigHash: base.styleConfigHash,
-      imageModel: base.imageModel,
-    });
-    expect(nullHash).toBe(omitted);
+    expect(() =>
+      computeCharacterSheetInputHash(
+        incomplete<CharacterSheetHashInput>({
+          characterBible: base.characterBible,
+          styleConfigHash: base.styleConfigHash,
+          imageModel: base.imageModel,
+        })
+      )
+    ).toThrow();
+    expect(nullHash).toMatch(SHA256_HEX);
   });
 });
 
@@ -407,6 +423,7 @@ describe('computeLibraryLocationReferenceInputHash', () => {
     locationBible: { name: 'Office', description: 'Modern open-plan, glass' },
     styleConfigHash: 'style-sha',
     imageModel: 'flux-pro-v1.1',
+    referenceMediaHashes: [],
   };
 
   it('is stable, distinct from sheet hash, and reacts to model', async () => {
@@ -423,6 +440,15 @@ describe('computeLibraryLocationReferenceInputHash', () => {
     expect(ref).toBe(refSame);
     expect(ref).not.toBe(sheetEquivalent);
     expect(ref).not.toBe(refModel);
+    expect(() =>
+      computeLibraryLocationReferenceInputHash(
+        incomplete<LibraryLocationReferenceHashInput>({
+          locationBible: base.locationBible,
+          styleConfigHash: base.styleConfigHash,
+          imageModel: base.imageModel,
+        })
+      )
+    ).toThrow();
     expect(await libraryLocationReferenceInputHashMatches(ref, base)).toBe(
       true
     );
@@ -546,22 +572,22 @@ describe('canonical serialization', () => {
   });
 
   it('rejects non-finite numbers rather than collapsing them to null', async () => {
-    await expect(
+    expect(() =>
       computeShotAudioInputHash({
         musicPrompt: 'test',
         tags: [],
         durationSeconds: Number.NaN,
         audioModel: 'cassette-v1',
       })
-    ).rejects.toThrow(/non-finite/);
-    await expect(
+    ).toThrow();
+    expect(() =>
       computeShotAudioInputHash({
         musicPrompt: 'test',
         tags: [],
         durationSeconds: Number.POSITIVE_INFINITY,
         audioModel: 'cassette-v1',
       })
-    ).rejects.toThrow(/non-finite/);
+    ).toThrow();
   });
 });
 
@@ -620,23 +646,25 @@ describe('prompt input hashes', () => {
     elementBible: [],
     aspectRatio: '16:9',
     analysisModel: 'anthropic/claude-haiku-4.5',
+    startingFrameImageUrl: null,
+    referenceOnly: false,
   };
 
   it('visual and motion prompt hashes are namespaced by artifact and differ', async () => {
-    const visual = await computeVisualPromptInputHash(sceneCtx);
-    const motion = await computeMotionPromptInputHash(sceneCtx);
+    const visual = await hashVisualPromptInput(sceneCtx);
+    const motion = await hashMotionPromptInput(sceneCtx);
     expect(visual).not.toBe(motion);
     expect(visual).toMatch(/^[0-9a-f]{64}$/);
     expect(motion).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('motion prompt hash changes when the rendered starting frame changes (#929)', async () => {
-    const baseline = await computeMotionPromptInputHash(sceneCtx);
-    const withImage = await computeMotionPromptInputHash({
+    const baseline = await hashMotionPromptInput(sceneCtx);
+    const withImage = await hashMotionPromptInput({
       ...sceneCtx,
       startingFrameImageUrl: '/r2/frames/a.png',
     });
-    const withReRenderedImage = await computeMotionPromptInputHash({
+    const withReRenderedImage = await hashMotionPromptInput({
       ...sceneCtx,
       startingFrameImageUrl: '/r2/frames/b.png',
     });
@@ -647,8 +675,8 @@ describe('prompt input hashes', () => {
   });
 
   it('reference-only re-stales the motion prompt but never the visual one', async () => {
-    const baseline = await computeMotionPromptInputHash(sceneCtx);
-    const referenceOnly = await computeMotionPromptInputHash({
+    const baseline = await hashMotionPromptInput(sceneCtx);
+    const referenceOnly = await hashMotionPromptInput({
       ...sceneCtx,
       referenceOnly: true,
     });
@@ -659,85 +687,70 @@ describe('prompt input hashes', () => {
     // The visual prompt produces the still; it cannot depend on whether one
     // gets rendered.
     expect(
-      await computeVisualPromptInputHash({ ...sceneCtx, referenceOnly: true })
-    ).toBe(await computeVisualPromptInputHash(sceneCtx));
+      await hashVisualPromptInput({ ...sceneCtx, referenceOnly: true })
+    ).toBe(await hashVisualPromptInput(sceneCtx));
   });
 
-  it('dialogue voices re-stale the motion prompt only, and only when present (#1554)', async () => {
-    const voiced = {
-      ...sceneCtx,
-      dialogueVoices: [
-        {
-          voiceId: 'voice-sarah',
-          line: 'Stay down.',
-          tone: '',
-          ttsModel: 'eleven_v3',
-        },
-      ],
+  it('dialogue text re-stales the motion prompt; voice ids do not (#1554)', async () => {
+    // Voice identity binds on the clip (`audioSourceKey`), like a character
+    // sheet on the still. The LLM never sees the ElevenLabs id, so swapping
+    // it must not move the motion-prompt digest.
+    const stayDown = {
+      ...minimalScene,
+      originalScript: {
+        extract: '',
+        dialogue: [{ character: 'Alice', line: 'Stay down.', tone: '' }],
+      },
     };
-    expect(await computeMotionPromptInputHash(voiced)).not.toBe(
-      await computeMotionPromptInputHash(sceneCtx)
+    const withDialogue = { ...sceneCtx, scene: stayDown };
+    expect(await hashMotionPromptInput(withDialogue)).not.toBe(
+      await hashMotionPromptInput(sceneCtx)
     );
-    expect(await computeVisualPromptInputHash(voiced)).toBe(
-      await computeVisualPromptInputHash(sceneCtx)
-    );
-    // Shape-stable: omitted, empty, and blank rows hash exactly as before.
-    expect(
-      await computeMotionPromptInputHash({ ...sceneCtx, dialogueVoices: [] })
-    ).toBe(await computeMotionPromptInputHash(sceneCtx));
-    expect(
-      await computeMotionPromptInputHash({
-        ...sceneCtx,
-        dialogueVoices: [
-          { voiceId: '', line: 'x', tone: '', ttsModel: 'eleven_v3' },
-        ],
-      })
-    ).toBe(await computeMotionPromptInputHash(sceneCtx));
-    expect(
-      await computeMotionPromptInputHash({
-        ...sceneCtx,
-        dialogueVoices: [
-          {
-            voiceId: 'voice-sarah',
-            line: 'Stay down.',
-            tone: '',
-            ttsModel: 'eleven_v3',
-          },
-        ],
-      })
-    ).not.toBe(
-      await computeMotionPromptInputHash({
-        ...sceneCtx,
-        dialogueVoices: [
-          {
-            voiceId: 'voice-other',
-            line: 'Stay down.',
-            tone: '',
-            ttsModel: 'eleven_v3',
-          },
-        ],
-      })
+    expect(await hashVisualPromptInput(withDialogue)).not.toBe(
+      await hashVisualPromptInput(sceneCtx)
     );
     expect(
-      await computeMotionPromptInputHash({
+      await hashMotionPromptInput({
         ...sceneCtx,
-        dialogueVoices: [
-          {
-            voiceId: 'voice-sarah',
-            line: 'Stay down.',
-            tone: 'whispered',
-            ttsModel: 'eleven_v3',
+        scene: {
+          ...stayDown,
+          originalScript: {
+            extract: '',
+            dialogue: [
+              { character: 'Alice', line: 'Stay down.', tone: 'whispered' },
+            ],
           },
-        ],
+        },
       })
-    ).not.toBe(await computeMotionPromptInputHash(voiced));
+    ).not.toBe(await hashMotionPromptInput(withDialogue));
+  });
+
+  it('assembler rejects a missing referenceOnly channel (#1616)', () => {
+    const { referenceOnly: _dropped, ...withoutFlag } = sceneCtx;
+    expect(() => assembleMotionPromptHashInput(withoutFlag)).toThrow();
+    expect(assembleMotionPromptHashInput(sceneCtx).referenceOnly).toBe(false);
+  });
+
+  it('branded digest is not a raw sha256 of {kind, text} (#1616)', async () => {
+    const derived = await sha256Hex({
+      kind: 'derived-shot-motion',
+      shotId: 's1',
+      text: 'move',
+    });
+    const assembler = await hashMotionPromptInput(sceneCtx);
+    expect(assembler).not.toBe(derived);
+    expectTypeOf(assembler).toEqualTypeOf<MotionPromptInputHash>();
+    expectTypeOf<string>().not.toMatchTypeOf<MotionPromptInputHash>();
+    expectTypeOf<
+      Omit<MotionPromptHashInput, 'referenceOnly'>
+    >().not.toMatchTypeOf<MotionPromptHashInput>();
   });
 
   it('leaves every stored image-to-video digest unchanged', async () => {
     // The flag joins the hash body only when true, so no existing row's
     // digest moves and no hash-version bump is needed.
-    const omitted = await computeMotionPromptInputHash(sceneCtx);
-    const explicitFalse = await computeMotionPromptInputHash({
+    const omitted = await hashMotionPromptInput(sceneCtx);
+    const explicitFalse = await hashMotionPromptInput({
       ...sceneCtx,
       referenceOnly: false,
     });
@@ -753,12 +766,12 @@ describe('prompt input hashes', () => {
       ],
     };
     // Motion reads them: gait and delivery change the prompt.
-    expect(await computeMotionPromptInputHash(withPerformance)).not.toBe(
-      await computeMotionPromptInputHash(sceneCtx)
+    expect(await hashMotionPromptInput(withPerformance)).not.toBe(
+      await hashMotionPromptInput(sceneCtx)
     );
     // A still does not walk: the visual prompt ignores both.
-    expect(await computeVisualPromptInputHash(withPerformance)).toBe(
-      await computeVisualPromptInputHash(sceneCtx)
+    expect(await hashVisualPromptInput(withPerformance)).toBe(
+      await hashVisualPromptInput(sceneCtx)
     );
     // Shape-stable: a character with neither hashes exactly as before the
     // fields existed, so no stored motion digest moves.
@@ -766,8 +779,8 @@ describe('prompt input hashes', () => {
       ...sceneCtx,
       characterBible: [{ ...aliceCharacter, personality: '  ', movement: '' }],
     };
-    expect(await computeMotionPromptInputHash(whitespace)).toBe(
-      await computeMotionPromptInputHash(sceneCtx)
+    expect(await hashMotionPromptInput(whitespace)).toBe(
+      await hashMotionPromptInput(sceneCtx)
     );
     // Pre-#1561 JSON (checkpoints, sheet metadata) has no keys at all.
     const { personality: _p, movement: _m, ...legacyAlice } = aliceCharacter;
@@ -776,14 +789,14 @@ describe('prompt input hashes', () => {
       // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stored JSON that predates the fields
       characterBible: [legacyAlice as CharacterBibleEntry],
     };
-    expect(await computeMotionPromptInputHash(legacy)).toBe(
-      await computeMotionPromptInputHash(sceneCtx)
+    expect(await hashMotionPromptInput(legacy)).toBe(
+      await hashMotionPromptInput(sceneCtx)
     );
   });
 
   it('omitting startingFrameImageUrl equals passing null (legacy shots)', async () => {
-    const omitted = await computeMotionPromptInputHash(sceneCtx);
-    const explicitNull = await computeMotionPromptInputHash({
+    const omitted = await hashMotionPromptInput(sceneCtx);
+    const explicitNull = await hashMotionPromptInput({
       ...sceneCtx,
       startingFrameImageUrl: null,
     });
@@ -791,8 +804,8 @@ describe('prompt input hashes', () => {
   });
 
   it('the visual prompt hash ignores the starting frame (it produces the image)', async () => {
-    const baseline = await computeVisualPromptInputHash(sceneCtx);
-    const withImage = await computeVisualPromptInputHash({
+    const baseline = await hashVisualPromptInput(sceneCtx);
+    const withImage = await hashVisualPromptInput({
       ...sceneCtx,
       startingFrameImageUrl: '/r2/frames/a.png',
     });
@@ -805,11 +818,11 @@ describe('prompt input hashes', () => {
       characterId: 'c2',
       name: 'Bob',
     };
-    const orderA = await computeVisualPromptInputHash({
+    const orderA = await hashVisualPromptInput({
       ...sceneCtx,
       characterBible: [aliceCharacter, second],
     });
-    const orderB = await computeVisualPromptInputHash({
+    const orderB = await hashVisualPromptInput({
       ...sceneCtx,
       characterBible: [second, aliceCharacter],
     });
@@ -829,11 +842,11 @@ describe('prompt input hashes', () => {
   it('locationBible order does not affect the visual prompt hash', async () => {
     const first = cloneLocation({});
     const second = cloneLocation({ locationId: 'l2', name: 'Forest' });
-    const orderA = await computeVisualPromptInputHash({
+    const orderA = await hashVisualPromptInput({
       ...sceneCtx,
       locationBible: [first, second],
     });
-    const orderB = await computeVisualPromptInputHash({
+    const orderB = await hashVisualPromptInput({
       ...sceneCtx,
       locationBible: [second, first],
     });
@@ -853,11 +866,11 @@ describe('prompt input hashes', () => {
       consistencyTag: 'police-badge',
       firstMention: { sceneId: 's1', text: 'BADGE', lineNumber: 2 },
     };
-    const orderA = await computeVisualPromptInputHash({
+    const orderA = await hashVisualPromptInput({
       ...sceneCtx,
       elementBible: [elementA, elementB],
     });
-    const orderB = await computeVisualPromptInputHash({
+    const orderB = await hashVisualPromptInput({
       ...sceneCtx,
       elementBible: [elementB, elementA],
     });
@@ -885,13 +898,13 @@ describe('prompt input hashes', () => {
       consistencyTag: 'police-badge',
       firstMention: { sceneId: 's1', text: 'BADGE', lineNumber: 2 },
     };
-    const orderA = await computeMotionPromptInputHash({
+    const orderA = await hashMotionPromptInput({
       ...sceneCtx,
       characterBible: [characterA, characterB],
       locationBible: [locationA, locationB],
       elementBible: [elementA, elementB],
     });
-    const orderB = await computeMotionPromptInputHash({
+    const orderB = await hashMotionPromptInput({
       ...sceneCtx,
       characterBible: [characterB, characterA],
       locationBible: [locationB, locationA],
@@ -908,11 +921,11 @@ describe('prompt input hashes', () => {
       timeOfDay: 'night',
       storyBeat: 'establish',
     };
-    const a = await computeVisualPromptInputHash({
+    const a = await hashVisualPromptInput({
       ...sceneCtx,
       scene: { ...minimalScene, metadata },
     });
-    const b = await computeVisualPromptInputHash({
+    const b = await hashVisualPromptInput({
       ...sceneCtx,
       scene: { ...minimalScene, metadata: { ...metadata, title: 'Renamed' } },
     });
@@ -921,7 +934,7 @@ describe('prompt input hashes', () => {
 
   it('dual-hash verify accepts a v4 visual digest of the same inputs', async () => {
     expect(LEGACY_HASH_UNTIL).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    const current = await computeVisualPromptInputHash(sceneCtx);
+    const current = await hashVisualPromptInput(sceneCtx);
     const v4 = await computeVisualPromptInputHashV4(sceneCtx);
     expect(v4).not.toBe(current);
     expect(await visualPromptInputHashMatches(current, sceneCtx)).toBe(true);
@@ -935,7 +948,7 @@ describe('prompt input hashes', () => {
   });
 
   it('dual-hash verify accepts a v4 motion digest of the same inputs', async () => {
-    const current = await computeMotionPromptInputHash(sceneCtx);
+    const current = await hashMotionPromptInput(sceneCtx);
     const v4 = await computeMotionPromptInputHashV4(sceneCtx);
     expect(v4).not.toBe(current);
     expect(await motionPromptInputHashMatches(current, sceneCtx)).toBe(true);
@@ -949,8 +962,8 @@ describe('prompt input hashes', () => {
   });
 
   it('changing the analysis model changes the visual prompt hash', async () => {
-    const a = await computeVisualPromptInputHash(sceneCtx);
-    const b = await computeVisualPromptInputHash({
+    const a = await hashVisualPromptInput(sceneCtx);
+    const b = await hashVisualPromptInput({
       ...sceneCtx,
       analysisModel: 'anthropic/claude-sonnet-4.6',
     });
@@ -971,10 +984,10 @@ describe('prompt input hashes', () => {
       ],
     };
 
-    const visualA = await computeVisualPromptInputHash(withoutElements);
-    const visualB = await computeVisualPromptInputHash(withElement);
-    const motionA = await computeMotionPromptInputHash(withoutElements);
-    const motionB = await computeMotionPromptInputHash(withElement);
+    const visualA = await hashVisualPromptInput(withoutElements);
+    const visualB = await hashVisualPromptInput(withElement);
+    const motionA = await hashMotionPromptInput(withoutElements);
+    const motionB = await hashMotionPromptInput(withElement);
 
     expect(visualA).not.toBe(visualB);
     expect(motionA).not.toBe(motionB);
@@ -1039,8 +1052,8 @@ describe('prompt input hashes', () => {
     // The generated prompts moved off the Scene shape entirely (#713), so the
     // only LLM-derived field still on the scene is `continuity` — confirm it is
     // excluded from both the visual and motion input hashes.
-    const upstream = await computeVisualPromptInputHash(sceneCtx);
-    const enriched = await computeVisualPromptInputHash({
+    const upstream = await hashVisualPromptInput(sceneCtx);
+    const enriched = await hashVisualPromptInput({
       ...sceneCtx,
       scene: {
         ...minimalScene,
@@ -1055,8 +1068,8 @@ describe('prompt input hashes', () => {
     });
     expect(upstream).toBe(enriched);
 
-    const motionUpstream = await computeMotionPromptInputHash(sceneCtx);
-    const motionEnriched = await computeMotionPromptInputHash({
+    const motionUpstream = await hashMotionPromptInput(sceneCtx);
+    const motionEnriched = await hashMotionPromptInput({
       ...sceneCtx,
       scene: {
         ...minimalScene,

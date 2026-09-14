@@ -216,6 +216,8 @@ function makeShot({
                 frameVersionId: null,
                 usesStartFrame: true,
                 durationMs: shot.durationMs ?? 3000,
+                audioClipIds: [],
+                audioSourceKey: null,
               },
             ],
             createdAt: NOW,

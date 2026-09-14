@@ -25,6 +25,8 @@ function videoVariant(overrides: Partial<VideoVariant> = {}): VideoVariant {
       frameVersionId: 'fv-1',
       usesStartFrame: true,
       durationMs: 3000,
+      audioClipIds: [],
+      audioSourceKey: null,
     },
   ];
   return {
@@ -83,6 +85,8 @@ describe('projectVideoVariants', () => {
           frameVersionId: 'fv-1',
           usesStartFrame: true,
           durationMs: 3000,
+          audioClipIds: [],
+          audioSourceKey: null,
         },
         {
           shotId: 'shot-2',
@@ -90,6 +94,8 @@ describe('projectVideoVariants', () => {
           frameVersionId: 'fv-2',
           usesStartFrame: true,
           durationMs: 4000,
+          audioClipIds: [],
+          audioSourceKey: null,
         },
       ],
     });

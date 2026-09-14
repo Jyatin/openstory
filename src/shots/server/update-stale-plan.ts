@@ -46,6 +46,7 @@ import type {
 } from '@/platform/server/db/schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { getLogger } from '@/platform/logger';
+import { audioSourceKeyForDialogueLines } from '@/motion/dialogue-tts';
 import { assembleSequenceSegments } from '@/shots/scene-segments';
 import {
   loadSceneContextBySequence,
@@ -238,9 +239,10 @@ export type UpdateStalePlan = {
   promptContext: PlanPromptContext | null;
   /**
    * Speakers with a designed voice at click time (#1554). Snapshotted so the
-   * motion child never re-reads `characters.voiceId`.
+   * motion *render* (TTS) never re-reads `characters.voiceId`. Not a prompt
+   * hash channel — voice identity binds on the clip.
    */
-  characterVoices?: {
+  characterVoices: {
     name: string;
     voiceId: string;
     voiceOnly: boolean;
@@ -335,6 +337,7 @@ export async function computePlan(args: {
     sequence: toPlanSequence(sequence),
     music,
     promptContext: null,
+    characterVoices: [],
     targets: [],
     skipped: [],
   };
@@ -440,9 +443,9 @@ export async function computePlan(args: {
         : []
     ),
     promptContext: {
-      characterBible: ctx.characterBible,
-      locationBible: ctx.locationBible,
-      elementBible: ctx.elementBible,
+      characterBible: [...ctx.characterBible],
+      locationBible: [...ctx.locationBible],
+      elementBible: [...ctx.elementBible],
       styleConfig: ctx.styleConfig,
       analysisModelId:
         getAnalysisModelById(ctx.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL,
@@ -498,11 +501,27 @@ async function loadVideoStateByShot(
   allShots: Shot[],
   sequence: StartFrameSequence
 ): Promise<Map<string, ShotVideoState>> {
-  const [segments, versions, allFrames] = await Promise.all([
-    scopedDb.renderSegments.listBySequence(sequenceId),
-    scopedDb.videoVariants.listBySequence(sequenceId),
-    scopedDb.frames.listBySequence(sequenceId),
-  ]);
+  const [segments, versions, allFrames, scriptBySceneId, characters] =
+    await Promise.all([
+      scopedDb.renderSegments.listBySequence(sequenceId),
+      scopedDb.videoVariants.listBySequence(sequenceId),
+      scopedDb.frames.listBySequence(sequenceId),
+      loadSceneContextBySequence(scopedDb, sequenceId),
+      scopedDb.characters.list(sequenceId),
+    ]);
+  const currentAudioSourceKeyByShot = new Map<string, string | null>();
+  for (const shot of allShots) {
+    const { scene } = resolveSceneForShot(shot, scriptBySceneId);
+    currentAudioSourceKeyByShot.set(
+      shot.id,
+      scene
+        ? audioSourceKeyForDialogueLines(
+            scene.originalScript?.dialogue,
+            characters
+          )
+        : null
+    );
+  }
   const assembled = assembleSequenceSegments({
     segments,
     versions,
@@ -513,6 +532,7 @@ async function loadVideoStateByShot(
       rendersReferenceOnly: rendersReferenceOnly(shot, sequence),
     })),
     frames: allFrames,
+    currentAudioSourceKeyByShot,
   });
 
   const byShot = new Map<string, ShotVideoState>();

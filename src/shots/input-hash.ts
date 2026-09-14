@@ -15,6 +15,8 @@
  * § "What goes into the hash" for the per-artifact input surface.
  */
 
+import { z } from 'zod';
+
 /**
  * Recursively rebuild a value with object keys sorted. Arrays are preserved in
  * order — set-like fields are sorted by the per-helper DTO before being passed
@@ -73,18 +75,81 @@ export async function sha256Hex(input: unknown): Promise<string> {
   return hex;
 }
 
+/**
+ * Branded artifact digests (#1616). Hasher return types and the write APIs
+ * that persist them take the brand, so `sha256Hex({ kind, text })` cannot be
+ * stored as an `inputHash`. Constructors are the sole mint besides the
+ * hasher — tests use them for fixture rows.
+ */
+export type ShotImageInputHash = string & {
+  readonly __brand: 'ShotImageInputHash';
+};
+export type ShotVideoInputHash = string & {
+  readonly __brand: 'ShotVideoInputHash';
+};
+export type VideoManifestInputHash = string & {
+  readonly __brand: 'VideoManifestInputHash';
+};
+export type ShotAudioInputHash = string & {
+  readonly __brand: 'ShotAudioInputHash';
+};
+export type CharacterSheetInputHash = string & {
+  readonly __brand: 'CharacterSheetInputHash';
+};
+export type LocationSheetInputHash = string & {
+  readonly __brand: 'LocationSheetInputHash';
+};
+export type LibraryLocationReferenceInputHash = string & {
+  readonly __brand: 'LibraryLocationReferenceInputHash';
+};
+export type TalentSheetInputHash = string & {
+  readonly __brand: 'TalentSheetInputHash';
+};
+export type MusicPromptInputHash = string & {
+  readonly __brand: 'MusicPromptInputHash';
+};
+export type SequenceMusicInputHash = string & {
+  readonly __brand: 'SequenceMusicInputHash';
+};
+
+/* oxlint-disable typescript/no-unsafe-type-assertion -- sole brand constructors */
+export const shotImageInputHash = (hex: string): ShotImageInputHash =>
+  hex as ShotImageInputHash;
+const shotVideoInputHash = (hex: string): ShotVideoInputHash =>
+  hex as ShotVideoInputHash;
+export const videoManifestInputHash = (hex: string): VideoManifestInputHash =>
+  hex as VideoManifestInputHash;
+const shotAudioInputHash = (hex: string): ShotAudioInputHash =>
+  hex as ShotAudioInputHash;
+export const characterSheetInputHash = (hex: string): CharacterSheetInputHash =>
+  hex as CharacterSheetInputHash;
+export const locationSheetInputHash = (hex: string): LocationSheetInputHash =>
+  hex as LocationSheetInputHash;
+export const libraryLocationReferenceInputHash = (
+  hex: string
+): LibraryLocationReferenceInputHash =>
+  hex as LibraryLocationReferenceInputHash;
+export const talentSheetInputHash = (hex: string): TalentSheetInputHash =>
+  hex as TalentSheetInputHash;
+export const musicPromptInputHash = (hex: string): MusicPromptInputHash =>
+  hex as MusicPromptInputHash;
+export const sequenceMusicInputHash = (hex: string): SequenceMusicInputHash =>
+  hex as SequenceMusicInputHash;
+/* oxlint-enable typescript/no-unsafe-type-assertion */
+
 const trim = (s: string | null | undefined): string => (s ?? '').trim();
 
 /** Sort an unordered set of strings so the hash is order-insensitive. */
-const sortedRefs = (refs: readonly string[] | undefined): string[] =>
-  [...(refs ?? [])].sort();
+const sortedRefs = (refs: readonly string[]): string[] => [...refs].sort();
 
 type ShotImageHashFields = {
   visualPrompt: string;
   imageModel: string;
   aspectRatio: string;
-  size?: string | null;
-  seed?: number | null;
+  /** Required; `null` is "no size". Omitting it is a stamp/verify hole. */
+  size: string | null;
+  /** Required; `null` is "no seed". */
+  seed: number | null;
   characterSheetHashes: readonly string[];
   locationSheetHashes: readonly string[];
   elementReferenceHashes: readonly string[];
@@ -96,20 +161,33 @@ export type ShotImageHashInput = ShotImageHashFields & {
   kind: ShotImageHashKind;
 };
 
+const shotImageHashInputSchema = z.object({
+  kind: z.enum(['thumbnail', 'variant-image']),
+  visualPrompt: z.string(),
+  imageModel: z.string(),
+  aspectRatio: z.string(),
+  size: z.string().nullable(),
+  seed: z.number().nullable(),
+  characterSheetHashes: z.array(z.string()),
+  locationSheetHashes: z.array(z.string()),
+  elementReferenceHashes: z.array(z.string()),
+});
+
 export function computeShotImageInputHash(
-  input: ShotImageHashInput
-): Promise<string> {
+  raw: ShotImageHashInput
+): Promise<ShotImageInputHash> {
+  const input = shotImageHashInputSchema.parse(raw);
   return sha256Hex({
     artifact: `shot:${input.kind}`,
     visualPrompt: trim(input.visualPrompt),
     imageModel: input.imageModel,
     aspectRatio: input.aspectRatio,
-    size: input.size ?? null,
-    seed: input.seed ?? null,
+    size: input.size,
+    seed: input.seed,
     characterSheetHashes: sortedRefs(input.characterSheetHashes),
     locationSheetHashes: sortedRefs(input.locationSheetHashes),
     elementReferenceHashes: sortedRefs(input.elementReferenceHashes),
-  });
+  }).then(shotImageInputHash);
 }
 
 /**
@@ -126,13 +204,27 @@ export type ShotVideoHashInput = {
   motionPrompt: string;
   motionModel: string;
   durationSeconds: number;
-  fps?: number | null;
+  /** Required; `null` is "model default fps". */
+  fps: number | null;
   aspectRatio: string;
 };
 
+const shotVideoHashInputSchema = z.object({
+  sourceImage: z.union([
+    z.object({ kind: z.literal('variantHash'), hash: z.string() }),
+    z.object({ kind: z.literal('url'), url: z.string() }),
+  ]),
+  motionPrompt: z.string(),
+  motionModel: z.string(),
+  durationSeconds: z.number(),
+  fps: z.number().nullable(),
+  aspectRatio: z.string(),
+});
+
 export function computeShotVideoInputHash(
-  input: ShotVideoHashInput
-): Promise<string> {
+  raw: ShotVideoHashInput
+): Promise<ShotVideoInputHash> {
+  const input = shotVideoHashInputSchema.parse(raw);
   const sourceImage =
     input.sourceImage.kind === 'variantHash'
       ? { kind: 'variantHash' as const, hash: trim(input.sourceImage.hash) }
@@ -143,9 +235,9 @@ export function computeShotVideoInputHash(
     motionPrompt: trim(input.motionPrompt),
     motionModel: input.motionModel,
     durationSeconds: input.durationSeconds,
-    fps: input.fps ?? null,
+    fps: input.fps,
     aspectRatio: input.aspectRatio,
-  });
+  }).then(shotVideoInputHash);
 }
 
 /**
@@ -159,24 +251,55 @@ export function computeShotVideoInputHash(
  * Order-sensitive (the manifest is ordered by render position), so entries are
  * NOT sorted.
  */
+const videoManifestHashEntrySchema = z.object({
+  shotId: z.string(),
+  motionPromptVersionId: z.string().nullable(),
+  frameVersionId: z.string().nullable(),
+  usesStartFrame: z.boolean(),
+  durationMs: z.number(),
+  audioClipIds: z.array(z.string()),
+  audioSourceKey: z.string().nullable(),
+});
+
+function canonicalizeManifestEntry(
+  entry: z.infer<typeof videoManifestHashEntrySchema>
+): unknown {
+  return {
+    shotId: entry.shotId,
+    motionPromptVersionId: entry.motionPromptVersionId,
+    frameVersionId: entry.frameVersionId,
+    usesStartFrame: entry.usesStartFrame,
+    durationMs: entry.durationMs,
+    ...(entry.audioClipIds.length > 0
+      ? { audioClipIds: entry.audioClipIds }
+      : {}),
+    ...(entry.audioSourceKey ? { audioSourceKey: entry.audioSourceKey } : {}),
+  };
+}
+
 export function computeVideoManifestInputHash(
   manifest: readonly VideoManifestEntry[],
   model: string
-): Promise<string | null> {
+): Promise<VideoManifestInputHash | null> {
+  const entries = z.array(videoManifestHashEntrySchema).parse(manifest);
   // A hash over null/null immediately diverges from a live hash built from
   // the selected still + prompt — that's how storyboard clips were born
   // Stale (#1380). Unknown provenance is a null hash, matching
   // `videoVariants.isStale` for legacy rows (never stale).
   if (
-    manifest.length > 0 &&
-    manifest.every(
+    entries.length > 0 &&
+    entries.every(
       (entry) =>
         entry.motionPromptVersionId == null && entry.frameVersionId == null
     )
   ) {
     return Promise.resolve(null);
   }
-  return sha256Hex({ artifact: 'video:manifest', model, manifest });
+  return sha256Hex({
+    artifact: 'video:manifest',
+    model,
+    manifest: entries.map(canonicalizeManifestEntry),
+  }).then(videoManifestInputHash);
 }
 
 export type ShotAudioHashInput = {
@@ -187,32 +310,41 @@ export type ShotAudioHashInput = {
   audioModel: string;
 };
 
+const shotAudioHashInputSchema = z.object({
+  musicPrompt: z.string(),
+  tags: z.array(z.string()),
+  durationSeconds: z.number(),
+  audioModel: z.string(),
+});
+
 export function computeShotAudioInputHash(
-  input: ShotAudioHashInput
-): Promise<string> {
+  raw: ShotAudioHashInput
+): Promise<ShotAudioInputHash> {
+  const input = shotAudioHashInputSchema.parse(raw);
   return sha256Hex({
     artifact: 'shot:audio',
     musicPrompt: trim(input.musicPrompt),
     tags: sortedRefs(input.tags),
     durationSeconds: input.durationSeconds,
     audioModel: input.audioModel,
-  });
+  }).then(shotAudioInputHash);
 }
 
 export type CharacterBibleHashFields = {
   name: string;
   age: string;
-  gender?: string | null;
-  ethnicity?: string | null;
-  physicalDescription?: string | null;
-  standardClothing?: string | null;
-  distinguishingFeatures?: string | null;
-  consistencyTag?: string | null;
+  gender: string | null;
+  ethnicity: string | null;
+  physicalDescription: string | null;
+  standardClothing: string | null;
+  distinguishingFeatures: string | null;
+  consistencyTag: string | null;
 };
 
 export type CharacterSheetHashInput = {
   characterBible: CharacterBibleHashFields;
-  talentSheetHash?: string | null;
+  /** Required; `null` is "no talent sheet". */
+  talentSheetHash: string | null;
   styleConfigHash: string;
   imageModel: string;
 };
@@ -240,25 +372,48 @@ function characterSheetHashBody(
   };
 }
 
+const characterBibleHashFieldsSchema = z.object({
+  name: z.string(),
+  age: z.string(),
+  gender: z.string().nullable(),
+  ethnicity: z.string().nullable(),
+  physicalDescription: z.string().nullable(),
+  standardClothing: z.string().nullable(),
+  distinguishingFeatures: z.string().nullable(),
+  consistencyTag: z.string().nullable(),
+});
+
+const characterSheetHashInputSchema = z.object({
+  characterBible: characterBibleHashFieldsSchema,
+  talentSheetHash: z.string().nullable(),
+  styleConfigHash: z.string(),
+  imageModel: z.string(),
+});
+
 export function computeCharacterSheetInputHash(
-  input: CharacterSheetHashInput
-): Promise<string> {
-  return sha256Hex(characterSheetHashBody(input, false));
+  raw: CharacterSheetHashInput
+): Promise<CharacterSheetInputHash> {
+  const input = characterSheetHashInputSchema.parse(raw);
+  return sha256Hex(characterSheetHashBody(input, false)).then(
+    characterSheetInputHash
+  );
 }
 
 /** Named-bible digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
 export function computeCharacterSheetInputHashLegacy(
-  input: CharacterSheetHashInput
+  raw: CharacterSheetHashInput
 ): Promise<string> {
+  const input = characterSheetHashInputSchema.parse(raw);
   return sha256Hex(characterSheetHashBody(input, true));
 }
 
 /** Verify: current (nameless) digest or the pre-#1108 digest that hashed `name`. */
 export async function characterSheetInputHashMatches(
   stored: string | null,
-  input: CharacterSheetHashInput
+  raw: CharacterSheetHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = characterSheetHashInputSchema.parse(raw);
   const [current, legacy] = await Promise.all([
     sha256Hex(characterSheetHashBody(input, false)),
     sha256Hex(characterSheetHashBody(input, true)),
@@ -268,13 +423,13 @@ export async function characterSheetInputHashMatches(
 
 export type LocationBibleHashFields = {
   name: string;
-  description?: string | null;
+  description: string | null;
 };
 
 export type LocationSheetHashInput = {
   locationBible: LocationBibleHashFields;
-  /** Hash of the parent library location's reference image, if any. */
-  libraryLocationReferenceHash?: string | null;
+  /** Required; `null` is "no library reference". */
+  libraryLocationReferenceHash: string | null;
   styleConfigHash: string;
   imageModel: string;
 };
@@ -295,17 +450,33 @@ function locationSheetHashBody(
   };
 }
 
+const locationBibleHashFieldsSchema = z.object({
+  name: z.string(),
+  description: z.string().nullable(),
+});
+
+const locationSheetHashInputSchema = z.object({
+  locationBible: locationBibleHashFieldsSchema,
+  libraryLocationReferenceHash: z.string().nullable(),
+  styleConfigHash: z.string(),
+  imageModel: z.string(),
+});
+
 export function computeLocationSheetInputHash(
-  input: LocationSheetHashInput
-): Promise<string> {
-  return sha256Hex(locationSheetHashBody(input, false));
+  raw: LocationSheetHashInput
+): Promise<LocationSheetInputHash> {
+  const input = locationSheetHashInputSchema.parse(raw);
+  return sha256Hex(locationSheetHashBody(input, false)).then(
+    locationSheetInputHash
+  );
 }
 
 export async function locationSheetInputHashMatches(
   stored: string | null,
-  input: LocationSheetHashInput
+  raw: LocationSheetHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = locationSheetHashInputSchema.parse(raw);
   const [current, legacy] = await Promise.all([
     sha256Hex(locationSheetHashBody(input, false)),
     sha256Hex(locationSheetHashBody(input, true)),
@@ -317,8 +488,8 @@ export type LibraryLocationReferenceHashInput = {
   locationBible: LocationBibleHashFields;
   styleConfigHash: string;
   imageModel: string;
-  /** Unordered set of user-uploaded reference image URLs. */
-  referenceMediaHashes?: readonly string[];
+  /** Required; `[]` is "no reference media". */
+  referenceMediaHashes: readonly string[];
 };
 
 function libraryLocationReferenceHashBody(
@@ -337,17 +508,28 @@ function libraryLocationReferenceHashBody(
   };
 }
 
+const libraryLocationReferenceHashInputSchema = z.object({
+  locationBible: locationBibleHashFieldsSchema,
+  styleConfigHash: z.string(),
+  imageModel: z.string(),
+  referenceMediaHashes: z.array(z.string()),
+});
+
 export function computeLibraryLocationReferenceInputHash(
-  input: LibraryLocationReferenceHashInput
-): Promise<string> {
-  return sha256Hex(libraryLocationReferenceHashBody(input, false));
+  raw: LibraryLocationReferenceHashInput
+): Promise<LibraryLocationReferenceInputHash> {
+  const input = libraryLocationReferenceHashInputSchema.parse(raw);
+  return sha256Hex(libraryLocationReferenceHashBody(input, false)).then(
+    libraryLocationReferenceInputHash
+  );
 }
 
 export async function libraryLocationReferenceInputHashMatches(
   stored: string | null,
-  input: LibraryLocationReferenceHashInput
+  raw: LibraryLocationReferenceHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = libraryLocationReferenceHashInputSchema.parse(raw);
   const [current, legacy] = await Promise.all([
     sha256Hex(libraryLocationReferenceHashBody(input, false)),
     sha256Hex(libraryLocationReferenceHashBody(input, true)),
@@ -358,7 +540,7 @@ export async function libraryLocationReferenceInputHashMatches(
 export type TalentSheetHashInput = {
   talent: {
     name: string;
-    description?: string | null;
+    description: string | null;
   };
   /** Unordered set of reference media hashes (talent_media rows). */
   referenceMediaHashes: readonly string[];
@@ -380,24 +562,38 @@ function talentSheetHashBody(
   };
 }
 
+const talentSheetHashInputSchema = z.object({
+  talent: z.object({
+    name: z.string(),
+    description: z.string().nullable(),
+  }),
+  referenceMediaHashes: z.array(z.string()),
+  imageModel: z.string(),
+});
+
 export function computeTalentSheetInputHash(
-  input: TalentSheetHashInput
-): Promise<string> {
-  return sha256Hex(talentSheetHashBody(input, false));
+  raw: TalentSheetHashInput
+): Promise<TalentSheetInputHash> {
+  const input = talentSheetHashInputSchema.parse(raw);
+  return sha256Hex(talentSheetHashBody(input, false)).then(
+    talentSheetInputHash
+  );
 }
 
 /** Named-talent digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
 export function computeTalentSheetInputHashLegacy(
-  input: TalentSheetHashInput
+  raw: TalentSheetHashInput
 ): Promise<string> {
+  const input = talentSheetHashInputSchema.parse(raw);
   return sha256Hex(talentSheetHashBody(input, true));
 }
 
 export async function talentSheetInputHashMatches(
   stored: string | null,
-  input: TalentSheetHashInput
+  raw: TalentSheetHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = talentSheetHashInputSchema.parse(raw);
   const [current, legacy] = await Promise.all([
     sha256Hex(talentSheetHashBody(input, false)),
     sha256Hex(talentSheetHashBody(input, true)),
@@ -416,8 +612,6 @@ export async function talentSheetInputHashMatches(
 // different hash for identical inputs, since LLM output is non-deterministic.
 // ---------------------------------------------------------------------------
 
-import type { DialogueVoiceHashInput } from '@/motion/dialogue-tts';
-import { dialogueVoicesHashBody } from '@/motion/dialogue-tts';
 import type {
   CharacterBibleEntry,
   ElementBibleEntry,
@@ -431,57 +625,129 @@ import type {
 } from '@/platform/server/db/schema';
 import { styleConfigHashBody } from '@/look/style-config';
 
-export type PromptSceneContextHashInput = {
-  /**
-   * Scene the prompt is being generated for. `prompts` and `continuity` are
-   * stripped before hashing — they are downstream LLM output, not input.
-   */
+/**
+ * Visual-prompt assembler DTO (#1616). Every channel is required so stamp
+ * and verify cannot independently omit a field. Empty bibles are spelled
+ * `[]`, not omitted.
+ */
+export type VisualPromptHashInput = {
   scene: Scene;
-  /** Sequence style config (look/feel knobs that influence prompt phrasing). */
   styleConfig: StyleConfig;
-  /** Character bible entries; sorted by `characterId` before hashing. */
   characterBible: readonly CharacterBibleEntry[];
-  /** Location bible entries; sorted by `locationId` before hashing. */
   locationBible: readonly LocationBibleEntry[];
-  /** Element bible entries; sorted by `token` before hashing. */
-  elementBible?: readonly ElementBibleEntry[];
-  /** Aspect ratio influences composition guidance in the prompt. */
+  elementBible: readonly ElementBibleEntry[];
   aspectRatio: string;
-  /** Analysis model id (e.g. `anthropic/claude-haiku-4.5`). */
   analysisModel: string;
-  /**
-   * URL of the rendered starting-shot image this prompt was conditioned on
-   * (`shots.thumbnailUrl`), or null when no image has been rendered yet. Only
-   * the MOTION prompt consumes this — motion is now generated with the actual
-   * still as a vision input (#929). The stored URL embeds a fresh id per
-   * render, so re-rendering the still changes it and re-stales the motion
-   * prompt. The visual prompt ignores it (the visual prompt produces the
-   * image — it can't depend on it).
-   */
-  startingFrameImageUrl?: string | null;
-  /**
-   * Reference-only mode — the sequence renders straight to video with no start
-   * frames. Only the MOTION prompt consumes this: the mode picks a different
-   * LLM template (compose-the-frame-then-move-it, rather than animate-this-
-   * still), so the same scene yields a materially different prompt under it
-   * and flipping the mode must re-stale what is stored.
-   *
-   * Joins the hash body only when true, so every existing image-to-video row's
-   * digest is unchanged and no `PROMPT_INPUT_HASH_VERSION` bump or null-sweep
-   * migration is needed — the same shape-stable trick `styleConfigHashBody`
-   * uses for its optional refinements.
-   */
-  referenceOnly?: boolean;
-  /**
-   * Dialogue TTS (#1554): voice id + line + TTS model, only for lines whose
-   * speaker has a designed voice. Joins the MOTION prompt hash only when a
-   * voice is present — the same shape-stable trick as `referenceOnly` — so
-   * editing a line or changing a voice re-stales the shot and no stored
-   * digest moves for a voiceless one. The visual prompt ignores it: a still
-   * does not speak.
-   */
-  dialogueVoices?: readonly DialogueVoiceHashInput[];
 };
+
+/**
+ * Motion-prompt assembler DTO. Extends the visual channels with the
+ * motion-only ones, all required. Voice ids are not a prompt channel —
+ * they bind on the clip (`VideoManifestEntry.audioSourceKey`), like
+ * character sheets on the still.
+ */
+export type MotionPromptHashInput = VisualPromptHashInput & {
+  startingFrameImageUrl: string | null;
+  referenceOnly: boolean;
+};
+
+export type VisualPromptInputHash = string & {
+  readonly __brand: 'VisualPromptInputHash';
+};
+export type MotionPromptInputHash = string & {
+  readonly __brand: 'MotionPromptInputHash';
+};
+
+/* oxlint-disable typescript/no-unsafe-type-assertion -- sole brand constructors */
+export const visualPromptInputHash = (hex: string): VisualPromptInputHash =>
+  hex as VisualPromptInputHash;
+export const motionPromptInputHash = (hex: string): MotionPromptInputHash =>
+  hex as MotionPromptInputHash;
+/* oxlint-enable typescript/no-unsafe-type-assertion */
+
+/** Any non-null object — Scene / StyleConfig / bible rows are validated by TS. */
+const requiredObject = z.custom<object>(
+  (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value),
+  { error: 'required object' }
+);
+
+const visualPromptHashInputSchema = z.object({
+  scene: requiredObject,
+  styleConfig: requiredObject,
+  characterBible: z.array(requiredObject),
+  locationBible: z.array(requiredObject),
+  elementBible: z.array(requiredObject),
+  aspectRatio: z.string(),
+  analysisModel: z.string(),
+});
+
+const motionPromptHashInputSchema = visualPromptHashInputSchema.extend({
+  startingFrameImageUrl: z.string().nullable(),
+  referenceOnly: z.boolean(),
+});
+
+/**
+ * Runtime-parse a visual assembler DTO. A missing channel on a durable JSON
+ * replay fails the run instead of hashing a different shape than verify.
+ */
+function assembleVisualPromptHashInput(raw: unknown): VisualPromptHashInput {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Zod object → assembler DTO
+  return visualPromptHashInputSchema.parse(raw) as VisualPromptHashInput;
+}
+
+/**
+ * Runtime-parse a motion assembler DTO. A missing channel on a durable JSON
+ * replay fails the run instead of hashing a different shape than verify.
+ */
+export function assembleMotionPromptHashInput(
+  raw: unknown
+): MotionPromptHashInput {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Zod object → assembler DTO
+  return motionPromptHashInputSchema.parse(raw) as MotionPromptHashInput;
+}
+
+/**
+ * Hash-body input. Motion-only channels stay optional HERE so empty/omitted
+ * is load-bearing (no stored voiceless / i2v digest moves). Callers never
+ * build this; they go through {@link MotionPromptHashInput} /
+ * {@link VisualPromptHashInput}.
+ */
+type PromptSceneContextHashInput = {
+  scene: Scene;
+  styleConfig: StyleConfig;
+  characterBible: readonly CharacterBibleEntry[];
+  locationBible: readonly LocationBibleEntry[];
+  elementBible?: readonly ElementBibleEntry[];
+  aspectRatio: string;
+  analysisModel: string;
+  startingFrameImageUrl?: string | null;
+  referenceOnly?: boolean;
+};
+
+function toVisualBodyInput(
+  input: VisualPromptHashInput
+): PromptSceneContextHashInput {
+  return {
+    scene: input.scene,
+    styleConfig: input.styleConfig,
+    characterBible: input.characterBible,
+    locationBible: input.locationBible,
+    elementBible: input.elementBible,
+    aspectRatio: input.aspectRatio,
+    analysisModel: input.analysisModel,
+  };
+}
+
+function toMotionBodyInput(
+  input: MotionPromptHashInput
+): PromptSceneContextHashInput {
+  return {
+    ...toVisualBodyInput(input),
+    startingFrameImageUrl: input.startingFrameImageUrl,
+    referenceOnly: input.referenceOnly,
+  };
+}
 
 /**
  * Project a scene down to ONLY the fields that are genuine pre-prompt inputs.
@@ -677,7 +943,6 @@ function motionPromptHashBody(
     named: flags.named,
     performance: true,
   });
-  const dialogueVoices = dialogueVoicesHashBody(input.dialogueVoices);
   return {
     artifact: 'shot:motion-prompt',
     hashVersion: flags.hashVersion,
@@ -688,21 +953,24 @@ function motionPromptHashBody(
     analysisModel: trim(input.analysisModel),
     startingFrameImageUrl: trim(input.startingFrameImageUrl),
     ...(input.referenceOnly ? { referenceOnly: true } : {}),
-    ...(dialogueVoices ? { dialogueVoices } : {}),
   };
 }
 
-export function computeVisualPromptInputHash(
-  input: PromptSceneContextHashInput
-): Promise<string> {
-  return sha256Hex(visualPromptHashBody(input, 'current'));
+export async function hashVisualPromptInput(
+  raw: VisualPromptHashInput | MotionPromptHashInput
+): Promise<VisualPromptInputHash> {
+  const input = assembleVisualPromptHashInput(raw);
+  return visualPromptInputHash(
+    await sha256Hex(visualPromptHashBody(toVisualBodyInput(input), 'current'))
+  );
 }
 
 /** v4 digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
-export function computeVisualPromptInputHashV4(
-  input: PromptSceneContextHashInput
+export async function computeVisualPromptInputHashV4(
+  raw: VisualPromptHashInput | MotionPromptHashInput
 ): Promise<string> {
-  return sha256Hex(visualPromptHashBody(input, 'v4'));
+  const input = assembleVisualPromptHashInput(raw);
+  return sha256Hex(visualPromptHashBody(toVisualBodyInput(input), 'v4'));
 }
 
 /**
@@ -711,9 +979,10 @@ export function computeVisualPromptInputHashV4(
  */
 export async function visualPromptInputHashMatches(
   stored: string | null,
-  input: PromptSceneContextHashInput
+  raw: VisualPromptHashInput | MotionPromptHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = toVisualBodyInput(assembleVisualPromptHashInput(raw));
   const [current, v5titled, v5named, v4] = await Promise.all([
     sha256Hex(visualPromptHashBody(input, 'current')),
     sha256Hex(visualPromptHashBody(input, 'v5-titled')),
@@ -728,24 +997,29 @@ export async function visualPromptInputHashMatches(
   );
 }
 
-export function computeMotionPromptInputHash(
-  input: PromptSceneContextHashInput
-): Promise<string> {
-  return sha256Hex(motionPromptHashBody(input, 'current'));
+export async function hashMotionPromptInput(
+  raw: MotionPromptHashInput
+): Promise<MotionPromptInputHash> {
+  const input = assembleMotionPromptHashInput(raw);
+  return motionPromptInputHash(
+    await sha256Hex(motionPromptHashBody(toMotionBodyInput(input), 'current'))
+  );
 }
 
 /** v4 digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
-export function computeMotionPromptInputHashV4(
-  input: PromptSceneContextHashInput
+export async function computeMotionPromptInputHashV4(
+  raw: MotionPromptHashInput
 ): Promise<string> {
-  return sha256Hex(motionPromptHashBody(input, 'v4'));
+  const input = assembleMotionPromptHashInput(raw);
+  return sha256Hex(motionPromptHashBody(toMotionBodyInput(input), 'v4'));
 }
 
 export async function motionPromptInputHashMatches(
   stored: string | null,
-  input: PromptSceneContextHashInput
+  raw: MotionPromptHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  const input = toMotionBodyInput(assembleMotionPromptHashInput(raw));
   const [current, v5titled, v5named, v4] = await Promise.all([
     sha256Hex(motionPromptHashBody(input, 'current')),
     sha256Hex(motionPromptHashBody(input, 'v5-titled')),
@@ -797,28 +1071,38 @@ function musicPromptHashBody(
   };
 }
 
+const musicPromptInputHashInputSchema = z.object({
+  sceneSummaries: z.array(z.unknown()),
+  analysisModel: z.string(),
+});
+
 export function computeMusicPromptInputHash(
-  input: MusicPromptInputHashInput
-): Promise<string> {
-  return sha256Hex(musicPromptHashBody(input, 'current'));
+  raw: MusicPromptInputHashInput
+): Promise<MusicPromptInputHash> {
+  musicPromptInputHashInputSchema.parse(raw);
+  return sha256Hex(musicPromptHashBody(raw, 'current')).then(
+    musicPromptInputHash
+  );
 }
 
 /** v4 digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
 export function computeMusicPromptInputHashV4(
-  input: MusicPromptInputHashInput
+  raw: MusicPromptInputHashInput
 ): Promise<string> {
-  return sha256Hex(musicPromptHashBody(input, 'v4'));
+  musicPromptInputHashInputSchema.parse(raw);
+  return sha256Hex(musicPromptHashBody(raw, 'v4'));
 }
 
 export async function musicPromptInputHashMatches(
   stored: string | null,
-  input: MusicPromptInputHashInput
+  raw: MusicPromptInputHashInput
 ): Promise<boolean> {
   if (!stored) return false;
+  musicPromptInputHashInputSchema.parse(raw);
   const [current, v5titled, v4] = await Promise.all([
-    sha256Hex(musicPromptHashBody(input, 'current')),
-    sha256Hex(musicPromptHashBody(input, 'v5-titled')),
-    sha256Hex(musicPromptHashBody(input, 'v4')),
+    sha256Hex(musicPromptHashBody(raw, 'current')),
+    sha256Hex(musicPromptHashBody(raw, 'v5-titled')),
+    sha256Hex(musicPromptHashBody(raw, 'v4')),
   ]);
   return stored === current || stored === v5titled || stored === v4;
 }
@@ -831,14 +1115,22 @@ export type SequenceMusicHashInput = {
   audioModel: string;
 };
 
+const sequenceMusicHashInputSchema = z.object({
+  prompt: z.string(),
+  tags: z.string(),
+  durationSeconds: z.number(),
+  audioModel: z.string(),
+});
+
 export function computeSequenceMusicInputHash(
-  input: SequenceMusicHashInput
-): Promise<string> {
+  raw: SequenceMusicHashInput
+): Promise<SequenceMusicInputHash> {
+  const input = sequenceMusicHashInputSchema.parse(raw);
   return sha256Hex({
     artifact: 'sequence:music',
     prompt: trim(input.prompt),
     tags: trim(input.tags),
     durationSeconds: input.durationSeconds,
     audioModel: input.audioModel,
-  });
+  }).then(sequenceMusicInputHash);
 }

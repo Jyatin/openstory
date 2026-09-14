@@ -638,10 +638,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             model,
           });
           const voicedLines = modelTakesDialogueAudio(model)
-            ? voicedDialogueLines(
-                motionVersion.dialogue,
-                plan.characterVoices ?? []
-              )
+            ? voicedDialogueLines(motionVersion.dialogue, plan.characterVoices)
             : [];
           const audioClips = matchingDialogueClips(
             shot.audioClips,

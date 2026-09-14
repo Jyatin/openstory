@@ -9,6 +9,7 @@ import {
 import type { LibraryLocation } from '@/platform/server/db/schema';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
+import { teamUserUploadStoragePath } from '@/cast/server/team-user-upload';
 import {
   getExtensionFromUrl,
   getMimeTypeFromExtension,
@@ -17,8 +18,8 @@ import { triggerWorkflow } from '@/platform/server/workflow/client';
 import type { LibraryLocationSheetWorkflowInput } from '@/platform/server/workflow/types';
 import { computeLibraryLocationSheetHashFromDto } from '@/cast/server/workflows/sheet-snapshots';
 import {
+  attachLocationReferenceImages,
   createLibraryLocation,
-  promoteLocationReferenceImages,
 } from '@/cast/server/locations/create-library-location';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
@@ -152,10 +153,11 @@ export const presignLocationUploadFn = createServerFn({ method: 'POST' })
     const uploadId = generateId();
     const contentType = getMimeTypeFromExtension(ext);
 
-    // Every upload lands in `temp/` (#1581); finalize gates it and moves it.
+    // Lands in `uploads/` and stays there (#1634). Finalize gates on the
+    // likeness ledger, then points the row at this key.
     return getSignedUploadUrl(
       STORAGE_BUCKETS.LOCATIONS,
-      `${context.teamId}/temp/${uploadId}.${ext}`,
+      teamUserUploadStoragePath(context.teamId, uploadId, ext),
       contentType
     );
   });
@@ -171,22 +173,18 @@ export const finalizeLocationUploadFn = createServerFn({ method: 'POST' })
     )
   )
   .handler(async ({ context, data }) => {
-    if (!data.publicUrl.startsWith(`/r2/locations/${context.teamId}/temp/`)) {
-      throw new Error('Invalid storage path');
-    }
-
     await requireLocation(context.scopedDb, data.locationId);
 
-    const [promoted] = await promoteLocationReferenceImages(
+    const [attached] = await attachLocationReferenceImages(
       context.scopedDb,
       [data.publicUrl],
       context.teamId
     );
-    if (!promoted) throw new Error('Invalid storage path');
+    if (!attached) throw new Error('Invalid storage path');
 
     await context.scopedDb.locations.update(data.locationId, {
-      referenceImageUrl: promoted.url,
-      referenceImagePath: promoted.path,
+      referenceImageUrl: attached.url,
+      referenceImagePath: attached.path,
     });
 
     return { success: true };
@@ -205,7 +203,7 @@ export const addLocationSheetsFn = createServerFn({ method: 'POST' })
   .handler(async ({ context, data }) => {
     const location = await requireLocation(context.scopedDb, data.locationId);
 
-    const processedImages = await promoteLocationReferenceImages(
+    const processedImages = await attachLocationReferenceImages(
       context.scopedDb,
       data.imageUrls,
       context.teamId

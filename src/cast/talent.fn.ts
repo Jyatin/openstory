@@ -1,5 +1,5 @@
 import { mediaUrlSchema } from '@/platform/schemas/media-url.schemas';
-import { deleteFile, getSignedUploadUrl, moveFile } from '#storage';
+import { deleteFile, getSignedUploadUrl } from '#storage';
 import { requireTeamAdminAccess } from '@/platform/server/auth/action-utils';
 import { generateId } from '@/platform/id';
 import {
@@ -8,10 +8,13 @@ import {
 } from '@/platform/server/db/scoped';
 import type { TalentWithSheets } from '@/platform/server/db/schema';
 import {
-  carryUploadRights,
   recordLikenessFinding,
   requireUploadRights,
 } from '@/cast/server/upload-rights';
+import {
+  assertTeamUserUploadAttachable,
+  teamUserUploadStoragePath,
+} from '@/cast/server/team-user-upload';
 import { getRequest } from '@tanstack/react-start/server';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import {
@@ -20,11 +23,7 @@ import {
   listTalentFilterSchema,
   updateTalentSchema,
 } from '@/cast/server/talent.schemas';
-import {
-  STORAGE_BUCKETS,
-  getPathFromUrl,
-  getPublicUrl,
-} from '@/platform/server/storage/buckets';
+import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
 import {
   getExtensionFromUrl,
   getMimeTypeFromExtension,
@@ -34,8 +33,9 @@ import { computeLibraryTalentSheetHashFromDto } from '@/cast/server/workflows/sh
 import { characterToBible } from '@/cast/server/bibles-from-scoped';
 import { releaseVoiceIfUnreferenced } from '@/cast/server/voice/release-voice';
 import { isTeamWritableTalent } from '@/cast/server/db/talent';
-import { createLibraryTalent } from '@/cast/server/talent/create-library-talent';
 import { analyzeTalentMediaForTeam } from '@/cast/server/talent/analyze-talent-media';
+import { createLibraryTalent } from '@/cast/server/talent/create-library-talent';
+import { cropTalentSheetPortrait } from '@/cast/server/talent/crop-sheet-portrait';
 import { enqueueLibraryTalentSheet } from '@/cast/server/talent/enqueue-library-talent-sheet';
 import { maybePromoteOrGenerateSheet } from '@/cast/server/talent/promote-or-generate-sheet';
 import { isTeamTalentStoredUrl } from '@/platform/server/storage/copy-stored-image';
@@ -276,9 +276,10 @@ export const deleteTalentMediaFn = createServerFn({ method: 'POST' })
 const mediaTypeSchema = z.enum(['image', 'video', 'recording']);
 
 /**
- * Every talent upload lands in `temp/` (#1581): finalize is what checks the
- * likeness ledger and moves the object under the talent, so the talent's
- * own folder only ever holds gated media and generated sheets.
+ * Every talent upload lands in `uploads/` and stays there (#1634). Finalize
+ * checks the likeness ledger then points the media row at that key — same
+ * contract as elements (#1471). Generated sheets/headshots still live under
+ * the talent id.
  */
 export const presignTalentUploadFn = createServerFn({ method: 'POST' })
   .middleware([authWithTeamMiddleware])
@@ -310,7 +311,7 @@ export const presignTalentUploadFn = createServerFn({ method: 'POST' })
 
     const result = await getSignedUploadUrl(
       STORAGE_BUCKETS.TALENT,
-      `${context.teamId}/temp/${mediaId}.${ext}`,
+      teamUserUploadStoragePath(context.teamId, mediaId, ext),
       contentType
     );
 
@@ -330,10 +331,6 @@ export const finalizeTalentUploadFn = createServerFn({ method: 'POST' })
     )
   )
   .handler(async ({ context, data }) => {
-    if (!isTeamTalentStoredUrl(data.publicUrl, context.teamId)) {
-      throw new Error('Invalid storage path');
-    }
-
     const talentRecord = await context.scopedDb.talent.getById(data.talentId);
     if (!talentRecord || !isTeamWritableTalent(talentRecord, context.teamId)) {
       throw new Error(
@@ -341,26 +338,24 @@ export const finalizeTalentUploadFn = createServerFn({ method: 'POST' })
       );
     }
 
-    // A still must be cleared or signed before it is stored under the talent;
-    // a clip or a recording has no likeness check.
-    if (data.type === 'image') {
-      await requireUploadRights(context.scopedDb, [data.publicUrl]);
-    }
+    const { path, url } = await assertTeamUserUploadAttachable({
+      url: data.publicUrl,
+      bucket: STORAGE_BUCKETS.TALENT,
+      teamId: context.teamId,
+    });
 
-    const tempPath = getPathFromUrl(data.publicUrl, STORAGE_BUCKETS.TALENT);
-    const path = `${context.teamId}/${data.talentId}/${data.mediaId}.${getExtensionFromUrl(data.publicUrl)}`;
-    await moveFile(STORAGE_BUCKETS.TALENT, tempPath, path);
-    const storedUrl = getPublicUrl(STORAGE_BUCKETS.TALENT, path);
+    // A still must be cleared or signed before the row points at it; a clip
+    // or a recording has no likeness check.
     if (data.type === 'image') {
-      await carryUploadRights(context.scopedDb, data.publicUrl, storedUrl);
+      await requireUploadRights(context.scopedDb, [url]);
     }
 
     await context.scopedDb.talent.media.create({
       id: data.mediaId,
       talentId: data.talentId,
       type: data.type,
-      url: storedUrl,
-      path: `talent/${path}`,
+      url,
+      path,
     });
 
     if (data.type === 'image') {
@@ -369,7 +364,7 @@ export const finalizeTalentUploadFn = createServerFn({ method: 'POST' })
         userId: context.user.id,
         teamId: context.teamId,
         talentId: data.talentId,
-        imageUrl: storedUrl,
+        imageUrl: url,
       });
     }
 
@@ -497,24 +492,38 @@ export const addCharacterToLibraryFn = createServerFn({ method: 'POST' })
       // Same ElevenLabs voice on both rows (#1553) — released when the last goes.
       voiceId: character.voiceId ?? undefined,
       voiceDescription: character.voiceDescription ?? undefined,
-      imageUrl: character.sheetImageUrl ?? undefined,
-      imagePath: character.sheetImagePath ?? undefined,
       isFavorite: false,
       isHuman: false,
       isInTeamLibrary: true,
     });
 
-    if (character.sheetImageUrl) {
-      await context.scopedDb.talent.sheets.create({
-        talentId: newTalent.id,
-        name: 'Default',
-        imageUrl: character.sheetImageUrl,
-        imagePath: character.sheetImagePath ?? undefined,
-        metadata: characterToBible(character),
-        isDefault: true,
-        source: 'script_analysis',
-      });
-    }
+    if (!character.sheetImageUrl) return newTalent;
 
-    return newTalent;
+    await context.scopedDb.talent.sheets.create({
+      talentId: newTalent.id,
+      name: 'Default',
+      imageUrl: character.sheetImageUrl,
+      imagePath: character.sheetImagePath ?? undefined,
+      metadata: characterToBible(character),
+      isDefault: true,
+      source: 'script_analysis',
+    });
+
+    // Crop panel 2 as the avatar — do not stamp the 4-panel onto imageUrl
+    // (#1630). A non-landscape sheet is copied as-is by the crop helper.
+    const headshot = await cropTalentSheetPortrait({
+      sheetUrl: character.sheetImageUrl,
+      destPath: `${context.teamId}/${newTalent.id}/headshot.png`,
+    });
+    const updated = await context.scopedDb.talent.update(newTalent.id, {
+      imageUrl: headshot.publicUrl,
+      imagePath: headshot.path,
+    });
+    return (
+      updated ?? {
+        ...newTalent,
+        imageUrl: headshot.publicUrl,
+        imagePath: headshot.path,
+      }
+    );
   });

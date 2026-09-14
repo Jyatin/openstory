@@ -9,7 +9,6 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { hashAssetIdentity } from '@/models/server/byteplus-assets';
 import { IMAGE_TO_VIDEO_MODELS } from '@/models/models';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { MotionWorkflowInput } from '@/platform/server/workflow/types';
@@ -21,7 +20,10 @@ const mockSoften = vi.fn();
 const mockDeductWorkflowCredits = vi.fn();
 const mockCalculateMotionMetadata = vi.fn(() => ({ cost: 0, duration: 5 }));
 const mockResolveMotionVia = vi.fn(
-  async (): Promise<'fal' | 'google'> => 'fal'
+  async (): Promise<'fal' | 'google' | 'byteplus'> => 'fal'
+);
+const mockIngestArkAssets = vi.fn(
+  async (_step: unknown, _args: { owner: string }) => ({})
 );
 const mockRecordMediaGenerationSpan = vi.fn();
 const emit = vi.fn(async () => {});
@@ -38,6 +40,10 @@ vi.doMock('@/motion/server/motion-generation', () => ({
     recordFalUsage: false,
   }),
   resolveMotionVia: mockResolveMotionVia,
+  arkStillsForMotion: () => [],
+}));
+vi.doMock('@/models/server/byteplus-asset-steps', () => ({
+  ingestArkAssets: mockIngestArkAssets,
 }));
 vi.doMock('@/billing/server/fal-pricing-live', () => ({
   getEffectiveFalPricing: async () => ({}),
@@ -136,7 +142,7 @@ function makeScopedDb() {
     update: vi.fn(async () => {}),
   };
   const bytePlusAssets = {
-    releaseLeases: vi.fn(async (_identities: readonly string[]) => {}),
+    releaseOwner: vi.fn(async (_owner: string) => {}),
   };
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stub covering only the surface runImpl touches
   const scopedDb = {
@@ -489,33 +495,57 @@ describe('MotionWorkflow onFailure observation', () => {
     );
   });
 
-  it('unpins the ACR slots this shot leased (#1361)', async () => {
+  it('unpins the ACR slots this run leased, by owner (#1361, #1531)', async () => {
     const { scopedDb, bytePlusAssets } = makeScopedDb();
 
-    await makeWorkflow().fail(
-      makeEvent({
-        imageUrl: 'https://cdn/still.png',
-        referenceImages: [
-          {
-            referenceImageUrl: 'https://cdn/sheet.png',
-            description: 'Ada',
-            role: 'character',
-            token: '@Ada',
-          },
-        ],
-      }),
-      scopedDb
-    );
+    await makeWorkflow().fail(makeEvent(), scopedDb);
 
-    // Hashed identities, not raw URLs — the ledger never sees a URL. A failed
-    // run that skipped this would hold both slots for the full lease TTL.
-    const [identities] = bytePlusAssets.releaseLeases.mock.calls[0] ?? [];
-    expect(identities).toEqual(
-      await Promise.all(
-        ['https://cdn/still.png', 'https://cdn/sheet.png'].map(
-          hashAssetIdentity
-        )
-      )
+    // By run, not by still: a sibling shot polling the same sheet keeps its
+    // own lease. A failed run that skipped this would hold its slots for the
+    // full lease TTL.
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith('motion:run-1');
+  });
+
+  it('unpins on success whatever via the clip finally rendered on (#1531)', async () => {
+    // An earlier attempt may have leased stills on Ark before a re-roll moved
+    // the shot to another via; the success release must not be Ark-only.
+    const { scopedDb, bytePlusAssets } = makeScopedDb();
+    const step = makeStep();
+
+    await makeWorkflow().runBody(makeEvent(), step, scopedDb);
+
+    expect(step.names).toContain('release-byteplus-asset-leases');
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith('motion:run-1');
+  });
+
+  it('leases stills under the same owner it releases', async () => {
+    mockResolveMotionVia.mockResolvedValueOnce('byteplus');
+    const { scopedDb, bytePlusAssets } = makeScopedDb();
+
+    await makeWorkflow().runBody(makeEvent(), makeStep(), scopedDb);
+
+    // An owner that drifted between the two would release nothing, and every
+    // lease would sit out its full TTL with no error anywhere.
+    const owner = mockIngestArkAssets.mock.calls[0]?.[1].owner;
+    expect(owner).toBe('motion:run-1');
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith(owner);
+  });
+
+  it('a release that never lands does not fail a rendered clip', async () => {
+    const { scopedDb, bytePlusAssets, videoVariants } = makeScopedDb();
+    bytePlusAssets.releaseOwner.mockRejectedValueOnce(new Error('D1 down'));
+
+    await makeWorkflow().runBody(makeEvent(), makeStep(), scopedDb);
+
+    expect(videoVariants.appendVersion).toHaveBeenCalled();
+  });
+
+  it('a failed release in onFailure throws, so the emit-failure step retries it', async () => {
+    const { scopedDb, bytePlusAssets } = makeScopedDb();
+    bytePlusAssets.releaseOwner.mockRejectedValueOnce(new Error('D1 down'));
+
+    await expect(makeWorkflow().fail(makeEvent(), scopedDb)).rejects.toThrow(
+      'D1 down'
     );
   });
 });

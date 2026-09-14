@@ -20,7 +20,10 @@ const mockPoll = vi.fn();
 const mockCost = vi.fn();
 const mockRecordMediaGenerationSpan = vi.fn();
 const mockResolveMotionVia = vi.fn(
-  async (): Promise<'fal' | 'google'> => 'fal'
+  async (): Promise<'fal' | 'google' | 'byteplus'> => 'fal'
+);
+const mockIngestArkAssets = vi.fn(
+  async (_step: unknown, _args: { owner: string }) => ({})
 );
 
 vi.doMock('@/stills/server/image-generation', () => ({
@@ -49,6 +52,10 @@ vi.doMock('@/studio/server/studio-video-generation', () => ({
   submitStudioVideoJob: mockSubmit,
   pollStudioVideoJob: mockPoll,
   studioVideoCostFromUsage: mockCost,
+  arkStillsForStudio: () => [],
+}));
+vi.doMock('@/models/server/byteplus-asset-steps', () => ({
+  ingestArkAssets: mockIngestArkAssets,
 }));
 vi.doMock('@/platform/server/observability/ai-otel', () => ({
   recordMediaGenerationSpan: mockRecordMediaGenerationSpan,
@@ -104,13 +111,17 @@ function makeScopedDb() {
     markCompleted: vi.fn(async () => {}),
     markFailed: vi.fn(async () => {}),
   };
+  const bytePlusAssets = {
+    releaseOwner: vi.fn(async (_owner: string) => {}),
+  };
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stub covering only the surface runImpl touches
   const scopedDb = {
     generatedAssets,
+    bytePlusAssets,
     provenance: {},
     credentials: {},
   } as unknown as WorkflowScopedDb;
-  return { scopedDb, generatedAssets };
+  return { scopedDb, generatedAssets, bytePlusAssets };
 }
 
 const IMAGE: StudioCreateInput = {
@@ -237,7 +248,7 @@ describe('StudioGenerationWorkflow video', () => {
       .mockRejectedValueOnce(new Error('flagged by a content checker'))
       .mockRejectedValueOnce(new Error('flagged by a content checker'));
     const step = makeStep();
-    const { scopedDb, generatedAssets } = makeScopedDb();
+    const { scopedDb, generatedAssets, bytePlusAssets } = makeScopedDb();
 
     await makeWorkflow().runBody(makeEvent(VIDEO), step, scopedDb);
 
@@ -252,6 +263,8 @@ describe('StudioGenerationWorkflow video', () => {
       'resolve-video-via-retry-2',
       'submit-video-retry-2',
       'video-poll-batch-2-0',
+      // Unpins every still the run leased on Ark, whatever via won (#1531).
+      'release-byteplus-asset-leases',
       'price-video-generation',
       'deduct-video-credits',
       'upload-video',
@@ -259,6 +272,7 @@ describe('StudioGenerationWorkflow video', () => {
       'record-provenance',
       'persist-result',
     ]);
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith('studio:run-1');
     expect(mockDeductWorkflowCredits).toHaveBeenCalledWith(
       expect.objectContaining({
         costMicros: 70_000,
@@ -277,6 +291,26 @@ describe('StudioGenerationWorkflow video', () => {
         costMicros: 70_000,
       })
     );
+  });
+
+  it('leases stills under the same owner it releases', async () => {
+    mockResolveMotionVia.mockResolvedValueOnce('byteplus');
+    const { scopedDb, bytePlusAssets } = makeScopedDb();
+
+    await makeWorkflow().runBody(makeEvent(VIDEO), makeStep(), scopedDb);
+
+    const owner = mockIngestArkAssets.mock.calls[0]?.[1].owner;
+    expect(owner).toBe('studio:run-1');
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith(owner);
+  });
+
+  it('a release that never lands does not fail a rendered clip', async () => {
+    const { scopedDb, generatedAssets, bytePlusAssets } = makeScopedDb();
+    bytePlusAssets.releaseOwner.mockRejectedValueOnce(new Error('D1 down'));
+
+    await makeWorkflow().runBody(makeEvent(VIDEO), makeStep(), scopedDb);
+
+    expect(generatedAssets.markCompleted).toHaveBeenCalled();
   });
 
   it('gives up after three content flags without billing', async () => {
@@ -316,6 +350,22 @@ describe('StudioGenerationWorkflow onFailure', () => {
     expect(generatedAssets.markFailed).toHaveBeenCalledWith('asset-1', 'boom');
     // Image failures are recorded inside generateImageWithProvider.
     expect(mockRecordMediaGenerationSpan).not.toHaveBeenCalled();
+  });
+
+  it('unpins the ACR stills a failed video run leased (#1531)', async () => {
+    const { scopedDb, bytePlusAssets } = makeScopedDb();
+    await makeWorkflow().fail(makeEvent(VIDEO), scopedDb);
+    expect(bytePlusAssets.releaseOwner).toHaveBeenCalledWith('studio:run-1');
+  });
+
+  it('a failed release throws after marking the row, so emit-failure retries it', async () => {
+    const { scopedDb, generatedAssets, bytePlusAssets } = makeScopedDb();
+    bytePlusAssets.releaseOwner.mockRejectedValueOnce(new Error('D1 down'));
+
+    await expect(
+      makeWorkflow().fail(makeEvent(VIDEO), scopedDb)
+    ).rejects.toThrow('D1 down');
+    expect(generatedAssets.markFailed).toHaveBeenCalledWith('asset-1', 'boom');
   });
 
   it('records a video failure span on the resolved via', async () => {

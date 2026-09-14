@@ -33,11 +33,13 @@ import { aspectRatioToImageSize } from '@/models/aspect-ratios';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { GeneratedAssetOutput } from '@/platform/server/db/schema';
 import { generateImageWithProvider } from '@/stills/server/image-generation';
+import { assetLeaseOwner } from '@/models/server/byteplus-asset-pool';
 import { ingestArkAssets } from '@/models/server/byteplus-asset-steps';
 import { resolveMotionVia } from '@/motion/server/motion-generation';
 import { videoUrlFitsWorkflowCheckpoint } from '@/motion/server/video-storage';
 import { recordMediaGenerationSpan } from '@/platform/server/observability/ai-otel';
 import { getLogger } from '@/platform/logger';
+import { isEngineAbortError } from '@/platform/server/workflow/errors';
 import type { StudioCreateInput } from '@/studio/schema';
 import {
   pollStudioVideoJob,
@@ -223,6 +225,7 @@ export class StudioGenerationWorkflow extends OpenStoryWorkflowEntrypoint<Studio
               prefix: `studio${tag}`,
               stills: arkStillsForStudio(input),
               ledger: scopedDb.bytePlusAssets,
+              owner: assetLeaseOwner('studio', event.instanceId),
               credentials: scopedDb.credentials,
             })
           : {};
@@ -400,6 +403,24 @@ export class StudioGenerationWorkflow extends OpenStoryWorkflowEntrypoint<Studio
     }
     const job = succeededJob;
 
+    // The clip is rendered: unpin every still this run leased (#1361, #1531),
+    // whichever via the last attempt used. The failure half is in onFailure.
+    // Caught outside the step (its retries still run): a release that never
+    // lands must not throw away a rendered clip. The lease TTL frees them.
+    try {
+      await step.do('release-byteplus-asset-leases', async () =>
+        scopedDb.bytePlusAssets.releaseOwner(
+          assetLeaseOwner('studio', event.instanceId)
+        )
+      );
+    } catch (releaseError) {
+      if (isEngineAbortError(releaseError)) throw releaseError;
+      logger.error(
+        `[StudioGenerationWorkflow] Failed to release BytePlus asset leases for ${assetId}; the lease TTL frees them`,
+        { err: releaseError }
+      );
+    }
+
     const billing = await step.do('price-video-generation', async () =>
       studioVideoCostFromUsage(job, billedUsage)
     );
@@ -531,6 +552,14 @@ export class StudioGenerationWorkflow extends OpenStoryWorkflowEntrypoint<Studio
       });
     }
     await scopedDb.generatedAssets.markFailed(assetId, error);
+    if (input.activity === 'video') {
+      // Unpin this run's ACR stills (#1531). Not caught: this runs inside the
+      // base class's retried `emit-failure` step, which keeps the real
+      // failure message if the release never lands.
+      await scopedDb.bytePlusAssets.releaseOwner(
+        assetLeaseOwner('studio', event.instanceId)
+      );
+    }
     if (isContentRejectionError(error)) {
       logger.warn(
         `[StudioGenerationWorkflow] Asset ${assetId} failed: ${error}`

@@ -109,6 +109,7 @@ For each character determine:
 - Personality: temperament, how they react under pressure (not appearance)
 - Movement: gait, posture, habitual gestures, a limp (not appearance)
 - Consistency tag: short unique reference (e.g., "Jack-denim-weathered")
+- Voice: hearable Voice Design brief (Native language, gender, age, Excellent quality, persona, emotion, timbre) — not appearance
 
 ## First Mention Tracking
 
@@ -131,6 +132,7 @@ For each character determine:
     "distinguishingFeatures": "Small scar above left eyebrow, silver watch",
     "personality": "Guarded, dry humour, slow to anger and slower to forgive",
     "movement": "Heavy deliberate stride, favours his left knee, hands stay in jacket pockets",
+    "voiceDescription": "Native English. Male, mid-30s. Excellent quality. Persona: weary cowboy. Emotion: dry, unhurried. Low gravel timbre, conversational pace.",
     "consistencyTag": "Jack-denim-weathered"
   }]
 }`,
@@ -269,15 +271,28 @@ Before you finish, check the whole script against the RENDER IT CLEANLY rules an
  * Chat prompts (used via getChatPrompt → durable workflow calls)
  */
 export const WORKFLOW_CHAT_PROMPTS: Record<string, ChatMessage[]> = {
-  // Voice Design (#1553): one sentence ElevenLabs can cast from. Prompted
-  // like their own guidance — age, gender, accent, pitch, texture, pace,
-  // attitude — and nothing about looks, which a voice cannot carry.
+  // Voice Design (#1553 / #1629): ElevenLabs' recommended prompt shape
+  // (language, gender, age, quality, persona, emotion, timbre/pacing).
+  // https://elevenlabs.io/docs/eleven-creative/voices/voice-design#prompting-guide
   'phase/voice-design-chat': [
     {
       role: 'system',
-      content: `You are a casting director writing a voice brief for a text-to-voice model. You will be called via a structured output tool. Follow the provided schema exactly.
+      content: `You are a casting director writing a Voice Design brief. You will be called via a structured output tool. Follow the provided schema exactly.
 
-Given a character bible, write ONE "voiceDescription" of 20–60 words that describes only what can be HEARD: age, gender, accent or region, pitch, texture (gravelly, breathy, clear), pace, energy and attitude, in the register the personality implies. Name a concrete accent where the bible gives ethnicity or region. Never describe appearance, clothing or movement. No character name, no quotes, no lists — a single descriptive sentence, e.g. "A warm, low-pitched British woman in her 50s, unhurried and precise, with a dry amused edge."`,
+Write one "voiceDescription" in this shape (40–90 words):
+
+Native <language and regional variant>. <Gender>, <age range>. Excellent quality.
+Persona: <2–5 words>. Emotion: <2–3 adjectives>.
+<1–2 sentences on timbre, pacing, and delivery.>
+
+Rules:
+- Hearable traits only: language, dialect, gender, age, quality, persona, emotion, pitch, texture, pacing. Never appearance, clothing, or movement.
+- Always include "Excellent quality" (or "Studio quality") so the take is clean, not synthetic.
+- Name a concrete regional dialect when the bible gives ethnicity or region ("Native English, slight Southern drawl"), not a vague "accent" when you mean intonation.
+- Do not use FX words (reverb, echo, phone, tape) — they degrade the take.
+- No character name, no quotes, no lists.
+
+Example: "Native English. Female, mid-50s. Excellent quality. Persona: dry detective. Emotion: unhurried, precise, amused. Warm low-pitched timbre with a slight gravel, conversational pacing, and a noise-free signal."`,
     },
     {
       role: 'user',
@@ -394,6 +409,7 @@ For each character determine:
 - Clothing: complete outfit that defines the character
 - Distinguishing features: scars, tattoos, jewelry, accessories
 - Consistency tag: short unique reference (e.g., "Jack-denim-weathered")
+- Voice: hearable Voice Design brief (Native language, gender, age, Excellent quality, persona, emotion, timbre) — not appearance
 
 ## First Mention Tracking
 
@@ -988,6 +1004,7 @@ Build a complete character bible. For each character:
 - personality — who they are, NOT what they look like: temperament, archetype, how they react under pressure, comic register. Drives expressions, reactions, pacing and delivery.
 - movement — how the body moves: gait, posture, energy, habitual gestures, a limp, a tremor. Drives blocking and action.
   Extract both from the script, and infer where the script only implies them ("fidgets with his tie" → personality: anxious, eager to please; movement: restless hands, shoulders tight). Never repeat appearance in either field.
+- voiceDescription — what can be HEARD. ElevenLabs Voice Design brief, 40–90 words, this shape: Native <language>. <gender>, <age>. Excellent quality. Persona: <2–5 words>. Emotion: <2–3 adjectives>. Then 1–2 sentences on timbre, pacing, delivery. Infer from dialogue, personality and movement. No appearance, clothing, or FX words (reverb/echo/phone). Always fill this — it is the Voice field and the brief Generate casts from.
 - consistencyTag — HARD FORMAT CONTRACT: the snake_case slug of the character's name AS WRITTEN IN THE SCRIPT ("GIRL ONE" → "girl_one"). Optional descriptive context may follow the name slug ("jack_denim_weathered"), but the tag MUST start with the name slug. An independent system joins scene tags against these.
 - voiceOnly — true only for a voice that is heard but NEVER seen: a narrator, a voiceover, a radio or phone voice with no face on screen. Each distinct such voice is its own entry, named as the script names it, or "Narrator" for unnamed narration. Its personality describes the VOICE — register, warmth, pace, attitude. Age may be a guess if the voice implies one, otherwise empty; gender, ethnicity, physicalDescription, standardClothing, distinguishingFeatures and movement are empty strings. Create none when nobody speaks off screen. A character who is off screen for a moment, or seen in another scene, has a face: voiceOnly false, full appearance.
 
@@ -1058,7 +1075,7 @@ For each character that appears on screen:
 2. Include clothing details that define the character
 3. Add distinguishing features
 4. Create a consistencyTag starting with the character's name slug
-A voice that is only heard gets its own entry with voiceOnly true, a voice description in personality, and empty appearance fields.
+A voice that is only heard gets its own entry with voiceOnly true, a voiceDescription, personality as register/attitude, and empty appearance fields.
 
 For each unique location:
 1. Provide COMPLETE visual descriptions for visual consistency

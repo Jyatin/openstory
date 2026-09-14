@@ -35,7 +35,9 @@ import {
 import {
   elevenLabsDetail,
   elevenLabsStatus,
+  resolveAssignableVoiceId,
   saveDesignedVoice,
+  type AssignableVoicePick,
 } from '@/cast/server/voice/elevenlabs-voice';
 import {
   DEFAULT_ANALYSIS_MODEL,
@@ -335,6 +337,86 @@ export const chooseCharacterVoiceTakeFn = createServerFn({ method: 'POST' })
     return { characterId: character.id, voiceId };
   });
 
+/**
+ * Assign a premade or Voice Library voice (#1629). Premade ids are used
+ * as-is (no slot). Library voices are copied onto the platform account,
+ * then the old designed/library slot is released. Designed takes stay
+ * parked so the user can switch back.
+ */
+export const assignCharacterVoiceFn = createServerFn({ method: 'POST' })
+  .middleware([sequenceAccessMiddleware])
+  .validator(
+    zodValidator(
+      characterIdInput.extend({
+        source: z.enum(['premade', 'library']),
+        voiceId: z.string().min(1).max(128),
+        publicOwnerId: z.string().min(1).max(128).optional(),
+        name: z.string().trim().min(1).max(255).optional(),
+        description: z.string().trim().max(2000).optional(),
+      })
+    )
+  )
+  .handler(async ({ context, data }) => {
+    const apiKey = getElevenLabsApiKey();
+    if (!apiKey || !isElevenLabsConfigured()) {
+      throw new ValidationError('Voice design is not configured');
+    }
+    const character = await context.scopedDb.characters.getById(
+      data.characterId
+    );
+    if (!character || character.sequenceId !== data.sequenceId) {
+      throw new NotFoundError('Character not found');
+    }
+    let pick: AssignableVoicePick;
+    if (data.source === 'library') {
+      if (!data.publicOwnerId || !data.name) {
+        throw new ValidationError(
+          'Library voices need a public owner id and a name'
+        );
+      }
+      pick = {
+        source: 'library',
+        voiceId: data.voiceId,
+        publicOwnerId: data.publicOwnerId,
+        name: `${data.name} · ${character.name}`,
+      };
+    } else {
+      pick = { source: 'premade', voiceId: data.voiceId };
+    }
+    let voiceId: string;
+    try {
+      voiceId = await resolveAssignableVoiceId(apiKey, pick);
+    } catch (error) {
+      const status = elevenLabsStatus(error);
+      if (status === 404) {
+        throw new ValidationError('This voice is no longer available.');
+      }
+      if (
+        status !== undefined &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      ) {
+        throw new ValidationError(
+          `Could not use this voice: ${elevenLabsDetail(error) ?? `ElevenLabs returned ${status}`}`
+        );
+      }
+      throw error;
+    }
+    if (character.voiceId === voiceId) {
+      return { characterId: character.id, voiceId };
+    }
+    const voiceDescription = (data.description ?? data.name)?.trim();
+    await context.scopedDb.characters.update(character.id, {
+      voiceId,
+      ...(voiceDescription ? { voiceDescription } : {}),
+    });
+    if (character.voiceId) {
+      await releaseVoiceIfUnreferenced(context.scopedDb, character.voiceId);
+    }
+    return { characterId: character.id, voiceId };
+  });
+
 /** Undo a character soft-delete. */
 export const restoreSequenceCharacterFn = createServerFn({ method: 'POST' })
   .middleware([sequenceAccessMiddleware])
@@ -602,6 +684,7 @@ export const recastCharacterFn = createServerFn({ method: 'POST' })
         characterId: character.characterId,
         name: character.name,
         voiceOnly: character.voiceOnly,
+        voiceDescription: character.voiceDescription ?? '',
         ...castingAttrs,
       },
       sequenceId: character.sequenceId,

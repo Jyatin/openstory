@@ -382,9 +382,12 @@ export function useGenerationStream(
     enabled: true,
   });
 
-  const reset = useCallback(() => {
-    dispatch({ type: 'RESET' });
-  }, []);
+  const reset = useCallback(
+    (config?: GenerationPhaseConfig) => {
+      dispatch({ type: 'RESET', payload: config ?? phaseConfig });
+    },
+    [phaseConfig]
+  );
 
   return {
     state,

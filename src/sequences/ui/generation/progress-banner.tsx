@@ -76,9 +76,7 @@ export const ProgressBanner: React.FC<ProgressBannerProps> = ({
     return () => clearTimeout(timer);
   }, [isExiting, onExitComplete]);
 
-  if (isExiting && !isComplete) return null;
-  // For immediate exit (exitDelayMs=0), unmount once exiting
-  if (isExiting && exitDelayMs === 0) return null;
+  if (isComplete && isExiting && exitDelayMs === 0) return null;
 
   const activePhase = phases.find((p) => p.status === 'active');
   const completedCount = phases.filter((p) => p.status === 'completed').length;
@@ -108,7 +106,7 @@ export const ProgressBanner: React.FC<ProgressBannerProps> = ({
         className={cn(
           'relative flex h-8 min-w-0 items-center gap-1.5 overflow-hidden rounded-full border bg-background px-2.5 text-xs text-muted-foreground transition-opacity duration-500 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 outline-none',
           !showCompleted && 'progress-shimmer',
-          isExiting && 'opacity-0'
+          isComplete && isExiting && 'opacity-0'
         )}
       >
         <span

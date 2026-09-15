@@ -36,9 +36,9 @@ import { recordProvenance } from '@/platform/server/compliance/provenance';
 import { buildElementSheetPrompt } from '@/cast/element-prompt';
 import { rejectionReasonMessage } from './replace-element-workflow';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
-import { uploadResponse } from '@/platform/server/storage/upload-response';
 import { contentRejectionSummary } from '@/models/content-rejection';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import { storeGeneratedPng } from '@/stills/server/image-storage';
 import { generateImageSoftening } from '@/stills/server/workflows/content-soften';
 import { MAX_AUTO_ELEMENTS } from './cast-records';
 import type {
@@ -175,23 +175,30 @@ export class ElementSheetWorkflow extends OpenStoryWorkflowEntrypoint<ElementShe
           stepName: `generate-element-image-${index}`,
           params: builtParams,
           meta: { elementId: entry.elementId },
+          store: (result) =>
+            storeGeneratedPng(
+              result.imageUrls[0],
+              STORAGE_BUCKETS.ELEMENTS,
+              `${input.teamId}/${sequenceId}/${generateId()}.png`
+            ),
         });
-        const imageResult = generation.result;
+        const storageResult = generation.stored;
+        const imageMetadata = generation.metadata;
         const generationParams = generation.params;
 
         // Before the deduction guard — see recordFalUsageStep (#1069).
         const falUsage = await recordFalUsageStep(
           step,
           scopedDb,
-          imageResult.metadata,
+          imageMetadata,
           `record-fal-usage-${index}`
         );
 
         await step.do(`deduct-credits-${index}`, async () => {
           await deductWorkflowCredits({
             scopedDb,
-            costMicros: extractImageCost(imageResult.metadata),
-            usedOwnKey: imageResult.metadata.usedOwnKey,
+            costMicros: extractImageCost(imageMetadata),
+            usedOwnKey: imageMetadata.usedOwnKey,
             description: `Element reference (${generationParams.model})`,
             idempotencyKey: `${event.instanceId}:element-ref-${index}`,
             reservationId: input.reservationId,
@@ -204,34 +211,6 @@ export class ElementSheetWorkflow extends OpenStoryWorkflowEntrypoint<ElementShe
             workflowName: 'ElementSheetWorkflow',
           });
         });
-
-        const generatedUrl = imageResult.imageUrls[0];
-        if (!generatedUrl) {
-          throw new Error(
-            `Element reference generation returned no image URL for ${entry.token}`
-          );
-        }
-
-        const storageResult = await step.do(
-          `upload-element-image-${index}`,
-          async () => {
-            const response = await fetch(generatedUrl);
-            if (!response.ok) {
-              throw new Error(
-                `Failed to fetch generated element image: ${response.status}`
-              );
-            }
-            // Same path shape as user uploads: {teamId}/{sequenceId}/{id}.png
-            const storagePath = `${input.teamId}/${sequenceId}/${generateId()}.png`;
-            const result = await uploadResponse(
-              response,
-              STORAGE_BUCKETS.ELEMENTS,
-              storagePath,
-              { contentType: 'image/png' }
-            );
-            return { url: result.publicUrl, path: result.path };
-          }
-        );
 
         await step.do(`record-provenance-${index}`, async () => {
           await recordProvenance(scopedDb.provenance, {

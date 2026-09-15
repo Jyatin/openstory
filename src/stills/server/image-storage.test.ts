@@ -31,7 +31,7 @@ vi.doMock('#storage', () => ({ uploadFile }));
 vi.doMock('#env', () => ({ getEnv: () => ({}) }));
 
 // Dynamic import so the mocks apply (vi.doMock is not hoisted).
-const { uploadImageToStorage, uploadPosterToStorage } =
+const { storeGeneratedPng, uploadImageToStorage, uploadPosterToStorage } =
   await import('./image-storage');
 
 const fetchMock = vi.fn();
@@ -93,7 +93,7 @@ describe('uploadPosterToStorage', () => {
     expect(result.path).toMatch(/\.webp$/);
   });
 
-  it('names the status, host and provider body when the download fails', async () => {
+  it('names the status and provider body when the download fails', async () => {
     // Providers send no reason phrase, so `statusText` alone said `<none>`
     // and left the failure undiagnosable (#1435).
     fetchMock.mockResolvedValue(
@@ -106,9 +106,7 @@ describe('uploadPosterToStorage', () => {
         teamId: 'team_1',
         sequenceId: 'seq_1',
       })
-    ).rejects.toThrow(
-      'Failed to download image from v3.fal.media: 404 NoSuchKey'
-    );
+    ).rejects.toThrow('Failed to download image: 404 NoSuchKey');
     expect(uploadFile).not.toHaveBeenCalled();
   });
 });
@@ -219,5 +217,68 @@ describe('content-type precedence', () => {
       expect.anything(),
       expect.objectContaining({ contentType: 'image/jpeg' })
     );
+  });
+});
+
+/**
+ * #1638: native Gemini answers with inline base64 and BytePlus can, so the
+ * generation hands back bytes rather than a URL — which a plain `fetch`
+ * cannot read, and this uploader used to do exactly that.
+ */
+describe('inline and stored sources', () => {
+  it('uploads inline data: bytes without a network call', async () => {
+    const dataUri = `data:image/png;base64,${btoa(String.fromCharCode(...PNG_BYTES))}`;
+
+    const result = await uploadImageToStorage({
+      imageUrl: dataUri,
+      teamId: 'team_1',
+      sequenceId: 'seq_1',
+      shotId: 'shot_1',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.contentType).toBe('image/png');
+    expect(result.path).toMatch(/\.png$/);
+  });
+
+  it('reports status and body when the download fails', async () => {
+    fetchMock.mockResolvedValue(new Response('nope', { status: 500 }));
+
+    await expect(
+      uploadImageToStorage({
+        imageUrl: 'https://v3.fal.media/files/b/abc/shot.png',
+        teamId: 'team_1',
+        sequenceId: 'seq_1',
+        shotId: 'shot_1',
+      })
+    ).rejects.toThrow('Failed to download image: 500 nope');
+  });
+});
+
+describe('storeGeneratedPng', () => {
+  it('uploads inline data: bytes to the given bucket and path', async () => {
+    const dataUri = `data:image/png;base64,${btoa(String.fromCharCode(...PNG_BYTES))}`;
+
+    const result = await storeGeneratedPng(
+      dataUri,
+      'locations',
+      'team_1/seq_1/loc_1/sheet.png'
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.path).toBe('locations/team_1/seq_1/loc_1/sheet.png');
+    expect(result.url).toBe('/r2/locations/team_1/seq_1/loc_1/sheet.png');
+    expect(uploadFile).toHaveBeenCalledWith(
+      'locations',
+      'team_1/seq_1/loc_1/sheet.png',
+      expect.anything(),
+      expect.objectContaining({ contentType: 'image/png' })
+    );
+  });
+
+  it('throws when generation returned no URL', async () => {
+    await expect(
+      storeGeneratedPng(undefined, 'locations', 'x.png')
+    ).rejects.toThrow('No image URL returned from generation');
   });
 });

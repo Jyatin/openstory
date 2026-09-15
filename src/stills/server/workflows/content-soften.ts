@@ -141,6 +141,13 @@ async function softenRejectedPrompt(
   return softened;
 }
 
+type StoredGeneratedImage = {
+  url: string;
+  path: string;
+  /** Talent sheets mint the row id inside the store step so it survives replay. */
+  sheetId?: string;
+};
+
 export type GenerateImageSofteningArgs = {
   step: WorkflowStep;
   scopedDb: WorkflowScopedDb;
@@ -161,6 +168,14 @@ export type GenerateImageSofteningArgs = {
    */
   stepName: string;
   params: ImageGenerationParams;
+  /**
+   * Persist the rendered image to its final key. Runs INSIDE the generating
+   * step, on purpose (#1645): a provider that answers with inline bytes has
+   * no URL to hand across a step boundary, and Workflows checkpoints every
+   * `step.do` result at 1 MiB — the whole image would ride it. Storing here
+   * means only this small record ever crosses.
+   */
+  store: (result: ImageGenerationResult) => Promise<StoredGeneratedImage>;
   /** Authored prompt to soften. Defaults to `params.prompt`. */
   prompt?: string;
   /**
@@ -188,14 +203,24 @@ type RetryInfo = {
 };
 
 export type GenerateImageSofteningResult = {
-  result: ImageGenerationResult;
+  /** What `store` returned, from inside the generating step. */
+  stored: StoredGeneratedImage;
+  /** Provider metadata — billing, usage and provenance. Always small. */
+  metadata: ImageGenerationResult['metadata'];
+  /** Which API served it — fal units are only sampled for `'fal'`. */
+  via: ImageGenerationResult['via'];
   /** Params actually rendered — a different model and/or prompt on rescue. */
   params: ImageGenerationParams;
   softened: boolean;
 };
 
 type Outcome =
-  | { ok: true; result: ImageGenerationResult }
+  | {
+      ok: true;
+      stored: StoredGeneratedImage;
+      metadata: ImageGenerationResult['metadata'];
+      via: ImageGenerationResult['via'];
+    }
   | { ok: false; rejection: string };
 
 export async function generateImageSoftening(
@@ -225,12 +250,12 @@ export async function generateImageSoftening(
     }
   };
 
-  const generateOnce = (
+  const generateOnce = async (
     name: string,
     params: ImageGenerationParams,
     attempt: number
-  ) =>
-    step.do(name, async (): Promise<Outcome> => {
+  ): Promise<Outcome> => {
+    return step.do(name, async (): Promise<Outcome> => {
       logger.info(
         `${logTag} Generating ${subject} with model ${params.model} (attempt ${attempt}/${maxAttempts})`
       );
@@ -238,7 +263,14 @@ export async function generateImageSoftening(
         const result = await generateImageWithProvider(params, {
           scopedDb: scopedDb.credentials,
         });
-        return { ok: true, result };
+        // Same step, deliberately — see `store` on the args.
+        const stored = await args.store(result);
+        return {
+          ok: true,
+          stored,
+          metadata: result.metadata,
+          via: result.via,
+        };
       } catch (error) {
         if (isContentRejectionError(error)) {
           return { ok: false, rejection: extractFalErrorMessage(error) };
@@ -246,6 +278,7 @@ export async function generateImageSoftening(
         throw error;
       }
     });
+  };
 
   let params = args.params;
   let lastRejection: string | null = null;
@@ -270,7 +303,13 @@ export async function generateImageSoftening(
           }
         );
       }
-      return { result: outcome.result, params, softened: false };
+      return {
+        stored: outcome.stored,
+        metadata: outcome.metadata,
+        via: outcome.via,
+        params,
+        softened: false,
+      };
     }
     lastRejection = outcome.rejection;
     logger.warn(
@@ -305,7 +344,13 @@ export async function generateImageSoftening(
         model: params.model,
         ...meta,
       });
-      return { result: outcome.result, params, softened: false };
+      return {
+        stored: outcome.stored,
+        metadata: outcome.metadata,
+        via: outcome.via,
+        params,
+        softened: false,
+      };
     }
     lastRejection = outcome.rejection;
     logger.warn(
@@ -363,7 +408,13 @@ export async function generateImageSoftening(
       model: params.model,
       ...meta,
     });
-    return { result: outcome.result, params, softened: true };
+    return {
+      stored: outcome.stored,
+      metadata: outcome.metadata,
+      via: outcome.via,
+      params,
+      softened: true,
+    };
   }
 
   logger.error(

@@ -21,8 +21,8 @@ import { recordProvenance } from '@/platform/server/compliance/provenance';
 import { getGenerationChannel } from '@/platform/realtime';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
 import { copyStoredImage } from '@/platform/server/storage/copy-stored-image';
-import { uploadResponse } from '@/platform/server/storage/upload-response';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import { storeGeneratedPng } from '@/stills/server/image-storage';
 import { generateImageSoftening } from '@/stills/server/workflows/content-soften';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
 import type {
@@ -266,6 +266,18 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       }
     );
 
+    // Destination is resolved BEFORE generating, because the image is stored
+    // inside the generating step (#1645). `characterDbId` and `teamId` are
+    // required on the payload; `sequenceId` is optional on the shared context
+    // but the trigger always sets it, and the run cannot write its row or
+    // emit progress without it.
+    const characterDbId = input.characterDbId;
+    const teamId = input.teamId;
+    const sequenceId = input.sequenceId;
+    if (!sequenceId) {
+      throw new WorkflowValidationError('sequenceId is required');
+    }
+
     // Step 2: Generate the sheet — same-model reseeds on a content flag
     // (#881/#939), then one softened prompt (#1293). The sheet anchors a
     // character's identity across cuts (#801), so exhaustion is a HARD
@@ -283,10 +295,15 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       subject: `sheet for ${input.characterName}`,
       stepName: 'generate-sheet-image',
       params: builtParams,
-      meta: { characterDbId: input.characterDbId },
+      meta: { characterDbId },
+      store: (result) =>
+        storeGeneratedPng(
+          result.imageUrls[0],
+          STORAGE_BUCKETS.CHARACTERS,
+          `${teamId}/${sequenceId}/${characterDbId}/${generateId()}.png`
+        ),
       onRetry: async (retry) => {
-        if (!input.sequenceId || !input.characterDbId) return;
-        await getGenerationChannel(input.sequenceId).emit(
+        await getGenerationChannel(sequenceId).emit(
           'generation.character-sheet:progress',
           {
             characterId: input.characterDbId,
@@ -297,22 +314,19 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
         );
       },
     });
-    const imageResult = generation.result;
+    const storageResult = generation.stored;
+    const imageMetadata = generation.metadata;
     const generationParams = generation.params;
 
     // Before the deduction guard — see recordFalUsageStep (#1069).
-    const falUsage = await recordFalUsageStep(
-      step,
-      scopedDb,
-      imageResult.metadata
-    );
+    const falUsage = await recordFalUsageStep(step, scopedDb, imageMetadata);
 
     // Deduct credits for image generation (skip if team used own fal key)
     await step.do('deduct-credits', async () => {
       await deductWorkflowCredits({
         scopedDb,
-        costMicros: extractImageCost(imageResult.metadata),
-        usedOwnKey: imageResult.metadata.usedOwnKey,
+        costMicros: extractImageCost(imageMetadata),
+        usedOwnKey: imageMetadata.usedOwnKey,
         description: `Character sheet (${generationParams.model})`,
         idempotencyKey: `${event.instanceId}:sheet`,
         reservationId: input.reservationId,
@@ -326,174 +340,115 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       });
     });
 
-    const initialSheetImageUrl = imageResult.imageUrls[0];
-    if (!initialSheetImageUrl) {
-      throw new Error('Character sheet generation did not return an image URL');
-    }
-    let sheetImageUrl: string = initialSheetImageUrl;
-    let sheetImagePath: string | undefined = undefined;
+    let sheetImageUrl: string = storageResult.url;
+    const sheetImagePath: string = storageResult.path;
     let sheetVersionId: string | null = null;
 
-    if (input.characterDbId && input.teamId && input.sequenceId) {
-      // Capture narrowed values so inner async closures see `string`, not
-      // `string | undefined`.
-      const characterDbId = input.characterDbId;
-      const sequenceId = input.sequenceId;
+    // Provenance (#1180) — recorded even when the run later diverges: the
+    // sheet is in R2 either way. Own step so a retry of reconcile cannot
+    // double-insert.
+    await step.do('record-provenance', async () => {
+      await recordProvenance(scopedDb.provenance, {
+        teamId: input.teamId,
+        userId: input.userId,
+        assetKind: 'character_sheet',
+        assetId: characterDbId,
+        storageKey: storageResult.path,
+        provider: 'fal',
+        model: generationParams.model,
+        providerRequestId: falUsage.requestId ?? null,
+        workflowRunId,
+        prompt: generationParams.prompt,
+        sequenceId,
+        referenceImageCount: generationParams.referenceImageUrls?.length ?? 0,
+      });
+    });
 
-      // Step 3: Upload to R2 storage
-      const storageResult = await step.do('upload-to-storage', async () => {
-        const imageUrl = imageResult.imageUrls[0];
-        if (!imageUrl) {
-          throw new Error('No image URL returned from generation');
-        }
-
+    // Step 4: Divergence-aware database write. On convergent, update the
+    // character's primary sheet. On divergent, preserve the artifact as a
+    // variant row (the helper emits `stale:detected`) and skip the primary
+    // update so the in-flight run does not overwrite a now-stale identity.
+    const snapshotInputHash = input.snapshotInputHash ?? null;
+    const reconcileOutcome = await step.do(
+      'reconcile-database',
+      async (): Promise<
+        { kind: 'convergent'; versionId: string | null } | { kind: 'divergent' }
+      > => {
         logger.info(
-          `[CharacterSheetWorkflow:cf] Uploading sheet to storage for ${input.characterName}`
+          `[CharacterSheetWorkflow:cf] Updating database for ${input.characterName}`
         );
 
-        // Fetch and stream directly to R2
-        const response = await fetch(imageUrl);
-        if (!response.ok) {
-          throw new Error(
-            `Failed to fetch generated image: ${response.status}`
-          );
+        const currentHash = snapshotInputHash
+          ? await computeCharacterSheetHashCurrent(input, scopedDb.liveRead)
+          : null;
+
+        const decision = decideSheetDivergence(snapshotInputHash, currentHash);
+
+        if (decision.kind === 'divergent') {
+          logger.warn('[CharacterSheetWorkflow:cf] divergence detected', {
+            characterDbId: input.characterDbId,
+            snapshotInputHash: decision.snapshotInputHash,
+            currentInputHash: decision.currentInputHash,
+            storagePath: storageResult.path,
+          });
+          await saveDivergentCharacterSheet({
+            scopedDb,
+            characterId: characterDbId,
+            sequenceId,
+            model: generationParams.model,
+            url: storageResult.url,
+            storagePath: storageResult.path,
+            workflowRunId,
+            snapshotInputHash: decision.snapshotInputHash,
+          });
+          return { kind: 'divergent' };
         }
 
-        // Build storage path: characters/{teamId}/{sequenceId}/{characterDbId}/{uniqueId}.png
-        const uniqueId = generateId();
-        const storagePath = `${input.teamId}/${input.sequenceId}/${input.characterDbId}/${uniqueId}.png`;
+        const character = await scopedDb.characters.updateSheet(
+          input.characterDbId,
+          storageResult.url,
+          storageResult.path,
+          snapshotInputHash,
+          { model: generationParams.model, workflowRunId }
+        );
+        return {
+          kind: 'convergent',
+          versionId: character.selectedSheetVersionId,
+        };
+      }
+    );
+    if (reconcileOutcome.kind === 'convergent') {
+      sheetVersionId = reconcileOutcome.versionId;
+    }
 
-        const result = await uploadResponse(
-          response,
-          STORAGE_BUCKETS.CHARACTERS,
-          storagePath,
+    if (reconcileOutcome.kind === 'divergent') {
+      // Helper already emitted `stale:detected` on the sequence channel.
+      // Settle the primary sheet's status so the UI does not stay wedged on
+      // "Regenerating…". The pre-existing `sheetImageUrl` (if any) remains
+      // the live primary identity — we deliberately did not overwrite it.
+      // For first-time generation the entity ends in `completed` with a
+      // null sheetImageUrl; the user can manually retry. Either way,
+      // flipping status to `completed` reflects "generation finished,
+      // primary unchanged, divergent variant saved alongside".
+      await step.do('settle-divergent-status', async () => {
+        await scopedDb.characters.updateSheetStatus(characterDbId, 'completed');
+        await getGenerationChannel(sequenceId).emit(
+          'generation.character-sheet:progress',
           {
-            contentType: 'image/png',
+            characterId: characterDbId,
+            status: 'completed',
           }
         );
-
-        return {
-          url: result.publicUrl,
-          path: result.path,
-        };
       });
-
-      // Provenance (#1180) — recorded even when the run later diverges: the
-      // sheet is in R2 either way. Own step so a retry of reconcile cannot
-      // double-insert.
-      await step.do('record-provenance', async () => {
-        await recordProvenance(scopedDb.provenance, {
-          teamId: input.teamId,
-          userId: input.userId,
-          assetKind: 'character_sheet',
-          assetId: characterDbId,
-          storageKey: storageResult.path,
-          provider: 'fal',
-          model: generationParams.model,
-          providerRequestId: falUsage.requestId ?? null,
-          workflowRunId,
-          prompt: generationParams.prompt,
-          sequenceId,
-          referenceImageCount: generationParams.referenceImageUrls?.length ?? 0,
-        });
-      });
-
-      // Step 4: Divergence-aware database write. On convergent, update the
-      // character's primary sheet. On divergent, preserve the artifact as a
-      // variant row (the helper emits `stale:detected`) and skip the primary
-      // update so the in-flight run does not overwrite a now-stale identity.
-      const snapshotInputHash = input.snapshotInputHash ?? null;
-      const reconcileOutcome = await step.do(
-        'reconcile-database',
-        async (): Promise<
-          | { kind: 'convergent'; versionId: string | null }
-          | { kind: 'divergent' }
-        > => {
-          logger.info(
-            `[CharacterSheetWorkflow:cf] Updating database for ${input.characterName}`
-          );
-
-          const currentHash = snapshotInputHash
-            ? await computeCharacterSheetHashCurrent(input, scopedDb.liveRead)
-            : null;
-
-          const decision = decideSheetDivergence(
-            snapshotInputHash,
-            currentHash
-          );
-
-          if (decision.kind === 'divergent') {
-            logger.warn('[CharacterSheetWorkflow:cf] divergence detected', {
-              characterDbId: input.characterDbId,
-              snapshotInputHash: decision.snapshotInputHash,
-              currentInputHash: decision.currentInputHash,
-              storagePath: storageResult.path,
-            });
-            await saveDivergentCharacterSheet({
-              scopedDb,
-              characterId: characterDbId,
-              sequenceId,
-              model: generationParams.model,
-              url: storageResult.url,
-              storagePath: storageResult.path,
-              workflowRunId,
-              snapshotInputHash: decision.snapshotInputHash,
-            });
-            return { kind: 'divergent' };
-          }
-
-          const character = await scopedDb.characters.updateSheet(
-            input.characterDbId,
-            storageResult.url,
-            storageResult.path,
-            snapshotInputHash,
-            { model: generationParams.model, workflowRunId }
-          );
-          return {
-            kind: 'convergent',
-            versionId: character.selectedSheetVersionId,
-          };
-        }
+      logger.info(
+        `[CharacterSheetWorkflow:cf] Diverged for ${input.characterName}; saved as variant`
       );
-      if (reconcileOutcome.kind === 'convergent') {
-        sheetVersionId = reconcileOutcome.versionId;
-      }
-
-      sheetImagePath = storageResult.path;
-      sheetImageUrl = storageResult.url;
-
-      if (reconcileOutcome.kind === 'divergent') {
-        // Helper already emitted `stale:detected` on the sequence channel.
-        // Settle the primary sheet's status so the UI does not stay wedged on
-        // "Regenerating…". The pre-existing `sheetImageUrl` (if any) remains
-        // the live primary identity — we deliberately did not overwrite it.
-        // For first-time generation the entity ends in `completed` with a
-        // null sheetImageUrl; the user can manually retry. Either way,
-        // flipping status to `completed` reflects "generation finished,
-        // primary unchanged, divergent variant saved alongside".
-        await step.do('settle-divergent-status', async () => {
-          await scopedDb.characters.updateSheetStatus(
-            characterDbId,
-            'completed'
-          );
-          await getGenerationChannel(sequenceId).emit(
-            'generation.character-sheet:progress',
-            {
-              characterId: characterDbId,
-              status: 'completed',
-            }
-          );
-        });
-        logger.info(
-          `[CharacterSheetWorkflow:cf] Diverged for ${input.characterName}; saved as variant`
-        );
-        return {
-          sheetImageUrl,
-          sheetImagePath,
-          characterDbId: input.characterDbId,
-          diverged: true,
-        };
-      }
+      return {
+        sheetImageUrl,
+        sheetImagePath,
+        characterDbId: input.characterDbId,
+        diverged: true,
+      };
     }
     // Emit realtime event that generation is complete
     await step.do('emit-complete-event', async () => {

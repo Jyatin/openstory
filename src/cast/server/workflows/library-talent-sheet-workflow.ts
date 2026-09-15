@@ -18,8 +18,8 @@ import { recordProvenance } from '@/platform/server/compliance/provenance';
 import { getTalentChannel } from '@/platform/realtime';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
 import { copyStoredImage } from '@/platform/server/storage/copy-stored-image';
-import { uploadResponse } from '@/platform/server/storage/upload-response';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
+import { storeGeneratedPng } from '@/stills/server/image-storage';
 import { generateImageSoftening } from '@/stills/server/workflows/content-soften';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
 import type {
@@ -142,14 +142,34 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
         stepName: 'generate-sheet-image',
         params: generationParams,
         meta: { talentId: input.talentId },
+        store: async (result) => {
+          // Minted inside the step: this ULID becomes the sheet row's id, so
+          // it must survive replay rather than be regenerated.
+          const sheetId = generateId();
+          const stored = await storeGeneratedPng(
+            result.imageUrls[0],
+            STORAGE_BUCKETS.TALENT,
+            `${input.teamId}/${input.talentId}/${sheetId}.png`
+          );
+          return { sheetId, ...stored };
+        },
       });
-      const imageResult = generation.result;
+      const stored = generation.stored;
+      if (!stored.sheetId) {
+        throw new Error('Talent sheet store must return sheetId');
+      }
+      storageResult = {
+        sheetId: stored.sheetId,
+        url: stored.url,
+        path: stored.path,
+      };
+      const imageMetadata = generation.metadata;
 
       // Before the deduction guard — see recordFalUsageStep (#1069).
       sheetUsage = await recordFalUsageStep(
         step,
         scopedDb,
-        imageResult.metadata,
+        imageMetadata,
         'record-fal-usage-sheet'
       );
 
@@ -157,8 +177,8 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
       await step.do('deduct-credits-sheet', async () => {
         await deductWorkflowCredits({
           scopedDb,
-          costMicros: extractImageCost(imageResult.metadata),
-          usedOwnKey: imageResult.metadata.usedOwnKey,
+          costMicros: extractImageCost(imageMetadata),
+          usedOwnKey: imageMetadata.usedOwnKey,
           description: `Talent sheet (${input.imageModel ?? DEFAULT_IMAGE_MODEL})`,
           idempotencyKey: `${event.instanceId}:sheet`,
           metadata: {
@@ -168,43 +188,6 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
           },
           workflowName: 'LibraryTalentSheetWorkflow',
         });
-      });
-
-      const imageUrl = imageResult.imageUrls[0];
-      if (!imageUrl) {
-        throw new Error('No image URL returned from generation');
-      }
-
-      // Step 3: Upload to R2 storage
-      storageResult = await step.do('upload-to-storage', async () => {
-        logger.info(
-          `[LibraryTalentSheetWorkflow:cf] Uploading sheet to storage`
-        );
-
-        // Fetch and stream directly to R2
-        const response = await fetch(imageUrl);
-        if (!response.ok) {
-          throw new Error(
-            `Failed to fetch generated image: ${response.status}`
-          );
-        }
-
-        // Build storage path
-        const sheetId = generateId();
-        const storagePath = `${input.teamId}/${input.talentId}/${sheetId}.png`;
-
-        const result = await uploadResponse(
-          response,
-          STORAGE_BUCKETS.TALENT,
-          storagePath,
-          { contentType: 'image/png' }
-        );
-
-        return {
-          sheetId,
-          url: result.publicUrl,
-          path: result.path,
-        };
       });
     }
 

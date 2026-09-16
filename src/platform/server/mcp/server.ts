@@ -1,3 +1,6 @@
+import { registerCastReads } from './tools/cast-reads';
+import { registerProductionReads } from './tools/production-reads';
+import { registerContextReads } from './tools/context-reads';
 /**
  * MCP server construction (#1457): name/version, tools capability, and the
  * `whoami` connectivity tool and read-only production tools (#1458).
@@ -129,6 +132,9 @@ export function createOpenStoryMcpServer(
   registerGetScene(server, context);
   registerListShots(server, context);
   registerGetShot(server, context);
+  registerCastReads(server, context);
+  registerProductionReads(server, context);
+  registerContextReads(server, context);
   return server;
 }
 

@@ -127,7 +127,7 @@ describe('createOpenStoryMcpServer', () => {
 });
 
 describe('tools/list and whoami', () => {
-  it('lists whoami and seven read-only tools with input/output schemas', async () => {
+  it('lists whoami and all production read tools with input/output schemas', async () => {
     const { status, body } = await rpc('tools/list');
     expect(status).toBe(200);
     const tools = toolsListResult.parse(body.result).tools;
@@ -140,6 +140,33 @@ describe('tools/list and whoami', () => {
       'openstory.get_scene',
       'openstory.list_shots',
       'openstory.get_shot',
+      'openstory.list_characters',
+      'openstory.get_character',
+      'openstory.list_locations',
+      'openstory.get_location',
+      'openstory.list_elements',
+      'openstory.get_element',
+      'openstory.get_sequence_settings',
+      'openstory.get_sequence_script',
+      'openstory.get_sequence_music',
+      'openstory.list_frames',
+      'openstory.get_frame',
+      'openstory.list_render_segments',
+      'openstory.get_render_segment',
+      'openstory.list_versions',
+      'openstory.get_version',
+      'openstory.get_shot_audio',
+      'openstory.list_exports',
+      'openstory.get_export_status',
+      'openstory.list_sequence_events',
+      'openstory.get_sequence_event',
+      'openstory.list_shot_references',
+      'openstory.list_entity_usages',
+      'openstory.get_shot_staleness',
+      'openstory.list_shot_staleness',
+      'openstory.get_reference_staleness',
+      'openstory.get_render_segment_staleness',
+      'openstory.get_music_staleness',
     ]);
     expect(tools[0]?.description).toMatch(/user and team/i);
     for (const tool of tools.slice(1))

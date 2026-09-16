@@ -186,7 +186,7 @@
       "rules": { "boundaries/no-raw-db": "off" }
     },
     {
-      // The request middlewares and the workflow base mint the scoped db for
+      // Request boundaries (middlewares/MCP) and the workflow base mint the scoped db for
       // handlers / runs. Pinned by db-access-allowlist.test.ts.
       "files": [
         "src/platform/middleware.fn.ts",

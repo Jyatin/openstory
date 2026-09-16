@@ -1,4 +1,4 @@
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import { NotFoundError, OpenStoryError } from '@/platform/errors';
@@ -15,6 +15,10 @@ export const pageInput = sequenceInput.extend({
   cursor: z.string().min(1).max(2048).optional(),
   includePrompts: z.boolean().default(false),
   includeAssets: z.boolean().default(false),
+});
+export const collectionInput = sequenceInput.extend({
+  limit: z.int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(2048).optional(),
 });
 export const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -54,7 +58,7 @@ export async function readTool(
         content: [
           {
             type: 'text',
-            text: 'Response exceeds 256 KiB. Use list_scenes/list_shots with a smaller limit and disable includePrompts/includeAssets, or inspect individual shots.',
+            text: 'Response exceeds 256 KiB. Retry the collection with a smaller limit, disable optional prompts/assets, or use the entity/version document read with a smaller length.',
           },
         ],
       };
@@ -80,4 +84,33 @@ export async function readTool(
       ],
     };
   }
+}
+
+/** The same execution-time authorization, error envelope and budget for every read. */
+export function registerProductionRead<
+  I extends z.ZodObject,
+  O extends z.ZodObject,
+>(
+  server: McpServer,
+  context: ReadToolContextFactory,
+  name: string,
+  description: string,
+  inputSchema: I,
+  outputSchema: O,
+  action: (input: z.output<I>, ctx: ReadToolContext) => Promise<z.input<O>>
+) {
+  server.registerTool<O, z.ZodObject>(
+    `openstory.${name}`,
+    {
+      description,
+      inputSchema,
+      outputSchema,
+      annotations: readOnlyAnnotations,
+    },
+    (input) =>
+      readTool(context, async (ctx) => ({
+        data: outputSchema.parse(await action(inputSchema.parse(input), ctx)),
+        summary: description.split('.')[0] ?? name,
+      }))
+  );
 }

@@ -1,3 +1,16 @@
+import {
+  characters,
+  characterSheetVariants,
+  sequenceLocations,
+  locationSheetVariants,
+  sequenceElements,
+  sequenceMusicVariants,
+  sequenceMusicPromptVersions,
+  sequenceEvents,
+} from '@/platform/server/db/schema';
+import { registerCastReads } from './tools/cast-reads';
+import { registerProductionReads } from './tools/production-reads';
+import { registerContextReads } from './tools/context-reads';
 /** MCP wire tests backed by the real scoped repositories and migrated SQLite schema. */
 import {
   afterAll,
@@ -65,6 +78,9 @@ let videoId: string;
 let scopedDb: ReturnType<typeof createScopedDb>;
 const queries: string[] = [];
 const registrations = [
+  registerCastReads,
+  registerProductionReads,
+  registerContextReads,
   registerListSequences,
   registerGetSequence,
   registerGetSequenceStatus,
@@ -693,5 +709,648 @@ describe('status and result limits', () => {
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).not.toContain('private database password');
     fail.mockRestore();
+  });
+});
+
+describe('complete production reads', () => {
+  let characterId: string;
+  let locationId: string;
+  let elementId: string;
+  let exportId: string;
+  let eventId: string;
+  let musicId: string;
+  let musicPromptId: string;
+  beforeEach(async () => {
+    characterId = generateId();
+    locationId = generateId();
+    elementId = generateId();
+    exportId = generateId();
+    eventId = generateId();
+    musicId = generateId();
+    musicPromptId = generateId();
+    await db.insert(characters).values({
+      id: characterId,
+      sequenceId,
+      characterId: 'char_001',
+      name: 'Ada',
+      personality: 'Curious',
+      consistencyTag: 'ada',
+      voiceId: 'voice-ada',
+      voicePreviews: [
+        {
+          generatedVoiceId: 'take-1',
+          url: '/r2/voice.mp3',
+          path: 'private-path',
+        },
+      ],
+    });
+    // Legacy sheet selection resolves via the parent ID, without writing a pointer.
+    await db.insert(characterSheetVariants).values({
+      id: characterId,
+      characterId,
+      model: 'nano_banana_2',
+      status: 'completed',
+      url: '/r2/ada.png',
+    });
+    await db.insert(sequenceLocations).values({
+      id: locationId,
+      sequenceId,
+      locationId: 'loc_001',
+      name: 'Office',
+      description: 'Bright office',
+      consistencyTag: 'office',
+    });
+    await db.insert(locationSheetVariants).values({
+      id: locationId,
+      parentId: locationId,
+      parentType: 'sequence_location',
+      model: 'nano_banana_2',
+      status: 'completed',
+      url: '/r2/office.png',
+    });
+    await db.insert(sequenceElements).values({
+      id: elementId,
+      sequenceId,
+      token: 'BELL',
+      uploadedFilename: 'bell.mp3',
+      kind: 'audio',
+      durationSeconds: 2,
+      imageUrl: '/r2/bell.mp3',
+      description: 'Bell ringing',
+    });
+    await db.insert(sequenceMusicVariants).values({
+      id: musicId,
+      sequenceId,
+      model: 'music-test',
+      url: '/r2/music.mp3',
+      status: 'completed',
+      prompt: 'Quiet piano',
+    });
+    await db.insert(sequenceMusicPromptVersions).values({
+      id: musicPromptId,
+      sequenceId,
+      promptType: 'music',
+      prompt: 'Quiet piano',
+      source: 'user-edit',
+    });
+    await db
+      .update(sequences)
+      .set({
+        script: 'Original script',
+        musicUrl: '/r2/music.mp3',
+        musicModel: 'music-test',
+        musicPrompt: 'Quiet piano',
+        generateVoices: true,
+      })
+      .where(eq(sequences.id, sequenceId));
+    await db.insert(sequenceExports).values({
+      id: exportId,
+      sequenceId,
+      status: 'ready',
+      url: '/r2/export.mp4',
+      storagePath: 'private/export',
+      sourceShotsHash: 'cut-1',
+      durationSeconds: 3,
+    });
+    await db.insert(sequenceEvents).values({
+      id: eventId,
+      sequenceId,
+      kind: 'image.selected',
+      targetType: 'frame',
+      targetId: frameId,
+      data: { versionId: imageId },
+    });
+    await db
+      .update(scenes)
+      .set({
+        location: 'Office',
+        continuity: {
+          colorPalette: '',
+          lightingSetup: '',
+          styleTag: '',
+          characterTags: ['ada'],
+          environmentTag: 'office',
+          elementTags: ['BELL'],
+        },
+      })
+      .where(eq(scenes.id, dbSceneId(sceneId)));
+    await db
+      .update(shots)
+      .set({
+        audioClips: [
+          {
+            id: 'clip-1',
+            url: '/r2/dialogue.mp3',
+            token: 'Ada',
+            durationSeconds: 1,
+          },
+        ],
+      })
+      .where(eq(shots.id, shotId));
+    queries.length = 0;
+  });
+
+  function reads(): [string, Record<string, unknown>][] {
+    return [
+      ['list_characters', {}],
+      ['get_character', { characterId }],
+      ['list_locations', {}],
+      ['get_location', { locationId }],
+      ['list_elements', {}],
+      ['get_element', { elementId }],
+      ['get_sequence_settings', {}],
+      ['get_sequence_script', {}],
+      ['get_sequence_music', {}],
+      ['list_frames', { shotId }],
+      ['get_frame', { frameId }],
+      ['list_render_segments', {}],
+      ['get_render_segment', { segmentId }],
+      ['list_versions', { kind: 'image', entityId: frameId }],
+      ['get_version', { kind: 'image', entityId: frameId, versionId: imageId }],
+      ['get_shot_audio', { shotId }],
+      ['list_exports', {}],
+      ['get_export_status', { exportId }],
+      ['list_sequence_events', {}],
+      ['get_sequence_event', { eventId }],
+      ['list_shot_references', { kind: 'character', shotId }],
+      ['list_entity_usages', { kind: 'character', entityId: characterId }],
+      ['get_shot_staleness', { shotId }],
+      ['list_shot_staleness', {}],
+      ['get_reference_staleness', { kind: 'character', entityId: characterId }],
+      ['get_render_segment_staleness', { segmentId }],
+      ['get_music_staleness', {}],
+    ];
+  }
+  it('every new tool executes against migrated SQLite and performs no writes', async () => {
+    for (const [name, args] of reads())
+      await data(name, { sequenceId, ...args });
+    expect(
+      queries.filter((query) =>
+        /^(insert|update|delete|replace)\b/i.test(query)
+      )
+    ).toEqual([]);
+  });
+  it('every new tool rejects a foreign team', async () => {
+    scopedDb = createScopedDb(generateId(), generateId());
+    for (const [name, args] of reads()) {
+      expect(await call(name, { sequenceId, ...args }), name).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'NOT_FOUND' } },
+      });
+    }
+  });
+  it('child lookups reject a different authorised sequence', async () => {
+    const other = generateId();
+    const sequence = await scopedDb.sequences.getById(sequenceId);
+    if (!sequence) throw new Error('fixture');
+    await db
+      .insert(sequences)
+      .values({ id: other, teamId, title: 'Other', styleId: sequence.styleId });
+    for (const [name, args] of reads().filter(
+      ([, args]) => Object.keys(args).length > 0
+    )) {
+      expect(
+        await call(name, { sequenceId: other, ...args }),
+        name
+      ).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'NOT_FOUND' } },
+      });
+    }
+  });
+  it('returns voice previews, legacy selected sheets, and media kinds without private storage paths', async () => {
+    const character = await data('get_character', { sequenceId, characterId });
+    expect(character).toMatchObject({
+      character: {
+        id: characterId,
+        characterId: 'char_001',
+        effectiveUseVoice: true,
+        selectedSheetVersionId: null,
+        selectedSheet: {
+          id: characterId,
+          url: 'https://openstory.test/r2/ada.png',
+        },
+        voicePreviews: [
+          {
+            generatedVoiceId: 'take-1',
+            url: 'https://openstory.test/r2/voice.mp3',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(character)).not.toContain('private-path');
+    expect(
+      await data('get_location', { sequenceId, locationId })
+    ).toMatchObject({
+      location: {
+        selectedReference: {
+          id: locationId,
+          url: 'https://openstory.test/r2/office.png',
+        },
+      },
+    });
+    expect(await data('get_element', { sequenceId, elementId })).toMatchObject({
+      element: {
+        kind: 'audio',
+        durationSeconds: 2,
+        url: 'https://openstory.test/r2/bell.mp3',
+      },
+    });
+  });
+  it('pages entities and binds cursors to collection, sequence, and reference target', async () => {
+    await db.insert(characters).values({
+      id: generateId(),
+      sequenceId,
+      characterId: 'char_002',
+      name: 'Other',
+    });
+    const pageSchema = z.object({
+      characters: z.array(z.object({ id: z.string() })),
+      nextCursor: z.string(),
+    });
+    const first = pageSchema.parse(
+      await data('list_characters', { sequenceId, limit: 1 })
+    );
+    const second = z
+      .object({
+        characters: z.array(z.object({ id: z.string() })),
+        nextCursor: z.null(),
+      })
+      .parse(
+        await data('list_characters', {
+          sequenceId,
+          limit: 1,
+          cursor: first.nextCursor,
+        })
+      );
+    expect(second.characters[0]?.id).not.toBe(first.characters[0]?.id);
+    expect(
+      await call('list_locations', { sequenceId, cursor: first.nextCursor })
+    ).toMatchObject({ isError: true });
+    expect(
+      await call('list_shot_references', {
+        sequenceId,
+        shotId,
+        kind: 'character',
+        cursor: first.nextCursor,
+      })
+    ).toMatchObject({ isError: true });
+    expect(
+      queries.some((query) => /from "characters".*limit \?/i.test(query))
+    ).toBe(true);
+  });
+  it('uses effective style snapshots and reads original versus composed script with revision-safe windows', async () => {
+    expect(await data('get_sequence_settings', { sequenceId })).toMatchObject({
+      settings: {
+        generateVoices: true,
+        style: { source: 'library', config: { version: 2 } },
+      },
+    });
+    const document = z.object({
+      document: z.object({
+        text: z.string(),
+        revision: z.string(),
+        nextOffset: z.number(),
+      }),
+    });
+    const first = document.parse(
+      await data('get_sequence_script', {
+        sequenceId,
+        mode: 'original',
+        length: 4,
+      })
+    );
+    expect(first.document.text).toBe('Orig');
+    expect(
+      await data('get_sequence_script', { sequenceId, mode: 'composed' })
+    ).toMatchObject({
+      document: { text: 'Selected script', nextOffset: null },
+    });
+    expect(
+      await data('get_sequence_script', {
+        sequenceId,
+        mode: 'original',
+        offset: first.document.nextOffset,
+        revision: first.document.revision,
+      })
+    ).toMatchObject({ document: { text: 'inal script' } });
+    await db
+      .update(sequences)
+      .set({ script: 'Changed script' })
+      .where(eq(sequences.id, sequenceId));
+    expect(
+      await call('get_sequence_script', {
+        sequenceId,
+        mode: 'original',
+        offset: first.document.nextOffset,
+        revision: first.document.revision,
+      })
+    ).toMatchObject({ isError: true });
+  });
+  it('makes every supported history kind inspectable, with explicit selection and parent ownership', async () => {
+    const historyInputs = [
+      ['image', frameId],
+      ['video', segmentId],
+      ['character_sheet', characterId],
+      ['location_sheet', locationId],
+      ['music', sequenceId],
+      ['visual_prompt', frameId],
+      ['motion_prompt', shotId],
+      ['music_prompt', sequenceId],
+      ['scene_script', sceneId],
+    ];
+    for (const [kind, entityId] of historyInputs) {
+      const list = z
+        .object({
+          versions: z.array(
+            z.object({ id: z.string(), selected: z.boolean() })
+          ),
+        })
+        .parse(await data('list_versions', { sequenceId, kind, entityId }));
+      expect(list.versions).toHaveLength(1);
+      expect(list.versions[0]?.selected).toBe(true);
+      const result = z
+        .object({ document: z.object({ text: z.string() }) })
+        .parse(
+          await data('get_version', {
+            sequenceId,
+            kind,
+            entityId,
+            versionId: list.versions[0]?.id,
+          })
+        );
+      const value = z
+        .object({ id: z.string() })
+        .parse(JSON.parse(result.document.text));
+      expect(value.id).toBe(list.versions[0]?.id);
+      expect(result.document.text).not.toContain('storagePath');
+      expect(
+        await call('get_version', {
+          sequenceId,
+          kind,
+          entityId,
+          versionId: generateId(),
+        })
+      ).toMatchObject({ isError: true });
+    }
+  });
+  it('paginates version metadata without loading large prompts and exposes discarded versions deliberately', async () => {
+    const id = generateId();
+    await db.insert(frameVariants).values({
+      id,
+      frameId,
+      sequenceId,
+      model: 'nano_banana_2',
+      discardedAt: new Date(),
+      url: '/r2/alternate.png',
+    });
+    expect(
+      await data('list_versions', {
+        sequenceId,
+        kind: 'image',
+        entityId: frameId,
+      })
+    ).toMatchObject({ versions: [{ id: imageId }], nextCursor: null });
+    const first = z.object({ nextCursor: z.string() }).parse(
+      await data('list_versions', {
+        sequenceId,
+        kind: 'image',
+        entityId: frameId,
+        includeDiscarded: true,
+        limit: 1,
+      })
+    );
+    expect(
+      await call('list_versions', {
+        sequenceId,
+        kind: 'image',
+        entityId: frameId,
+        cursor: first.nextCursor,
+      })
+    ).toMatchObject({ isError: true });
+    expect(
+      await data('list_versions', {
+        sequenceId,
+        kind: 'image',
+        entityId: frameId,
+        cursor: first.nextCursor,
+        includeDiscarded: true,
+        limit: 1,
+      })
+    ).toMatchObject({ versions: [{ id }], nextCursor: null });
+    const huge = 'Large visual prompt '.repeat(20000);
+    const promptId = generateId();
+    await db
+      .insert(framePromptVersions)
+      .values({ id: promptId, frameId, text: huge, source: 'user-edit' });
+    queries.length = 0;
+    await data('list_versions', {
+      sequenceId,
+      kind: 'visual_prompt',
+      entityId: frameId,
+    });
+    expect(
+      queries
+        .filter((query) => query.includes('from "frame_prompt_versions"'))
+        .every((query) => !query.includes('"text"'))
+    ).toBe(true);
+    const firstDoc = z
+      .object({
+        document: z.object({ text: z.string(), nextOffset: z.number() }),
+      })
+      .parse(
+        await data('get_version', {
+          sequenceId,
+          kind: 'visual_prompt',
+          entityId: frameId,
+          versionId: promptId,
+          length: 4000,
+        })
+      );
+    expect(firstDoc.document.text).toHaveLength(4000);
+    expect(firstDoc.document.nextOffset).toBe(4000);
+  });
+  it('validates location sheet parent types and excludes deleted entities and deleted parents', async () => {
+    await db
+      .update(locationSheetVariants)
+      .set({ parentType: 'library_location' })
+      .where(eq(locationSheetVariants.id, locationId));
+    expect(
+      await data('get_location', { sequenceId, locationId })
+    ).toMatchObject({ location: { selectedReference: null } });
+    expect(
+      await call('get_version', {
+        sequenceId,
+        kind: 'location_sheet',
+        entityId: locationId,
+        versionId: locationId,
+      })
+    ).toMatchObject({ isError: true });
+    await db
+      .update(characters)
+      .set({ deletedAt: new Date() })
+      .where(eq(characters.id, characterId));
+    expect(await data('list_characters', { sequenceId })).toMatchObject({
+      characters: [],
+    });
+    expect(
+      await call('get_character', { sequenceId, characterId })
+    ).toMatchObject({ isError: true });
+    await db
+      .update(scenes)
+      .set({ deletedAt: new Date() })
+      .where(eq(scenes.id, dbSceneId(sceneId)));
+    for (const [name, args] of [
+      ['get_frame', { frameId }],
+      ['get_render_segment', { segmentId }],
+      ['list_versions', { kind: 'image', entityId: frameId }],
+    ] satisfies [string, Record<string, unknown>][]) {
+      expect(await call(name, { sequenceId, ...args })).toMatchObject({
+        isError: true,
+      });
+    }
+    expect(await data('list_render_segments', { sequenceId })).toMatchObject({
+      segments: [],
+    });
+  });
+  it('resolves usage in both directions using database IDs and returns continuations after empty candidate pages', async () => {
+    expect(
+      await data('list_shot_references', {
+        sequenceId,
+        shotId,
+        kind: 'character',
+      })
+    ).toMatchObject({ references: [{ id: characterId, name: 'Ada' }] });
+    expect(
+      await data('list_shot_references', {
+        sequenceId,
+        shotId,
+        kind: 'location',
+      })
+    ).toMatchObject({ references: [{ id: locationId }] });
+    expect(
+      await data('list_entity_usages', {
+        sequenceId,
+        kind: 'character',
+        entityId: characterId,
+      })
+    ).toMatchObject({ usages: [{ shotId, sceneId }] });
+    const laterShot = await addShot();
+    await db
+      .update(scenes)
+      .set({
+        continuity: {
+          colorPalette: '',
+          lightingSetup: '',
+          styleTag: '',
+          characterTags: [],
+          elementTags: [],
+          environmentTag: '',
+        },
+      })
+      .where(eq(scenes.id, dbSceneId(sceneId)));
+    const empty = z
+      .object({
+        usages: z.array(z.unknown()),
+        nextCursor: z.string(),
+        examined: z.number(),
+      })
+      .parse(
+        await data('list_entity_usages', {
+          sequenceId,
+          kind: 'character',
+          entityId: characterId,
+          limit: 1,
+        })
+      );
+    expect(empty.usages).toEqual([]);
+    expect(empty.examined).toBe(1);
+    expect(
+      await data('list_entity_usages', {
+        sequenceId,
+        kind: 'character',
+        entityId: characterId,
+        limit: 1,
+        cursor: empty.nextCursor,
+      })
+    ).toMatchObject({ usages: [], nextCursor: null });
+    expect(
+      await call('list_entity_usages', {
+        sequenceId,
+        kind: 'element',
+        entityId: elementId,
+        cursor: empty.nextCursor,
+      })
+    ).toMatchObject({ isError: true });
+    expect(laterShot).not.toBe(shotId);
+  });
+  it('returns missing-frame and voice-only staleness without repairs, and detects selected video input changes', async () => {
+    const noFrame = await addShot();
+    queries.length = 0;
+    expect(
+      await data('get_shot_staleness', { sequenceId, shotId: noFrame })
+    ).toMatchObject({ frameId: null, thumbnail: 'untracked' });
+    expect(
+      queries.some((query) => /^(insert|update|delete)\b/i.test(query))
+    ).toBe(false);
+    await db
+      .update(characters)
+      .set({ voiceOnly: true })
+      .where(eq(characters.id, characterId));
+    expect(
+      await data('get_reference_staleness', {
+        sequenceId,
+        kind: 'character',
+        entityId: characterId,
+      })
+    ).toEqual({ status: 'untracked', applicable: false });
+    await db
+      .update(videoVariants)
+      .set({
+        manifest: [
+          {
+            shotId,
+            motionPromptVersionId: 'old-motion',
+            frameVersionId: imageId,
+            usesStartFrame: true,
+            durationMs: 3000,
+            audioClipIds: [],
+            audioSourceKey: null,
+          },
+        ],
+      })
+      .where(eq(videoVariants.id, videoId));
+    expect(
+      await data('get_render_segment_staleness', { sequenceId, segmentId })
+    ).toEqual({ status: 'stale' });
+  });
+  it('exposes working audio, export source identity and historical activity data without mutations', async () => {
+    expect(
+      await data('get_export_status', { sequenceId, exportId })
+    ).toMatchObject({
+      export: {
+        status: 'ready',
+        sourceShotsHash: 'cut-1',
+        url: 'https://openstory.test/r2/export.mp4',
+      },
+    });
+    const audio = z
+      .object({ document: z.object({ text: z.string() }) })
+      .parse(await data('get_shot_audio', { sequenceId, shotId }));
+    expect(JSON.parse(audio.document.text)).toEqual([
+      {
+        id: 'clip-1',
+        url: 'https://openstory.test/r2/dialogue.mp3',
+        token: 'Ada',
+        durationSeconds: 1,
+      },
+    ]);
+    const event = z
+      .object({ document: z.object({ text: z.string() }) })
+      .parse(await data('get_sequence_event', { sequenceId, eventId }));
+    expect(JSON.parse(event.document.text)).toEqual({ versionId: imageId });
+    expect(
+      queries.some((query) => /^(insert|update|delete)\b/i.test(query))
+    ).toBe(false);
   });
 });

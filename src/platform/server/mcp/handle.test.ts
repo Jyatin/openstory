@@ -133,7 +133,16 @@ describe('handleMcpPost Origin and auth gates', () => {
         }),
       })
       .parse(await res.json());
-    expect(body.result.tools.map((t) => t.name)).toEqual(['whoami']);
+    expect(body.result.tools.map((t) => t.name)).toEqual([
+      'whoami',
+      'openstory.list_sequences',
+      'openstory.get_sequence',
+      'openstory.get_sequence_status',
+      'openstory.list_scenes',
+      'openstory.get_scene',
+      'openstory.list_shots',
+      'openstory.get_shot',
+    ]);
   });
 
   it('429s a JWT caller when the per-user limiter trips', async () => {

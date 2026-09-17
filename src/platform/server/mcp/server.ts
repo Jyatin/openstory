@@ -1,3 +1,4 @@
+import { registerLibraryReads } from './tools/library-reads';
 import { registerCastReads } from './tools/cast-reads';
 import { registerProductionReads } from './tools/production-reads';
 import { registerContextReads } from './tools/context-reads';
@@ -135,6 +136,7 @@ export function createOpenStoryMcpServer(
   registerCastReads(server, context);
   registerProductionReads(server, context);
   registerContextReads(server, context);
+  registerLibraryReads(server, context);
   return server;
 }
 

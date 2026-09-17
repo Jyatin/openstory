@@ -1,0 +1,146 @@
+import { z } from 'zod';
+import { createSelectSchema } from 'drizzle-orm/zod';
+import {
+  talent,
+  locationLibrary,
+  talentSheets,
+  talentMedia,
+  talentSheetVariants,
+  locationSheets,
+  locationSheetVariants,
+} from '@/platform/server/db/schema';
+import { projectRead } from '@/platform/server/read-projection';
+import type { LibraryReadKind } from './db/library-reads';
+
+const schemas = {
+  talent: createSelectSchema(talent, {
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    name: true,
+    description: true,
+    personality: true,
+    movement: true,
+    voiceId: true,
+    voiceDescription: true,
+    imageUrl: true,
+    isFavorite: true,
+    isHuman: true,
+    isInTeamLibrary: true,
+    isPublic: true,
+    isTemplate: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  location: createSelectSchema(locationLibrary, {
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    name: true,
+    description: true,
+    referenceImageUrl: true,
+    isPublic: true,
+    isTemplate: true,
+    referenceInputHash: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  talent_sheet: createSelectSchema(talentSheets, {
+    metadata: z.json(),
+    divergedAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    talentId: true,
+    name: true,
+    imageUrl: true,
+    metadata: true,
+    isDefault: true,
+    source: true,
+    inputHash: true,
+    divergedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  talent_media: createSelectSchema(talentMedia, {
+    metadata: z.json(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    talentId: true,
+    type: true,
+    url: true,
+    metadata: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  talent_sheet_version: createSelectSchema(talentSheetVariants, {
+    generatedAt: z.string().nullable(),
+    divergedAt: z.string().nullable(),
+    discardedAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    talentSheetId: true,
+    model: true,
+    url: true,
+    status: true,
+    workflowRunId: true,
+    generatedAt: true,
+    error: true,
+    inputHash: true,
+    divergedAt: true,
+    discardedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  location_sheet: createSelectSchema(locationSheets, {
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    locationId: true,
+    name: true,
+    description: true,
+    imageUrl: true,
+    isDefault: true,
+    source: true,
+    inputHash: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+  location_sheet_version: createSelectSchema(locationSheetVariants, {
+    generatedAt: z.string().nullable(),
+    divergedAt: z.string().nullable(),
+    discardedAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }).pick({
+    id: true,
+    parentType: true,
+    parentId: true,
+    model: true,
+    url: true,
+    status: true,
+    workflowRunId: true,
+    generatedAt: true,
+    error: true,
+    inputHash: true,
+    divergedAt: true,
+    discardedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  }),
+};
+export function inspectLibraryResource(
+  kind: LibraryReadKind,
+  row: unknown,
+  origin: string
+) {
+  return projectRead(schemas[kind], row, origin);
+}

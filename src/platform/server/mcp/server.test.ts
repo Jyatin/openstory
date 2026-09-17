@@ -167,6 +167,18 @@ describe('tools/list and whoami', () => {
       'openstory.get_reference_staleness',
       'openstory.get_render_segment_staleness',
       'openstory.get_music_staleness',
+      'openstory.list_talent',
+      'openstory.get_talent',
+      'openstory.list_library_locations',
+      'openstory.get_library_location',
+      'openstory.list_styles',
+      'openstory.get_style',
+      'openstory.list_library_resources',
+      'openstory.get_library_resource',
+      'openstory.list_gallery_samples',
+      'openstory.list_generated_assets',
+      'openstory.get_generated_asset',
+      'openstory.list_studio_uploads',
     ]);
     expect(tools[0]?.description).toMatch(/user and team/i);
     for (const tool of tools.slice(1))
@@ -272,17 +284,28 @@ describe('production tool authorization', () => {
     }
   );
 
-  it('rejects OAuth without read scope even when its client ID resembles an API key caller', async () => {
-    const createDb = vi.spyOn(dbModule, 'createScopedDb');
-    const { body } = await rpc(
-      'tools/call',
-      { name: 'openstory.list_sequences', arguments: {} },
-      { ...auth, kind: 'oauth', clientId: 'api_key', scopes: [] }
-    );
-    expect(body.result).toMatchObject({
-      isError: true,
-      structuredContent: { error: { code: 'AUTHENTICATION_ERROR' } },
-    });
-    expect(createDb).not.toHaveBeenCalled();
-  });
+  it.each([
+    'list_sequences',
+    'list_talent',
+    'list_library_locations',
+    'list_styles',
+    'list_gallery_samples',
+    'list_generated_assets',
+    'list_studio_uploads',
+  ])(
+    'rejects OAuth without read scope for %s even when its client ID resembles an API key caller',
+    async (name) => {
+      const createDb = vi.spyOn(dbModule, 'createScopedDb');
+      const { body } = await rpc(
+        'tools/call',
+        { name: `openstory.${name}`, arguments: {} },
+        { ...auth, kind: 'oauth', clientId: 'api_key', scopes: [] }
+      );
+      expect(body.result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'AUTHENTICATION_ERROR' } },
+      });
+      expect(createDb).not.toHaveBeenCalled();
+    }
+  );
 });

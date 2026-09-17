@@ -169,6 +169,18 @@ describe('handleMcpPost Origin and auth gates', () => {
       'openstory.get_reference_staleness',
       'openstory.get_render_segment_staleness',
       'openstory.get_music_staleness',
+      'openstory.list_talent',
+      'openstory.get_talent',
+      'openstory.list_library_locations',
+      'openstory.get_library_location',
+      'openstory.list_styles',
+      'openstory.get_style',
+      'openstory.list_library_resources',
+      'openstory.get_library_resource',
+      'openstory.list_gallery_samples',
+      'openstory.list_generated_assets',
+      'openstory.get_generated_asset',
+      'openstory.list_studio_uploads',
     ]);
   });
 

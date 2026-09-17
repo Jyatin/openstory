@@ -1,4 +1,19 @@
 import {
+  talent,
+  talentSheets,
+  talentMedia,
+  talentSheetVariants,
+  locationLibrary,
+  locationSheets,
+  generatedAssets,
+  audio,
+  vfx,
+  user,
+} from '@/platform/server/db/schema';
+import { listFilesPage } from '#storage';
+vi.mock('#storage', () => ({ listFilesPage: vi.fn() }));
+import { registerLibraryReads } from './tools/library-reads';
+import {
   characters,
   characterSheetVariants,
   sequenceLocations,
@@ -78,6 +93,7 @@ let videoId: string;
 let scopedDb: ReturnType<typeof createScopedDb>;
 const queries: string[] = [];
 const registrations = [
+  registerLibraryReads,
   registerCastReads,
   registerProductionReads,
   registerContextReads,
@@ -1352,5 +1368,422 @@ describe('complete production reads', () => {
     expect(
       queries.some((query) => /^(insert|update|delete)\b/i.test(query))
     ).toBe(false);
+  });
+});
+
+describe('Studio, Gallery and library reads', () => {
+  let talentId: string;
+  let libraryLocationId: string;
+  let sheetId: string;
+  let mediaId: string;
+  let talentVersionId: string;
+  let locationSheetId: string;
+  let locationVersionId: string;
+  let assetId: string;
+  let audioId: string;
+  let vfxId: string;
+  let galleryStyleId: string;
+  let foreignTeamId: string;
+  const listResult = z.object({
+    items: z.array(z.object({ id: z.string() })),
+    nextCursor: z.string().nullable(),
+  });
+  async function document(name: string, args: Record<string, unknown>) {
+    const result = z
+      .object({
+        document: z.object({
+          text: z.string(),
+          nextOffset: z.number().nullable(),
+          revision: z.string(),
+        }),
+      })
+      .parse(await data(name, { ...args, length: 16000 }));
+    expect(result.document.nextOffset).toBeNull();
+    return z
+      .record(z.string(), z.unknown())
+      .parse(JSON.parse(result.document.text));
+  }
+  beforeEach(async () => {
+    talentId = generateId();
+    libraryLocationId = generateId();
+    sheetId = generateId();
+    mediaId = generateId();
+    talentVersionId = generateId();
+    locationSheetId = generateId();
+    locationVersionId = generateId();
+    assetId = generateId();
+    audioId = generateId();
+    vfxId = generateId();
+    galleryStyleId = generateId();
+    foreignTeamId = generateId();
+    await db
+      .insert(teams)
+      .values({ id: foreignTeamId, name: 'Foreign', slug: foreignTeamId });
+    await db.insert(talent).values({
+      id: talentId,
+      teamId,
+      name: 'Actor',
+      voiceId: 'voice-1',
+      imagePath: 'private',
+      imageUrl: '/r2/actor.jpg',
+    });
+    await db.insert(locationLibrary).values({
+      id: libraryLocationId,
+      teamId,
+      name: 'Office',
+      referenceImagePath: 'private',
+      referenceImageUrl: '/r2/office.jpg',
+    });
+    await db.insert(talentSheets).values({
+      id: sheetId,
+      talentId,
+      name: 'Formal',
+      imageUrl: '/r2/formal.jpg',
+      imagePath: 'private',
+      isDefault: true,
+    });
+    await db.insert(talentMedia).values({
+      id: mediaId,
+      talentId,
+      type: 'recording',
+      url: '/r2/voice.mp3',
+      path: 'private',
+    });
+    await db.insert(talentSheetVariants).values({
+      id: talentVersionId,
+      talentSheetId: sheetId,
+      model: 'test',
+      url: '/r2/alternate.jpg',
+      discardedAt: new Date(),
+      divergedAt: new Date(),
+      storagePath: 'private',
+    });
+    await db.insert(locationSheets).values({
+      id: locationSheetId,
+      locationId: libraryLocationId,
+      name: 'Night',
+      imageUrl: '/r2/night.jpg',
+    });
+    await db.insert(locationSheetVariants).values({
+      id: locationVersionId,
+      parentId: libraryLocationId,
+      parentType: 'library_location',
+      model: 'test',
+      url: '/r2/location.jpg',
+    });
+    const userId = generateId();
+    await db
+      .insert(user)
+      .values({ id: userId, name: 'User', email: `${userId}@test.invalid` });
+    await db.insert(generatedAssets).values({
+      id: assetId,
+      teamId,
+      userId,
+      source: 'studio',
+      provider: 'fal',
+      activity: 'image',
+      modelName: 'Test',
+      endpointId: 'test/image',
+      input: { prompt: 'A city', aspectRatio: '16:9' },
+      outputs: [{ url: '/r2/city.jpg', contentType: 'image/jpeg' }],
+      status: 'completed',
+      isFavorite: true,
+      costMicros: 500,
+    });
+    await db
+      .insert(audio)
+      .values({ id: audioId, teamId, name: 'Music', fileUrl: '/r2/music.mp3' });
+    await db.insert(vfx).values({ id: vfxId, teamId, name: 'Rain' });
+    const sequenceStyle = await scopedDb.sequences.getById(sequenceId);
+    if (!sequenceStyle?.styleId) throw new Error('Missing fixture style');
+    const sourceStyle = await scopedDb.styles.getById(sequenceStyle.styleId);
+    if (!sourceStyle) throw new Error('Missing fixture style');
+    await db.insert(styles).values({
+      id: galleryStyleId,
+      teamId: foreignTeamId,
+      name: 'Cinematic Noir',
+      config: sourceStyle.config,
+      isPublic: true,
+      previewUrl: '/r2/styles/noir/thumbnail.webp',
+    });
+    vi.mocked(listFilesPage).mockResolvedValue({
+      files: [
+        {
+          name: 'sound.mp3',
+          url: '/r2/sound.mp3',
+          size: 30,
+          contentType: 'audio/mpeg',
+          uploadedAt: new Date().toISOString(),
+        },
+      ],
+      nextCursor: null,
+    });
+    queries.length = 0;
+  });
+  const resourceCases = () => [
+    { kind: 'talent_sheet', parentId: talentId, id: sheetId },
+    { kind: 'talent_media', parentId: talentId, id: mediaId },
+    { kind: 'talent_sheet_version', parentId: sheetId, id: talentVersionId },
+    {
+      kind: 'location_sheet',
+      parentId: libraryLocationId,
+      id: locationSheetId,
+    },
+    {
+      kind: 'location_sheet_version',
+      parentId: libraryLocationId,
+      id: locationVersionId,
+    },
+    { kind: 'audio', id: audioId },
+    { kind: 'vfx', id: vfxId },
+  ];
+  it('reads every new surface and child kind without writes or private storage fields', async () => {
+    for (const [name, args] of [
+      ['list_talent', {}],
+      ['get_talent', { id: talentId }],
+      ['list_library_locations', {}],
+      ['get_library_location', { id: libraryLocationId }],
+      ['list_styles', {}],
+      ['get_style', { id: galleryStyleId }],
+      ['list_gallery_samples', {}],
+      ['list_generated_assets', {}],
+      ['get_generated_asset', { id: assetId }],
+      ['list_studio_uploads', {}],
+    ] as const)
+      expect(await data(name, args)).toBeDefined();
+    for (const args of resourceCases()) {
+      const { id, ...listArgs } = args;
+      const list = listResult.parse(
+        await data('list_library_resources', listArgs)
+      );
+      expect(list.items.map((item) => item.id)).toContain(id);
+      const detail = await document('get_library_resource', args);
+      expect(detail.id).toBe(id);
+      for (const key of [
+        'path',
+        'imagePath',
+        'storagePath',
+        'teamId',
+        'createdBy',
+      ])
+        expect(detail).not.toHaveProperty(key);
+    }
+    const actor = await document('get_talent', { id: talentId });
+    expect(actor.voiceId).toBe('voice-1');
+    expect(actor.imageUrl).toBe('https://openstory.test/r2/actor.jpg');
+    const asset = await document('get_generated_asset', { id: assetId });
+    expect(asset.input).toEqual({ prompt: 'A city', aspectRatio: '16:9' });
+    expect(asset.outputs).toEqual([
+      { url: 'https://openstory.test/r2/city.jpg', contentType: 'image/jpeg' },
+    ]);
+    expect(asset.costMicros).toBe(500);
+    expect(asset).not.toHaveProperty('userId');
+    expect(queries.some((q) => /^(insert|update|delete)/i.test(q))).toBe(false);
+  });
+  it('rejects private foreign parents and every descendant, while allowing public library records', async () => {
+    scopedDb = createScopedDb(foreignTeamId, generateId());
+    for (const [name, id] of [
+      ['get_talent', talentId],
+      ['get_library_location', libraryLocationId],
+      ['get_generated_asset', assetId],
+    ] as const)
+      expect((await call(name, { id })).isError).toBe(true);
+    for (const args of resourceCases()) {
+      expect((await call('get_library_resource', args)).isError).toBe(true);
+      const { id: _id, ...listArgs } = args;
+      if (listArgs.parentId)
+        expect((await call('list_library_resources', listArgs)).isError).toBe(
+          true
+        );
+      else
+        expect(
+          listResult.parse(await data('list_library_resources', listArgs)).items
+        ).toEqual([]);
+    }
+    await db
+      .update(talent)
+      .set({ isPublic: true })
+      .where(eq(talent.id, talentId));
+    await db
+      .update(locationLibrary)
+      .set({ isPublic: true })
+      .where(eq(locationLibrary.id, libraryLocationId));
+    expect((await document('get_talent', { id: talentId })).name).toBe('Actor');
+    for (const args of resourceCases().filter((args) => args.parentId))
+      expect(await document('get_library_resource', args)).toHaveProperty(
+        'id',
+        args.id
+      );
+  });
+  it('does not expose private or sequence-bound styles through Gallery or direct IDs', async () => {
+    const ownStyleId = (await scopedDb.sequences.getById(sequenceId))?.styleId;
+    if (!ownStyleId) throw new Error('Missing style');
+    scopedDb = createScopedDb(foreignTeamId, generateId());
+    expect((await call('get_style', { id: ownStyleId })).isError).toBe(true);
+    expect(
+      listResult.parse(await data('list_styles', {})).items.map((x) => x.id)
+    ).not.toContain(ownStyleId);
+    await db
+      .update(styles)
+      .set({ isPublic: true, sequenceId })
+      .where(eq(styles.id, ownStyleId));
+    expect((await call('get_style', { id: ownStyleId })).isError).toBe(true);
+    const gallery = z
+      .object({
+        samples: z.array(
+          z.object({
+            styleId: z.string(),
+            video: z.object({ url: z.string() }),
+          })
+        ),
+      })
+      .parse(await data('list_gallery_samples', {}));
+    expect(gallery.samples.map((x) => x.styleId)).not.toContain(ownStyleId);
+    expect(
+      gallery.samples.find((x) => x.styleId === galleryStyleId)?.video.url
+    ).toBe('https://openstory.test/r2/styles/noir/canonical.mp4');
+  });
+  it('binds cursors to collection, team and parent and does not load large fields in lists', async () => {
+    await db
+      .insert(talent)
+      .values({ teamId, name: 'Second', description: 'x'.repeat(50000) });
+    const first = listResult.parse(await data('list_talent', { limit: 1 }));
+    expect(first.nextCursor).not.toBeNull();
+    const second = listResult.parse(
+      await data('list_talent', { limit: 1, cursor: first.nextCursor })
+    );
+    expect(second.items[0]?.id).not.toBe(first.items[0]?.id);
+    expect(
+      (await call('list_library_locations', { cursor: first.nextCursor }))
+        .isError
+    ).toBe(true);
+    scopedDb = createScopedDb(foreignTeamId, generateId());
+    expect(
+      (await call('list_talent', { cursor: first.nextCursor })).isError
+    ).toBe(true);
+    scopedDb = createScopedDb(teamId, generateId());
+    await db.insert(talentSheets).values({ talentId, name: 'Second sheet' });
+    const sheets = listResult.parse(
+      await data('list_library_resources', {
+        kind: 'talent_sheet',
+        parentId: talentId,
+        limit: 1,
+      })
+    );
+    expect(
+      (
+        await call('list_library_resources', {
+          kind: 'talent_sheet',
+          parentId: generateId(),
+          cursor: sheets.nextCursor,
+        })
+      ).isError
+    ).toBe(true);
+    queries.length = 0;
+    await data('list_talent', {});
+    await data('list_generated_assets', {});
+    expect(queries.join('\n')).not.toMatch(/"description"|"input"/);
+  });
+  it('binds asset cursors to all filters and windows long input without truncation', async () => {
+    const asset = await scopedDb.assetReads.get(assetId);
+    await db.insert(generatedAssets).values({
+      ...asset,
+      id: generateId(),
+      input: { prompt: 'x'.repeat(40000) },
+    });
+    const page = listResult.parse(
+      await data('list_generated_assets', { limit: 1, source: 'studio' })
+    );
+    for (const filter of [
+      { source: 'catalog' },
+      { source: 'studio', activity: 'video' },
+      { source: 'studio', favoritesOnly: true },
+      { source: 'studio', endpointId: 'other' },
+    ])
+      expect(
+        (
+          await call('list_generated_assets', {
+            ...filter,
+            cursor: page.nextCursor,
+          })
+        ).isError
+      ).toBe(true);
+    const id = page.items[0]?.id;
+    const first = z
+      .object({
+        document: z.object({
+          text: z.string(),
+          nextOffset: z.number(),
+          revision: z.string(),
+        }),
+      })
+      .parse(await data('get_generated_asset', { id, length: 1000 }));
+    expect(first.document.text.length).toBe(1000);
+    await db
+      .update(generatedAssets)
+      .set({ input: { prompt: 'changed' } })
+      .where(eq(generatedAssets.id, id ?? ''));
+    expect(
+      (
+        await call('get_generated_asset', {
+          id,
+          offset: first.document.nextOffset,
+          revision: first.document.revision,
+        })
+      ).isError
+    ).toBe(true);
+  });
+  it('rejects wrong child parents and location variant parent types', async () => {
+    const otherTalent = generateId();
+    await db.insert(talent).values({ id: otherTalent, teamId, name: 'Other' });
+    expect(
+      (
+        await call('get_library_resource', {
+          kind: 'talent_sheet',
+          parentId: otherTalent,
+          id: sheetId,
+        })
+      ).isError
+    ).toBe(true);
+    await db
+      .update(locationSheetVariants)
+      .set({ parentType: 'sequence_location' })
+      .where(eq(locationSheetVariants.id, locationVersionId));
+    expect(
+      (
+        await call('get_library_resource', {
+          kind: 'location_sheet_version',
+          parentId: libraryLocationId,
+          id: locationVersionId,
+        })
+      ).isError
+    ).toBe(true);
+  });
+  it('continues past filtered upload pages and binds storage cursors to team', async () => {
+    vi.mocked(listFilesPage).mockResolvedValueOnce({
+      files: [
+        {
+          name: 'note.txt',
+          url: '/r2/note.txt',
+          size: 1,
+          contentType: 'text/plain',
+          uploadedAt: new Date().toISOString(),
+        },
+      ],
+      nextCursor: 'r2-next',
+    });
+    const first = z
+      .object({ uploads: z.array(z.unknown()), nextCursor: z.string() })
+      .parse(await data('list_studio_uploads', { limit: 1 }));
+    expect(first.uploads).toEqual([]);
+    await data('list_studio_uploads', { limit: 1, cursor: first.nextCursor });
+    expect(listFilesPage).toHaveBeenLastCalledWith('talent', `${teamId}/temp`, {
+      limit: 1,
+      cursor: 'r2-next',
+    });
+    scopedDb = createScopedDb(foreignTeamId, generateId());
+    expect(
+      (await call('list_studio_uploads', { cursor: first.nextCursor })).isError
+    ).toBe(true);
   });
 });

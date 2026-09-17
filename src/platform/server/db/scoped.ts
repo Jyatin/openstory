@@ -7,6 +7,9 @@
  */
 
 import { getDb } from '#db-client';
+import { createCastLibraryReads } from '@/cast/server/db/library-reads';
+import { createLookLibraryReads } from '@/look/server/db/library-reads';
+import { createAssetReads } from '@/models/server/db/asset-reads';
 import type { Sequence, User } from '@/platform/server/db/schema';
 import {
   teamMembers,
@@ -461,6 +464,9 @@ export function createScopedDb(teamId: string, userId: string) {
     teamId,
     userId,
     castReads: createCastProductionReads(db, teamId),
+    castLibraryReads: createCastLibraryReads(db, teamId),
+    lookLibraryReads: createLookLibraryReads(db, teamId),
+    assetReads: createAssetReads(db, teamId),
     productionHistory: createProductionHistoryReads(db, teamId),
     productionInspection: createSequenceInspectionReads(db, teamId),
 

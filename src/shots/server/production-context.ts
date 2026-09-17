@@ -12,7 +12,10 @@ import {
   matchElementsToShot,
 } from '@/shots/scene-matching';
 import { resolveSceneForShot } from './scene-script';
-import { rendersReferenceOnly } from '@/shots/use-start-frame';
+import {
+  rendersReferenceOnly,
+  type StartFrameSequence,
+} from '@/shots/use-start-frame';
 import { isElementVoiceToken } from '@/motion/dialogue-tts';
 import {
   computeShotStaleness,
@@ -76,7 +79,7 @@ export async function loadInspectionShot(
 }
 function matchReferences(
   ctx: Awaited<ReturnType<typeof loadInspectionShot>>,
-  generateStartFrames: boolean
+  sequence: StartFrameSequence
 ) {
   const scene = ctx.scene;
   return {
@@ -98,7 +101,7 @@ function matchReferences(
         voiceTokens: ctx.motion?.dialogue?.lines.flatMap((line) =>
           isElementVoiceToken(line.voiceToken) ? [line.voiceToken] : []
         ),
-        referenceOnly: rendersReferenceOnly(ctx.shot, { generateStartFrames }),
+        referenceOnly: rendersReferenceOnly(ctx.shot, sequence),
       }),
   };
 }
@@ -117,7 +120,7 @@ export async function listShotReferences(
   );
   const match = matchReferences(
     await loadInspectionShot(scopedDb, sequence.id, shot),
-    sequence.generateStartFrames
+    sequence
   );
   const scope = `shot:${shot.id}`;
   switch (input.kind) {
@@ -198,7 +201,7 @@ export async function listEntityUsages(
   for (const shot of page.items) {
     const match = matchReferences(
       await loadInspectionShot(scopedDb, sequence.id, shot),
-      sequence.generateStartFrames
+      sequence
     );
     const matches =
       entity.kind === 'character'

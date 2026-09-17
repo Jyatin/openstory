@@ -1229,6 +1229,46 @@ describe('complete production reads', () => {
       segments: [],
     });
   });
+  it.each([
+    { defaultStartFrame: true, override: null, attached: true },
+    { defaultStartFrame: false, override: null, attached: false },
+    { defaultStartFrame: true, override: false, attached: false },
+    { defaultStartFrame: false, override: true, attached: true },
+    { defaultStartFrame: true, override: true, attached: true },
+    { defaultStartFrame: false, override: false, attached: false },
+  ])(
+    'resolves element usage per shot with default $defaultStartFrame and override $override',
+    async ({ defaultStartFrame, override, attached }) => {
+      // The scene names BELL, while the selected motion prompt does not. A
+      // start-frame shot retains scene references; a reference-only shot drops them.
+      await db
+        .update(sequences)
+        .set({ generateStartFrames: defaultStartFrame })
+        .where(eq(sequences.id, sequenceId));
+      await db
+        .update(shots)
+        .set({ useStartFrame: override })
+        .where(eq(shots.id, shotId));
+      expect(
+        await data('list_shot_references', {
+          sequenceId,
+          shotId,
+          kind: 'element',
+        })
+      ).toMatchObject({
+        references: attached ? [{ id: elementId, name: 'BELL' }] : [],
+      });
+      expect(
+        await data('list_entity_usages', {
+          sequenceId,
+          entityId: elementId,
+          kind: 'element',
+        })
+      ).toMatchObject({
+        usages: attached ? [{ shotId, sceneId }] : [],
+      });
+    }
+  );
   it('resolves usage in both directions using database IDs and returns continuations after empty candidate pages', async () => {
     expect(
       await data('list_shot_references', {

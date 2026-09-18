@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, or } from 'drizzle-orm';
 import type { Database } from '@/platform/server/db/client';
 import {
   frames,
@@ -15,6 +15,7 @@ import {
   type ReadPageInput,
 } from '@/platform/server/db/read-page';
 import { NotFoundError } from '@/platform/errors';
+import { composeSequenceScript } from '@/shots/server/scene-script';
 import { createProductionAccess } from './production-access';
 
 export function createSequenceInspectionReads(db: Database, teamId: string) {
@@ -191,12 +192,10 @@ export function createSequenceInspectionReads(db: Database, teamId: string) {
     },
     async getComposedScript(sequenceId: string) {
       const sequence = await access.sequence(sequenceId);
-      const ordered = db
+      const rows = await db
         .select({
-          extract:
-            sql<string>`json_extract(${sceneScriptVersions.content}, '$.extract')`.as(
-              'extract'
-            ),
+          orderIndex: scenes.orderIndex,
+          content: sceneScriptVersions.content,
         })
         .from(scenes)
         .innerJoin(
@@ -207,16 +206,8 @@ export function createSequenceInspectionReads(db: Database, teamId: string) {
           )
         )
         .where(and(eq(scenes.sequenceId, sequenceId), isNull(scenes.deletedAt)))
-        .orderBy(asc(scenes.orderIndex), asc(scenes.id))
-        .as('ordered_script');
-      const [row] = await db
-        .select({
-          text: sql<
-            string | null
-          >`group_concat(${ordered.extract}, char(10) || char(10))`,
-        })
-        .from(ordered);
-      return row?.text || sequence.script || '';
+        .orderBy(asc(scenes.orderIndex), asc(scenes.id));
+      return composeSequenceScript(rows) || sequence.script || '';
     },
     async listShotRows(
       input: ReadPageInput & { sceneId?: string },

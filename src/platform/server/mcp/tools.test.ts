@@ -1063,6 +1063,38 @@ describe('complete production reads', () => {
       })
     ).toMatchObject({ isError: true });
   });
+  it('joins selected scene extracts in JavaScript and falls back to the original', async () => {
+    const secondScene = generateId();
+    const secondScript = generateId();
+    await db.insert(scenes).values({
+      id: dbSceneId(secondScene),
+      sequenceId,
+      orderIndex: 1,
+      selectedScriptVersionId: secondScript,
+    });
+    await db.insert(sceneScriptVersions).values({
+      id: secondScript,
+      sceneId: secondScene,
+      content: { extract: 'Second scene', dialogue: [] },
+      source: 'edit',
+    });
+    queries.length = 0;
+    expect(
+      await data('get_sequence_script', { sequenceId, mode: 'composed' })
+    ).toMatchObject({
+      document: { text: 'Selected script\n\nSecond scene' },
+    });
+    expect(queries.join('\n')).not.toMatch(/group_concat/i);
+    await db
+      .update(scenes)
+      .set({ selectedScriptVersionId: null })
+      .where(eq(scenes.sequenceId, sequenceId));
+    expect(
+      await data('get_sequence_script', { sequenceId, mode: 'composed' })
+    ).toMatchObject({
+      document: { text: 'Original script' },
+    });
+  });
   it('makes every supported history kind inspectable, with explicit selection and parent ownership', async () => {
     const historyInputs = [
       ['image', frameId],

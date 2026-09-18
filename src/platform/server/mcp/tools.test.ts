@@ -826,7 +826,8 @@ describe('complete production reads', () => {
       url: '/r2/export.mp4',
       storagePath: 'private/export',
       sourceShotsHash: 'cut-1',
-      durationSeconds: 3,
+      // The container reports a measured length, never a whole number.
+      durationSeconds: 15.125,
     });
     await db.insert(sequenceEvents).values({
       id: eventId,
@@ -1142,6 +1143,26 @@ describe('complete production reads', () => {
       ).toMatchObject({ isError: true });
     }
   });
+  it('reads back the backfilled preview still whose id is 00 + the frame id', async () => {
+    const versionId = `00${frameId}`;
+    await db.insert(frameVariants).values({
+      id: versionId,
+      frameId,
+      sequenceId,
+      model: 'flux_2_turbo',
+      status: 'completed',
+      url: '/r2/preview.png',
+    });
+    const input = { sequenceId, kind: 'image', entityId: frameId };
+    expect(await data('list_versions', input)).toMatchObject({
+      versions: [{ id: versionId }, { id: imageId }],
+    });
+    expect(await data('get_version', { ...input, versionId })).toMatchObject({
+      versionId,
+      selected: false,
+    });
+  });
+
   it('paginates version metadata without loading large prompts and exposes discarded versions deliberately', async () => {
     const id = generateId();
     await db.insert(frameVariants).values({
@@ -1451,8 +1472,12 @@ describe('complete production reads', () => {
       export: {
         status: 'ready',
         sourceShotsHash: 'cut-1',
+        durationSeconds: 15.125,
         url: 'https://openstory.test/r2/export.mp4',
       },
+    });
+    expect(await data('list_exports', { sequenceId })).toMatchObject({
+      exports: [{ id: exportId, durationSeconds: 15.125 }],
     });
     const audio = z
       .object({ document: z.object({ text: z.string() }) })

@@ -169,14 +169,19 @@ export const exportReadSchema = createSelectSchema(sequenceExports)
     id: true,
     sequenceId: true,
     url: true,
-    durationSeconds: true,
     status: true,
     error: true,
     workflowRunId: true,
     sourceShotsHash: true,
     sourceMusicVariantId: true,
   })
-  .extend({ createdAt: readDate });
+  .extend({
+    createdAt: readDate,
+    // The column is declared integer() but holds the container-measured length,
+    // which is fractional (15.125). The generated validator demands an int and
+    // would reject every real export.
+    durationSeconds: z.number().nullable(),
+  });
 export const eventReadSchema = createSelectSchema(sequenceEvents)
   .pick({
     id: true,

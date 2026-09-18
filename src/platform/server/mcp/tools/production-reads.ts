@@ -41,6 +41,23 @@ const versionInput = sequenceInput.extend({
 });
 const continuation = { nextCursor: z.string().nullable() };
 
+/**
+ * A version id is a ULID, except the preview stills backfilled by migration
+ * 20260808025651, whose ids are `00` + the frame's ULID so they sort oldest.
+ * list_versions hands those out, so get_version has to take them back.
+ */
+const versionIdSchema = z
+  .string()
+  .min(26)
+  .max(28)
+  .refine(
+    (id) =>
+      ulidSchema.safeParse(
+        id.length === 28 && id.startsWith('00') ? id.slice(2) : id
+      ).success,
+    { message: 'Invalid version ID' }
+  );
+
 export function registerProductionReads(
   server: McpServer,
   context: ReadToolContextFactory
@@ -203,7 +220,7 @@ export function registerProductionReads(
     context,
     'get_version',
     'Read one production version as a JSON document in bounded text windows, including prompts, audio, render manifests and provenance. Parent IDs follow list_versions. Concatenate document.text using nextOffset and revision before parsing JSON. Discarded versions remain addressable.',
-    versionInput.extend({ versionId: ulidSchema, ...documentInput.shape }),
+    versionInput.extend({ versionId: versionIdSchema, ...documentInput.shape }),
     z.object({
       kind: versionKindSchema,
       entityId: z.string(),

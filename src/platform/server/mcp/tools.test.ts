@@ -1412,6 +1412,38 @@ describe('complete production reads', () => {
       await data('get_render_segment_staleness', { sequenceId, segmentId })
     ).toEqual({ status: 'stale' });
   });
+  it('keeps a segment fresh after its shot is regrouped into a new segment', async () => {
+    const [shot] = await db.select().from(shots).where(eq(shots.id, shotId));
+    if (!shot) throw new Error('Missing shot');
+    await db
+      .update(videoVariants)
+      .set({
+        manifest: [
+          {
+            shotId,
+            motionPromptVersionId: shot.selectedMotionPromptVersionId,
+            frameVersionId: imageId,
+            usesStartFrame: true,
+            durationMs: 3000,
+            audioClipIds: [],
+            audioSourceKey: null,
+          },
+        ],
+      })
+      .where(eq(videoVariants.id, videoId));
+    const staleness = () =>
+      data('get_render_segment_staleness', { sequenceId, segmentId });
+    expect(await staleness()).toEqual({ status: 'fresh' });
+    const regroupedId = generateId();
+    await db
+      .insert(renderSegments)
+      .values({ id: regroupedId, sequenceId, sceneId });
+    await db
+      .update(shots)
+      .set({ renderSegmentId: regroupedId })
+      .where(eq(shots.id, shotId));
+    expect(await staleness()).toEqual({ status: 'fresh' });
+  });
   it('exposes working audio, export source identity and historical activity data without mutations', async () => {
     expect(
       await data('get_export_status', { sequenceId, exportId })

@@ -18,6 +18,8 @@ import { inspectAsset } from '@/models/server/asset-inspection';
 import { listStudioUploadReads } from '@/studio/server/upload-reads';
 import { buildSampleEntries } from '@/look/ui/sample-entries';
 import {
+  readOnlyAnnotations,
+  readTool,
   registerProductionRead,
   type ReadToolContextFactory,
 } from '../tool-context';
@@ -53,17 +55,18 @@ const pageSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 const documentSchema = z.object({ document: documentReadSchema });
-const resourceInput = z.strictObject({
+const childLibraryInput = z.strictObject({
   kind: z.enum([
     'talent_sheet',
     'talent_media',
     'talent_sheet_version',
     'location_sheet',
     'location_sheet_version',
-    'audio',
-    'vfx',
   ]),
-  parentId: ulidSchema.optional(),
+  parentId: ulidSchema,
+});
+const rootLibraryInput = z.strictObject({
+  kind: z.enum(['audio', 'vfx']),
 });
 
 export function registerLibraryReads(
@@ -131,54 +134,77 @@ export function registerLibraryReads(
       }
     );
   }
-  registerProductionRead(
-    server,
-    context,
-    'list_library_resources',
-    'List talent sheets, reference media and sheet versions, library location sheets and versions, audio or VFX. parentId is the talent id for talent_sheet/media, sheet id for talent_sheet_version, and library location id for location_sheet/version. Audio/VFX have no parent. Includes discarded versions; statuses and divergence markers are preserved.',
-    resourceInput.extend(pageInput.shape),
-    pageSchema,
-    async (input, { scopedDb, origin }) =>
-      projectRead(
-        pageSchema,
-        await (input.kind === 'audio' || input.kind === 'vfx'
-          ? scopedDb.lookLibraryReads.list(input.kind, input, input.parentId)
-          : scopedDb.castLibraryReads.list(input.kind, input, input.parentId)),
-        origin
-      )
+  const listLibraryResourcesInput = z.discriminatedUnion('kind', [
+    childLibraryInput.extend(pageInput.shape),
+    rootLibraryInput.extend(pageInput.shape),
+  ]);
+  const listLibraryResourcesDescription =
+    'List talent sheets, reference media and sheet versions, library location sheets and versions, audio or VFX. parentId is required: talent id for talent_sheet/media, sheet id for talent_sheet_version, and library location id for location_sheet/version. Audio/VFX have no parent. Includes discarded versions; statuses and divergence markers are preserved.';
+  server.registerTool(
+    'openstory.list_library_resources',
+    {
+      description: listLibraryResourcesDescription,
+      inputSchema: listLibraryResourcesInput,
+      outputSchema: pageSchema,
+      annotations: readOnlyAnnotations,
+    },
+    (input) =>
+      readTool(context, async ({ scopedDb, origin }) => ({
+        data: pageSchema.parse(
+          projectRead(
+            pageSchema,
+            await ('parentId' in input
+              ? scopedDb.castLibraryReads.list(
+                  input.kind,
+                  input,
+                  input.parentId
+                )
+              : scopedDb.lookLibraryReads.list(input.kind, input)),
+            origin
+          )
+        ),
+        summary: listLibraryResourcesDescription.split('.')[0] ?? '',
+      }))
   );
-  registerProductionRead(
-    server,
-    context,
-    'get_library_resource',
-    'Read the complete JSON document for a library resource. Supply the same kind and parentId as list_library_resources. Continue with nextOffset and revision.',
-    resourceInput.extend({ id: ulidSchema, ...documentInput.shape }),
-    documentSchema,
-    async (input, { scopedDb, origin }) => {
-      const data =
-        input.kind === 'audio' || input.kind === 'vfx'
-          ? inspectLook(
-              input.kind,
-              await scopedDb.lookLibraryReads.get(
+  const getLibraryResourceInput = z.discriminatedUnion('kind', [
+    childLibraryInput.extend({ id: ulidSchema, ...documentInput.shape }),
+    rootLibraryInput.extend({ id: ulidSchema, ...documentInput.shape }),
+  ]);
+  const getLibraryResourceDescription =
+    'Read the complete JSON document for a library resource. Supply the same kind and parentId as list_library_resources. Continue with nextOffset and revision.';
+  server.registerTool(
+    'openstory.get_library_resource',
+    {
+      description: getLibraryResourceDescription,
+      inputSchema: getLibraryResourceInput,
+      outputSchema: documentSchema,
+      annotations: readOnlyAnnotations,
+    },
+    (input) =>
+      readTool(context, async ({ scopedDb, origin }) => {
+        const data =
+          'parentId' in input
+            ? inspectCast(
                 input.kind,
-                input.id,
-                input.parentId
-              ),
-              origin
-            )
-          : inspectCast(
-              input.kind,
-              await scopedDb.castLibraryReads.get(
+                await scopedDb.castLibraryReads.get(
+                  input.kind,
+                  input.id,
+                  input.parentId
+                ),
+                origin
+              )
+            : inspectLook(
                 input.kind,
-                input.id,
-                input.parentId
-              ),
-              origin
-            );
-      return {
-        document: await readDocument(JSON.stringify(data), input, 'json'),
-      };
-    }
+                await scopedDb.lookLibraryReads.get(input.kind, input.id),
+                origin
+              );
+        return {
+          data: documentSchema.parse({
+            document: await readDocument(JSON.stringify(data), input, 'json'),
+          }),
+          summary: getLibraryResourceDescription.split('.')[0] ?? '',
+        };
+      })
   );
   const gallerySchema = z.object({
     samples: z.array(

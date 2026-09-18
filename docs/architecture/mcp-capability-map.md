@@ -35,7 +35,7 @@ Every name below has the `openstory.` prefix.
 | Studio and catalog generations | `list_generated_assets`, `get_generated_asset`   | Team runs, source/activity/endpoint/favorite filters, full input settings and prompts, output media, status/errors, cost and workflow reference                      |
 | Studio uploads                 | `list_studio_uploads`                            | Every page of team composer uploads: image/video/audio URLs, MIME type, size and upload date                                                                         |
 
-Library detail tools take `id` and return revision-checked JSON document windows, including long descriptions/configurations. Lists select compact summaries; detail tools return all documented public fields. Library resources use these `kind` / `parentId` combinations:
+Library detail tools take `id` and return revision-checked JSON document windows, including long descriptions/configurations. Lists select compact summaries; detail tools return all documented public fields. Library resources use these `kind` / `parentId` combinations. `parentId` is required for every child kind and must be omitted for `audio` / `vfx`:
 
 | Kind                                       | Parent              |
 | ------------------------------------------ | ------------------- |

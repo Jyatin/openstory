@@ -1773,6 +1773,33 @@ describe('Studio, Gallery and library reads', () => {
       ).isError
     ).toBe(true);
   });
+  it('requires parentId for child library kinds and rejects it for audio and VFX', async () => {
+    for (const kind of [
+      'talent_sheet',
+      'talent_media',
+      'talent_sheet_version',
+      'location_sheet',
+      'location_sheet_version',
+    ] as const) {
+      for (const [name, args] of [
+        ['list_library_resources', { kind }],
+        ['get_library_resource', { kind, id: sheetId }],
+      ] as const) {
+        const result = await call(name, args);
+        expect(result.isError, JSON.stringify(result)).toBe(true);
+        expect(result.content[0]?.text).toMatch(/parentId/i);
+        expect(result.content[0]?.text).not.toMatch(/not found/i);
+      }
+    }
+    expect(
+      (
+        await call('list_library_resources', {
+          kind: 'audio',
+          parentId: talentId,
+        })
+      ).isError
+    ).toBe(true);
+  });
   it('rejects wrong child parents and location variant parent types', async () => {
     const otherTalent = generateId();
     await db.insert(talent).values({ id: otherTalent, teamId, name: 'Other' });

@@ -45,7 +45,7 @@ const toolsListResult = z.object({
     z.object({
       name: z.string(),
       description: z.string(),
-      inputSchema: z.object({ type: z.literal('object') }),
+      inputSchema: z.object({ type: z.literal('object') }).passthrough(),
       outputSchema: z.object({ type: z.literal('object') }),
       annotations: z
         .object({
@@ -186,6 +186,41 @@ describe('tools/list and whoami', () => {
         readOnlyHint: true,
         destructiveHint: false,
       });
+    for (const name of [
+      'openstory.list_library_resources',
+      'openstory.get_library_resource',
+    ]) {
+      const libraryResourceSchema = z
+        .object({
+          oneOf: z.array(
+            z.object({
+              properties: z.object({
+                kind: z.object({ enum: z.array(z.string()) }),
+              }),
+              required: z.array(z.string()),
+            })
+          ),
+        })
+        .parse(tools.find((tool) => tool.name === name)?.inputSchema);
+      expect(
+        libraryResourceSchema.oneOf
+          .filter((entry) =>
+            entry.properties.kind.enum.some(
+              (kind) => kind !== 'audio' && kind !== 'vfx'
+            )
+          )
+          .every((entry) => entry.required.includes('parentId'))
+      ).toBe(true);
+      expect(
+        libraryResourceSchema.oneOf
+          .filter((entry) =>
+            entry.properties.kind.enum.every(
+              (kind) => kind === 'audio' || kind === 'vfx'
+            )
+          )
+          .every((entry) => !entry.required.includes('parentId'))
+      ).toBe(true);
+    }
   });
 
   it('whoami returns the caller user and team', async () => {

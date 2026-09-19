@@ -29,11 +29,10 @@ export function registerContextReads(
     server,
     context,
     'list_shot_references',
-    'Find characters, locations or elements used by a shot using the same matchers as the editor. limit bounds candidates examined; a page may be empty while nextCursor is non-null. Continue until null. IDs can be passed to the entity detail tools.',
+    "Find the characters, locations or elements a shot uses, from the editor inspector's own resolution. IDs can be passed to the entity detail tools.",
     collectionInput.extend({ shotId: ulidSchema, kind: referenceKindSchema }),
     z.object({
       references: z.array(z.object({ id: z.string(), name: z.string() })),
-      examined: z.number(),
       nextCursor: z.string().nullable(),
     }),
     async (input, { scopedDb }) => listShotReferences(scopedDb, input)
@@ -42,7 +41,7 @@ export function registerContextReads(
     server,
     context,
     'list_entity_usages',
-    'Find shots using a sequence character, location or element, optionally within one scene. limit bounds shots examined; empty pages may have nextCursor. Continue until null. Cursors bind the entity and scene filter.',
+    "Find shots using a sequence character, location or element, optionally within one scene, from the editor inspector's own resolution. Cursors bind the entity and scene filter.",
     collectionInput.extend({
       entityId: ulidSchema,
       kind: referenceKindSchema,
@@ -56,7 +55,6 @@ export function registerContextReads(
           shotNumber: z.number().nullable(),
         })
       ),
-      examined: z.number(),
       nextCursor: z.string().nullable(),
     }),
     async (input, { scopedDb }) => listEntityUsages(scopedDb, input)

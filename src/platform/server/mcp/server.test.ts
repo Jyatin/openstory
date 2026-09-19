@@ -122,7 +122,9 @@ describe('createOpenStoryMcpServer', () => {
   it('names the server openstory', () => {
     expect(MCP_SERVER_NAME).toBe('openstory');
     expect(MCP_SERVER_VERSION).toBe('0.1.0');
-    expect(createOpenStoryMcpServer(auth)).toBeDefined();
+    expect(
+      createOpenStoryMcpServer(auth, { origin: 'https://openstory.so' })
+    ).toBeDefined();
   });
 });
 

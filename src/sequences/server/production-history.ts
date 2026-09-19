@@ -205,6 +205,9 @@ const sequenceMusicVariantsReadSchema = createSelectSchema(
     generatedAt: readDate.nullable(),
     discardedAt: readDate.nullable(),
     divergedAt: readDate.nullable(),
+    // Declared integer() but holds the provider-measured length, which is
+    // fractional — the generated validator would reject a real track.
+    durationSeconds: z.number().nullable(),
   });
 const framePromptVersionsReadSchema = createSelectSchema(framePromptVersions)
   .pick({

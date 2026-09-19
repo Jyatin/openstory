@@ -43,13 +43,23 @@ export const pageRows =
         .slice(0, page.limit)
     );
 
+/** `btoa` takes Latin-1 only, and a scope can carry any filter text. */
+export const encodeCursorPayload = (value: unknown) =>
+  btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+export const decodeCursorPayload = (cursor: string): unknown =>
+  JSON.parse(
+    new TextDecoder().decode(
+      Uint8Array.from(atob(cursor), (char) => char.charCodeAt(0))
+    )
+  );
+
 export const encodeCursor = (id: string, scope: string[]) =>
-  btoa(JSON.stringify({ scope, id }));
+  encodeCursorPayload({ scope, id });
 
 export function decodeCursor(cursor: string | undefined, scope: string[]) {
   if (!cursor) return null;
   try {
-    const parsed = cursorSchema.parse(JSON.parse(atob(cursor)));
+    const parsed = cursorSchema.parse(decodeCursorPayload(cursor));
     if (JSON.stringify(parsed.scope) !== JSON.stringify(scope))
       throw new Error('scope');
     return parsed.id;

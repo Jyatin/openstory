@@ -40,9 +40,10 @@ function wire(
   if (value instanceof Date) return value.toISOString();
   if (value === undefined || value === null) return null;
   if (typeof value === 'string')
-    return /url$/i.test(key) && value ? toShareableUrl(value, origin) : value;
+    return /urls?$/i.test(key) && value ? toShareableUrl(value, origin) : value;
   if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.map((item) => wire(item, origin));
+  // Items keep the array's key, so `video_urls: [...]` is absolutized too.
+  if (Array.isArray(value)) return value.map((item) => wire(item, origin, key));
   if (typeof value === 'object')
     return Object.fromEntries(
       Object.entries(value).map(([k, v]) => [k, wire(v, origin, k)])

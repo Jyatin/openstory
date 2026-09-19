@@ -19,6 +19,7 @@ import {
   sequenceInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 
 export function registerContextReads(
   server: McpServer,
@@ -126,7 +127,7 @@ export function registerContextReads(
     async (input, { scopedDb }) => ({
       ...(await readMusicPromptStaleness(
         scopedDb,
-        await scopedDb.productionInspection.getSequence(input.sequenceId)
+        await productionAccess(scopedDb).sequence(input.sequenceId)
       )),
       track: 'untracked' as const,
     })

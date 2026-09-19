@@ -5,10 +5,10 @@ import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import {
   readOnlyAnnotations,
   readTool,
-  requireSequence,
   sequenceInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 
 export function registerGetScene(
   server: McpServer,
@@ -25,11 +25,25 @@ export function registerGetScene(
     },
     (input) =>
       readTool(context, async ({ scopedDb, origin }) => {
-        const sequence = await requireSequence(scopedDb, input.sequenceId);
-        const detail = await scopedDb.scenes.getDetail(
-          sequence.id,
-          input.sceneId
-        );
+        const access = productionAccess(scopedDb);
+        const sequence = await access.sequence(input.sequenceId);
+        const scene = await access.scene(sequence.id, input.sceneId);
+        const [script, page] = await Promise.all([
+          scopedDb.sceneScriptVersions.getSelected(scene.id),
+          scopedDb.shots.listPage({
+            sequenceId: sequence.id,
+            sceneId: scene.id,
+            limit: 100,
+            includeAssets: true,
+            includePrompts: true,
+          }),
+        ]);
+        const detail = {
+          scene,
+          script,
+          shots: page.shots,
+          shotsTruncated: page.nextCursor !== null,
+        };
         return {
           data: {
             ...serializeScene(detail, sequence, origin, {

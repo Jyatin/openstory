@@ -12,7 +12,12 @@ import {
   sceneScriptVersions,
 } from '@/platform/server/db/schema';
 import { projectRead, readDate } from '@/platform/server/read-projection';
-import type { createProductionHistoryReads } from './db/production-history';
+import { readPage } from '@/platform/server/read-page';
+import type { PageInput } from '@/platform/server/read-page';
+import type { VersionListOptions } from '@/platform/server/db/read-page';
+import type { ScopedDb } from '@/platform/server/db/scoped';
+import { NotFoundError, ValidationError } from '@/platform/errors';
+import { productionAccess } from './production-access';
 
 export const versionKindSchema = z.enum([
   'image',
@@ -25,7 +30,7 @@ export const versionKindSchema = z.enum([
   'music_prompt',
   'scene_script',
 ]);
-export type VersionKind = z.infer<typeof versionKindSchema>;
+type VersionKind = z.infer<typeof versionKindSchema>;
 export const versionSummarySchema = z.object({
   id: z.string(),
   kind: versionKindSchema,
@@ -38,7 +43,7 @@ export const versionSummarySchema = z.object({
   error: z.string().nullable(),
   discardedAt: readDate.nullable(),
 });
-export function inspectVersionSummary(
+function inspectVersionSummary(
   row: {
     id: string;
     kind: VersionKind;
@@ -271,57 +276,215 @@ const sceneScriptVersionsReadSchema = createSelectSchema(sceneScriptVersions)
   })
   .extend({ createdAt: readDate, content: z.json() });
 
-export function inspectVersion(
-  read: Awaited<
-    ReturnType<ReturnType<typeof createProductionHistoryReads>['get']>
-  >,
+type Access = ReturnType<typeof productionAccess>;
+type VersionRow = Omit<
+  Parameters<typeof inspectVersionSummary>[0],
+  'kind' | 'entityId' | 'selected'
+>;
+type VersionInput = { sequenceId: string; kind: VersionKind; entityId: string };
+
+/**
+ * One history kind: which production entity owns it, the editor's own list and
+ * get reads for it, and what "selected" means. `get` must scope the row to its
+ * parent — the id-only getters carry no ownership check of their own.
+ */
+function versionKind<P extends { id: string }, R extends VersionRow>(def: {
+  parent: (access: Access, input: VersionInput) => Promise<P>;
+  list: (
+    scopedDb: ScopedDb,
+    parent: P,
+    options: Required<VersionListOptions>
+  ) => Promise<R[]>;
+  get: (scopedDb: ScopedDb, parent: P, versionId: string) => Promise<R | null>;
+  selected: (row: R, parent: P) => boolean;
+  schema: z.ZodType<object>;
+}) {
+  return {
+    async list(
+      scopedDb: ScopedDb,
+      input: VersionInput & PageInput & { includeDiscarded: boolean },
+      origin: string
+    ) {
+      const parent = await def.parent(productionAccess(scopedDb), input);
+      const page = await readPage(
+        input,
+        [
+          input.sequenceId,
+          input.kind,
+          input.entityId,
+          String(input.includeDiscarded),
+        ],
+        (next) =>
+          def.list(scopedDb, parent, {
+            includeDiscarded: input.includeDiscarded,
+            page: next,
+          })
+      );
+      return {
+        versions: page.items.map((row) =>
+          inspectVersionSummary(
+            {
+              ...row,
+              kind: input.kind,
+              entityId: parent.id,
+              selected: def.selected(row, parent),
+            },
+            origin
+          )
+        ),
+        nextCursor: page.nextCursor,
+      };
+    },
+    async get(
+      scopedDb: ScopedDb,
+      input: VersionInput & { versionId: string },
+      origin: string
+    ) {
+      const parent = await def.parent(productionAccess(scopedDb), input);
+      const row = await def.get(scopedDb, parent, input.versionId);
+      if (!row)
+        throw new NotFoundError(
+          'Version not found for this production entity.'
+        );
+      return {
+        selected: def.selected(row, parent),
+        ...projectRead(def.schema, row, origin),
+      };
+    },
+  };
+}
+
+/** Music histories hang off the sequence itself. */
+function sequenceParent(access: Access, input: VersionInput) {
+  if (input.entityId !== input.sequenceId)
+    throw new ValidationError(
+      'Music histories use the sequence ID as entityId.'
+    );
+  return access.sequence(input.sequenceId);
+}
+
+const VERSION_KINDS = {
+  image: versionKind({
+    parent: (access, i) => access.frame(i.sequenceId, i.entityId),
+    list: (db, frame, options) =>
+      db.frameVariants.listByFrame(frame.id, options),
+    get: async (db, frame, id) => {
+      const row = await db.frameVariants.getById(id);
+      return row?.frameId === frame.id ? row : null;
+    },
+    selected: (row, frame) => row.id === frame.selectedImageVersionId,
+    schema: frameVariantsReadSchema,
+  }),
+  video: versionKind({
+    parent: (access, i) => access.segment(i.sequenceId, i.entityId),
+    list: (db, segment, options) =>
+      db.videoVariants.listBySegment(segment.id, options),
+    get: async (db, segment, id) => {
+      const row = await db.videoVariants.getById(id);
+      return row?.renderSegmentId === segment.id ? row : null;
+    },
+    selected: (row, segment) => row.id === segment.selectedVideoVersionId,
+    schema: videoVariantsReadSchema,
+  }),
+  character_sheet: versionKind({
+    parent: (access, i) => access.character(i.sequenceId, i.entityId),
+    list: (db, character, options) =>
+      db.characterSheetVariants.listByCharacter(character.id, options),
+    get: async (db, character, id) => {
+      const row = await db.characterSheetVariants.getById(id);
+      return row?.characterId === character.id ? row : null;
+    },
+    // A pre-versioning sheet is the row keyed to the character's own id (#1419).
+    selected: (row, character) =>
+      row.id === (character.selectedSheetVersionId ?? character.id),
+    schema: characterSheetVariantsReadSchema,
+  }),
+  location_sheet: versionKind({
+    parent: (access, i) => access.location(i.sequenceId, i.entityId),
+    list: (db, location, options) =>
+      db.locationSheetVariants.listByParent(
+        'sequence_location',
+        location.id,
+        options
+      ),
+    get: async (db, location, id) => {
+      const row = await db.locationSheetVariants.getById(id);
+      return row?.parentType === 'sequence_location' &&
+        row.parentId === location.id
+        ? row
+        : null;
+    },
+    selected: (row, location) =>
+      row.id === (location.selectedReferenceVersionId ?? location.id),
+    schema: locationSheetVariantsReadSchema,
+  }),
+  music: versionKind({
+    parent: sequenceParent,
+    list: (db, sequence, options) =>
+      db.sequenceVariants.listMusicBySequence(sequence.id, options),
+    get: async (db, sequence, id) => {
+      const row = await db.sequenceVariants.getMusicById(id);
+      return row?.sequenceId === sequence.id ? row : null;
+    },
+    selected: (row, sequence) =>
+      row.url !== null &&
+      row.url === sequence.musicUrl &&
+      row.model === sequence.musicModel,
+    schema: sequenceMusicVariantsReadSchema,
+  }),
+  visual_prompt: versionKind({
+    parent: (access, i) => access.frame(i.sequenceId, i.entityId),
+    list: (db, frame, { page }) =>
+      db.framePromptVersions.listByFrame(frame.id, page),
+    get: (db, frame, id) =>
+      db.framePromptVersions.getByIdForFrame(id, frame.id),
+    selected: (row, frame) => row.id === frame.selectedImagePromptVersionId,
+    schema: framePromptVersionsReadSchema,
+  }),
+  motion_prompt: versionKind({
+    parent: (access, i) => access.shot(i.sequenceId, i.entityId),
+    list: (db, shot, { page }) =>
+      db.shotPromptVersions.listByShot(shot.id, 'motion', page),
+    get: async (db, shot, id) => {
+      const row = await db.shotPromptVersions.getByIdForShot(id, shot.id);
+      return row?.promptType === 'motion' ? row : null;
+    },
+    selected: (row, shot) => row.id === shot.selectedMotionPromptVersionId,
+    schema: shotPromptVersionsReadSchema,
+  }),
+  music_prompt: versionKind({
+    parent: sequenceParent,
+    list: (db, sequence, { page }) =>
+      db.sequenceMusicPromptVersions.listBySequence(sequence.id, page),
+    get: (db, sequence, id) =>
+      db.sequenceMusicPromptVersions.getByIdForSequence(id, sequence.id),
+    selected: (row, sequence) =>
+      row.prompt === sequence.musicPrompt && row.tags === sequence.musicTags,
+    schema: sequenceMusicPromptVersionsReadSchema,
+  }),
+  scene_script: versionKind({
+    parent: (access, i) => access.scene(i.sequenceId, i.entityId),
+    list: (db, scene, { page }) =>
+      db.sceneScriptVersions.listByScene(scene.id, page),
+    get: (db, scene, id) =>
+      db.sceneScriptVersions.getByIdForScene(id, scene.id),
+    selected: (row, scene) => row.id === scene.selectedScriptVersionId,
+    schema: sceneScriptVersionsReadSchema,
+  }),
+} satisfies Record<VersionKind, ReturnType<typeof versionKind>>;
+
+export function listVersions(
+  scopedDb: ScopedDb,
+  input: VersionInput & PageInput & { includeDiscarded: boolean },
   origin: string
 ) {
-  switch (read.kind) {
-    case 'image':
-      return {
-        selected: read.selected,
-        ...projectRead(frameVariantsReadSchema, read.row, origin),
-      };
-    case 'video':
-      return {
-        selected: read.selected,
-        ...projectRead(videoVariantsReadSchema, read.row, origin),
-      };
-    case 'character_sheet':
-      return {
-        selected: read.selected,
-        ...projectRead(characterSheetVariantsReadSchema, read.row, origin),
-      };
-    case 'location_sheet':
-      return {
-        selected: read.selected,
-        ...projectRead(locationSheetVariantsReadSchema, read.row, origin),
-      };
-    case 'music':
-      return {
-        selected: read.selected,
-        ...projectRead(sequenceMusicVariantsReadSchema, read.row, origin),
-      };
-    case 'visual_prompt':
-      return {
-        selected: read.selected,
-        ...projectRead(framePromptVersionsReadSchema, read.row, origin),
-      };
-    case 'motion_prompt':
-      return {
-        selected: read.selected,
-        ...projectRead(shotPromptVersionsReadSchema, read.row, origin),
-      };
-    case 'music_prompt':
-      return {
-        selected: read.selected,
-        ...projectRead(sequenceMusicPromptVersionsReadSchema, read.row, origin),
-      };
-    case 'scene_script':
-      return {
-        selected: read.selected,
-        ...projectRead(sceneScriptVersionsReadSchema, read.row, origin),
-      };
-  }
+  return VERSION_KINDS[input.kind].list(scopedDb, input, origin);
+}
+
+export function readVersion(
+  scopedDb: ScopedDb,
+  input: VersionInput & { versionId: string },
+  origin: string
+) {
+  return VERSION_KINDS[input.kind].get(scopedDb, input, origin);
 }

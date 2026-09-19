@@ -1,16 +1,16 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
-  buildProductionStatus,
+  readProductionStatus,
   productionStatusSchema,
 } from '@/sequences/server/production-status';
 import {
   readOnlyAnnotations,
   readTool,
-  requireSequence,
   sequenceInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 export function registerGetSequenceStatus(
   server: McpServer,
   context: ReadToolContextFactory
@@ -28,13 +28,10 @@ export function registerGetSequenceStatus(
     },
     ({ sequenceId, includeFailures }) =>
       readTool(context, async ({ scopedDb }) => {
-        const sequence = await requireSequence(scopedDb, sequenceId);
-        const data = buildProductionStatus(
+        const sequence = await productionAccess(scopedDb).sequence(sequenceId);
+        const data = await readProductionStatus(
+          scopedDb,
           sequence,
-          await scopedDb.sequences.getProductionStatus(
-            sequenceId,
-            includeFailures
-          ),
           includeFailures
         );
         return {

@@ -5,10 +5,10 @@ import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import {
   readOnlyAnnotations,
   readTool,
-  requireSequence,
   sequenceInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 
 export function registerGetShot(
   server: McpServer,
@@ -25,7 +25,9 @@ export function registerGetShot(
     },
     (input) =>
       readTool(context, async ({ scopedDb, origin }) => {
-        const sequence = await requireSequence(scopedDb, input.sequenceId);
+        const access = productionAccess(scopedDb);
+        const sequence = await access.sequence(input.sequenceId);
+        await access.shot(sequence.id, input.shotId);
         const shot = await scopedDb.shots.getDetail(sequence.id, input.shotId);
         return {
           data: serializeShot(shot, sequence, origin, {

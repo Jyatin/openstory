@@ -7,9 +7,6 @@
  */
 
 import { getDb } from '#db-client';
-import { createCastLibraryReads } from '@/cast/server/db/library-reads';
-import { createLookLibraryReads } from '@/look/server/db/library-reads';
-import { createAssetReads } from '@/models/server/db/asset-reads';
 import type { Sequence, User } from '@/platform/server/db/schema';
 import {
   teamMembers,
@@ -47,10 +44,6 @@ import { createFramesMethods } from '@/shots/server/db/frames';
 import { createGeneratedAssetsMethods } from '@/models/server/db/generated-assets';
 import { createScenesMethods } from '@/shots/server/db/scenes';
 import { createProductionReadMethods } from '@/shots/server/db/production-reads';
-import { createProductionStatusMethods } from '@/sequences/server/db/production-status';
-import { createCastProductionReads } from '@/cast/server/db/production-reads';
-import { createProductionHistoryReads } from '@/sequences/server/db/production-history';
-import { createSequenceInspectionReads } from '@/sequences/server/db/production-inspection';
 import { createSceneScriptVersionsMethods } from '@/shots/server/db/scene-script-versions';
 import { createSequenceEventsMethods } from '@/sequences/server/db/sequence-events';
 import { createShotPromptVersionsMethods } from '@/shots/server/db/shot-prompt-versions';
@@ -463,17 +456,8 @@ export function createScopedDb(teamId: string, userId: string) {
   return {
     teamId,
     userId,
-    castReads: createCastProductionReads(db, teamId),
-    castLibraryReads: createCastLibraryReads(db, teamId),
-    lookLibraryReads: createLookLibraryReads(db, teamId),
-    assetReads: createAssetReads(db, teamId),
-    productionHistory: createProductionHistoryReads(db, teamId),
-    productionInspection: createSequenceInspectionReads(db, teamId),
 
-    sequences: {
-      ...createSequencesMethods(db, teamId, userId),
-      ...createProductionStatusMethods(db, teamId),
-    },
+    sequences: createSequencesMethods(db, teamId, userId),
     sequence: (sequenceId: string) => createSequenceMethods(db, sequenceId),
 
     talent: createTalentMethods(db, teamId, userId),

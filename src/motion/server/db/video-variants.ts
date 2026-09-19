@@ -34,6 +34,8 @@ import type {
   VideoVariant,
 } from '@/platform/server/db/schema';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { pageOf } from '@/platform/server/db/read-page';
+import type { VersionListOptions } from '@/platform/server/db/read-page';
 import { buildRenderSegmentSelect } from './render-segments';
 import { buildEventInsert } from '@/sequences/server/db/sequence-events';
 import type { VideoManifestInputHash } from '@/shots/input-hash';
@@ -51,7 +53,7 @@ export type VideoVariantGroup = {
 const VIDEO_BY_SHOTS_BATCH = 90;
 
 /** Shared latest-primary selector for full views and narrow polling reads. */
-export function primaryVideoIdForShot() {
+function primaryVideoIdForShot() {
   return sql<string>`(select max(primary_video.id) from video_variants primary_video
     where primary_video.render_segment_id = ${shots.renderSegmentId}
     and primary_video.sequence_id = ${shots.sequenceId}
@@ -375,17 +377,22 @@ export function createVideoVariantsMethods(db: Database) {
      * Drives the per-shot video history sheet (#1070) without scanning the
      * whole sequence.
      */
-    listBySegment: async (renderSegmentId: string): Promise<VideoVariant[]> => {
-      return await db
-        .select()
-        .from(videoVariants)
-        .where(
-          and(
-            eq(videoVariants.renderSegmentId, renderSegmentId),
-            isNull(videoVariants.discardedAt)
-          )
-        )
-        .orderBy(asc(videoVariants.id));
+    listBySegment: async (
+      renderSegmentId: string,
+      options?: VersionListOptions
+    ): Promise<VideoVariant[]> => {
+      return await pageOf(
+        db.select().from(videoVariants).$dynamic(),
+        and(
+          eq(videoVariants.renderSegmentId, renderSegmentId),
+          options?.includeDiscarded
+            ? undefined
+            : isNull(videoVariants.discardedAt)
+        ),
+        videoVariants.id,
+        options?.page,
+        asc(videoVariants.id)
+      );
     },
 
     /** Distinct model names that have a (non-discarded) version in a sequence. */

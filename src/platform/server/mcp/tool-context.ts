@@ -1,7 +1,7 @@
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
-import { NotFoundError, OpenStoryError } from '@/platform/errors';
+import { OpenStoryError } from '@/platform/errors';
 import { getLogger, toErrorPayload } from '@/platform/logger';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 
@@ -26,12 +26,6 @@ export const readOnlyAnnotations = {
   idempotentHint: true,
   openWorldHint: false,
 };
-
-export async function requireSequence(scopedDb: ScopedDb, sequenceId: string) {
-  const sequence = await scopedDb.sequences.getById(sequenceId);
-  if (!sequence) throw new NotFoundError('Sequence not found.');
-  return sequence;
-}
 
 /** Bound tool responses, including opt-in prompts, without silently cutting data. */
 export async function readTool(

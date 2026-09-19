@@ -48,9 +48,7 @@ export function registerListSequences(
         });
         const sequences = rows.slice(0, input.limit);
         const [readiness, styles] = await Promise.all([
-          scopedDb.sequences.listProductionReadiness(
-            sequences.map((s) => s.id)
-          ),
+          scopedDb.sequences.listShotReadinessByIds(sequences.map((s) => s.id)),
           scopedDb.styles.listByIds([
             ...new Set(sequences.map((s) => s.styleId)),
           ]),

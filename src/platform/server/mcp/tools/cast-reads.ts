@@ -5,15 +5,17 @@ import {
   characterReadSchema,
   locationReadSchema,
   elementReadSchema,
-  inspectCharacter,
-  inspectLocation,
-  inspectElement,
+  listCharacters,
+  readCharacter,
+  listLocations,
+  readLocation,
+  listElements,
+  readElement,
 } from '@/cast/server/production-inspection';
 import {
   registerProductionRead,
   collectionInput,
   sequenceInput,
-  requireSequence,
   type ReadToolContextFactory,
 } from '../tool-context';
 
@@ -31,16 +33,7 @@ export function registerCastReads(
       characters: z.array(characterReadSchema),
       nextCursor: z.string().nullable(),
     }),
-    async (input, { scopedDb, origin }) => {
-      const sequence = await requireSequence(scopedDb, input.sequenceId);
-      const page = await scopedDb.castReads.listCharacters(input);
-      return {
-        characters: page.items.map((row) =>
-          inspectCharacter(row, sequence.generateVoices, origin)
-        ),
-        nextCursor: page.nextCursor,
-      };
-    }
+    (input, { scopedDb, origin }) => listCharacters(scopedDb, input, origin)
   );
   registerProductionRead(
     server,
@@ -49,19 +42,14 @@ export function registerCastReads(
     'Inspect a sequence character by database characterId, including appearance, performance, voice takes, first mention and selected sheet. characterId is not an analysis label or talent library ID.',
     sequenceInput.extend({ characterId: ulidSchema }),
     z.object({ character: characterReadSchema }),
-    async (input, { scopedDb, origin }) => {
-      const sequence = await requireSequence(scopedDb, input.sequenceId);
-      return {
-        character: inspectCharacter(
-          await scopedDb.castReads.getCharacter(
-            input.sequenceId,
-            input.characterId
-          ),
-          sequence.generateVoices,
-          origin
-        ),
-      };
-    }
+    async (input, { scopedDb, origin }) => ({
+      character: await readCharacter(
+        scopedDb,
+        input.sequenceId,
+        input.characterId,
+        origin
+      ),
+    })
   );
   registerProductionRead(
     server,
@@ -73,13 +61,7 @@ export function registerCastReads(
       locations: z.array(locationReadSchema),
       nextCursor: z.string().nullable(),
     }),
-    async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.castReads.listLocations(input);
-      return {
-        locations: page.items.map((row) => inspectLocation(row, origin)),
-        nextCursor: page.nextCursor,
-      };
-    }
+    (input, { scopedDb, origin }) => listLocations(scopedDb, input, origin)
   );
   registerProductionRead(
     server,
@@ -89,11 +71,10 @@ export function registerCastReads(
     sequenceInput.extend({ locationId: ulidSchema }),
     z.object({ location: locationReadSchema }),
     async (input, { scopedDb, origin }) => ({
-      location: inspectLocation(
-        await scopedDb.castReads.getLocation(
-          input.sequenceId,
-          input.locationId
-        ),
+      location: await readLocation(
+        scopedDb,
+        input.sequenceId,
+        input.locationId,
         origin
       ),
     })
@@ -108,13 +89,7 @@ export function registerCastReads(
       elements: z.array(elementReadSchema),
       nextCursor: z.string().nullable(),
     }),
-    async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.castReads.listElements(input);
-      return {
-        elements: page.items.map((row) => inspectElement(row, origin)),
-        nextCursor: page.nextCursor,
-      };
-    }
+    (input, { scopedDb, origin }) => listElements(scopedDb, input, origin)
   );
   registerProductionRead(
     server,
@@ -124,8 +99,10 @@ export function registerCastReads(
     sequenceInput.extend({ elementId: ulidSchema }),
     z.object({ element: elementReadSchema }),
     async (input, { scopedDb, origin }) => ({
-      element: inspectElement(
-        await scopedDb.castReads.getElement(input.sequenceId, input.elementId),
+      element: await readElement(
+        scopedDb,
+        input.sequenceId,
+        input.elementId,
         origin
       ),
     })

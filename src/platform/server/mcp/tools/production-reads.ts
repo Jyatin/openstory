@@ -22,9 +22,13 @@ import {
 import {
   versionKindSchema,
   versionSummarySchema,
-  inspectVersionSummary,
-  inspectVersion,
+  listVersions,
+  readVersion,
 } from '@/sequences/server/production-history';
+import { productionAccess } from '@/sequences/server/production-access';
+import { composeSequenceScriptFromDb } from '@/shots/server/scene-script';
+import { readPage } from '@/platform/server/read-page';
+import { NotFoundError } from '@/platform/errors';
 import {
   registerProductionRead,
   collectionInput,
@@ -88,15 +92,16 @@ export function registerProductionReads(
       document: documentReadSchema,
     }),
     async (input, { scopedDb }) => {
-      const sequence = await scopedDb.productionInspection.getSequence(
+      const sequence = await productionAccess(scopedDb).sequence(
         input.sequenceId
       );
+      const original = sequence.script ?? '';
+      // Same read and fallback as the editor's "Copy script".
       const text =
         input.mode === 'original'
-          ? (sequence.script ?? '')
-          : await scopedDb.productionInspection.getComposedScript(
-              input.sequenceId
-            );
+          ? original
+          : (await composeSequenceScriptFromDb(scopedDb, sequence.id)) ||
+            original;
       return {
         sequenceId: sequence.id,
         mode: input.mode,
@@ -113,7 +118,7 @@ export function registerProductionReads(
     z.object({ music: musicReadSchema }),
     async (input, { scopedDb, origin }) => ({
       music: inspectMusic(
-        await scopedDb.productionInspection.getSequence(input.sequenceId),
+        await productionAccess(scopedDb).sequence(input.sequenceId),
         origin
       ),
     })
@@ -126,7 +131,12 @@ export function registerProductionReads(
     collectionInput.extend({ shotId: ulidSchema }),
     z.object({ frames: z.array(frameReadSchema), ...continuation }),
     async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.productionInspection.listFrames(input);
+      await productionAccess(scopedDb).shot(input.sequenceId, input.shotId);
+      const page = await readPage(
+        input,
+        [input.sequenceId, 'frames', input.shotId],
+        (next) => scopedDb.frames.listByShot(input.shotId, next)
+      );
       return {
         frames: page.items.map((row) =>
           projectRead(frameReadSchema, row, origin)
@@ -145,10 +155,7 @@ export function registerProductionReads(
     async (input, { scopedDb, origin }) => ({
       frame: projectRead(
         frameReadSchema,
-        await scopedDb.productionInspection.getFrame(
-          input.sequenceId,
-          input.frameId
-        ),
+        await productionAccess(scopedDb).frame(input.sequenceId, input.frameId),
         origin
       ),
     })
@@ -161,7 +168,21 @@ export function registerProductionReads(
     collectionInput.extend({ sceneId: ulidSchema.optional() }),
     z.object({ segments: z.array(segmentReadSchema), ...continuation }),
     async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.productionInspection.listSegments(input);
+      const access = productionAccess(scopedDb);
+      const scene = input.sceneId
+        ? await access.scene(input.sequenceId, input.sceneId)
+        : null;
+      if (!scene) await access.sequence(input.sequenceId);
+      const page = await readPage(
+        input,
+        [input.sequenceId, 'segments', input.sceneId ?? ''],
+        (next) =>
+          scopedDb.renderSegments.listBySequence(input.sequenceId, {
+            sceneId: scene?.id,
+            liveScenesOnly: true,
+            page: next,
+          })
+      );
       return {
         segments: page.items.map((row) =>
           projectRead(segmentReadSchema, row, origin)
@@ -182,11 +203,20 @@ export function registerProductionReads(
       ...continuation,
     }),
     async (input, { scopedDb, origin }) => {
-      const segment = await scopedDb.productionInspection.getSegment(
+      const segment = await productionAccess(scopedDb).segment(
         input.sequenceId,
         input.segmentId
       );
-      const page = await scopedDb.productionInspection.listSegmentShots(input);
+      const page = await readPage(
+        input,
+        [input.sequenceId, 'segment-shots', segment.id],
+        (next) =>
+          scopedDb.shots.listBySequence(input.sequenceId, {
+            sceneId: segment.sceneId,
+            renderSegmentId: segment.id,
+            page: next,
+          })
+      );
       return {
         segment: projectRead(segmentReadSchema, segment, origin),
         shots: page.items.map((row) =>
@@ -207,13 +237,7 @@ export function registerProductionReads(
       includeDiscarded: z.boolean().default(false),
     }),
     z.object({ versions: z.array(versionSummarySchema), ...continuation }),
-    async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.productionHistory.list(input);
-      return {
-        versions: page.items.map((row) => inspectVersionSummary(row, origin)),
-        nextCursor: page.nextCursor,
-      };
-    }
+    (input, { scopedDb, origin }) => listVersions(scopedDb, input, origin)
   );
   registerProductionRead(
     server,
@@ -229,17 +253,13 @@ export function registerProductionReads(
       document: documentReadSchema,
     }),
     async (input, { scopedDb, origin }) => {
-      const read = await scopedDb.productionHistory.get(input);
+      const version = await readVersion(scopedDb, input, origin);
       return {
         kind: input.kind,
         entityId: input.entityId,
         versionId: input.versionId,
-        selected: read.selected,
-        document: await readDocument(
-          JSON.stringify(inspectVersion(read, origin)),
-          input,
-          'json'
-        ),
+        selected: version.selected,
+        document: await readDocument(JSON.stringify(version), input, 'json'),
       };
     }
   );
@@ -251,7 +271,7 @@ export function registerProductionReads(
     sequenceInput.extend({ shotId: ulidSchema, ...documentInput.shape }),
     z.object({ shotId: z.string(), document: documentReadSchema }),
     async (input, { scopedDb, origin }) => {
-      const shot = await scopedDb.productionInspection.getShot(
+      const shot = await productionAccess(scopedDb).shot(
         input.sequenceId,
         input.shotId
       );
@@ -274,7 +294,13 @@ export function registerProductionReads(
     collectionInput,
     z.object({ exports: z.array(exportReadSchema), ...continuation }),
     async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.productionInspection.listExports(input);
+      await productionAccess(scopedDb).sequence(input.sequenceId);
+      const page = await readPage(
+        input,
+        [input.sequenceId, 'exports'],
+        (next) =>
+          scopedDb.sequenceExports.listAllBySequence(input.sequenceId, next)
+      );
       return {
         exports: page.items.map((row) =>
           projectRead(exportReadSchema, row, origin)
@@ -290,16 +316,13 @@ export function registerProductionReads(
     'Inspect one existing export by exportId, with its status, source cut, duration and media URL. Does not start or reconcile an export.',
     sequenceInput.extend({ exportId: ulidSchema }),
     z.object({ export: exportReadSchema }),
-    async (input, { scopedDb, origin }) => ({
-      export: projectRead(
-        exportReadSchema,
-        await scopedDb.productionInspection.getExport(
-          input.sequenceId,
-          input.exportId
-        ),
-        origin
-      ),
-    })
+    async (input, { scopedDb, origin }) => {
+      await productionAccess(scopedDb).sequence(input.sequenceId);
+      const row = await scopedDb.sequenceExports.getById(input.exportId);
+      if (row?.sequenceId !== input.sequenceId)
+        throw new NotFoundError('Export not found in this sequence.');
+      return { export: projectRead(exportReadSchema, row, origin) };
+    }
   );
   registerProductionRead(
     server,
@@ -323,7 +346,22 @@ export function registerProductionReads(
     }),
     z.object({ events: z.array(eventReadSchema), ...continuation }),
     async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.productionInspection.listEvents(input);
+      await productionAccess(scopedDb).sequence(input.sequenceId);
+      const page = await readPage(
+        input,
+        [
+          input.sequenceId,
+          'events',
+          input.targetType ?? '',
+          input.targetId ?? '',
+        ],
+        (next) =>
+          scopedDb.sequenceEvents.listBySequence(input.sequenceId, {
+            targetType: input.targetType,
+            targetId: input.targetId,
+            page: next,
+          })
+      );
       return {
         events: page.items.map((row) =>
           projectRead(eventReadSchema, row, origin)
@@ -340,10 +378,10 @@ export function registerProductionReads(
     sequenceInput.extend({ eventId: ulidSchema, ...documentInput.shape }),
     z.object({ event: eventReadSchema, document: documentReadSchema }),
     async (input, { scopedDb, origin }) => {
-      const row = await scopedDb.productionInspection.getEvent(
-        input.sequenceId,
-        input.eventId
-      );
+      await productionAccess(scopedDb).sequence(input.sequenceId);
+      const row = await scopedDb.sequenceEvents.getById(input.eventId);
+      if (row?.sequenceId !== input.sequenceId)
+        throw new NotFoundError('Event not found in this sequence.');
       return {
         event: projectRead(eventReadSchema, row, origin),
         document: await readDocument(

@@ -1,16 +1,11 @@
 import { listFilesPage } from '#storage';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
-import {
-  scopedPageCursor,
-  type ScopedPageInput,
-} from '@/platform/server/db/scoped-read-page';
+import { decodeCursor, encodeCursor } from '@/platform/server/read-page';
+import type { PageInput } from '@/platform/server/read-page';
 
-export async function listStudioUploadReads(
-  teamId: string,
-  input: ScopedPageInput
-) {
+export async function listStudioUploadReads(teamId: string, input: PageInput) {
   const scope = [teamId, 'studio-uploads'];
-  const cursor = scopedPageCursor(input, scope);
+  const cursor = decodeCursor(input.cursor, scope);
   const page = await listFilesPage(STORAGE_BUCKETS.TALENT, `${teamId}/temp`, {
     limit: input.limit,
     cursor: cursor ?? undefined,
@@ -20,8 +15,6 @@ export async function listStudioUploadReads(
       /^(image|video|audio)\//.test(file.contentType)
     ),
     examined: page.files.length,
-    nextCursor: page.nextCursor
-      ? btoa(JSON.stringify({ scope, id: page.nextCursor }))
-      : null,
+    nextCursor: page.nextCursor ? encodeCursor(page.nextCursor, scope) : null,
   };
 }

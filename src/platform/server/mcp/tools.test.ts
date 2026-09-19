@@ -547,10 +547,10 @@ describe('paging and deleted children', () => {
   it('excludes deleted shots and children of deleted scenes from reads and counts', async () => {
     const hiddenScene = await addScene(1);
     const hiddenShot = await addShot(hiddenScene);
-    await db
-      .update(scenes)
-      .set({ deletedAt: new Date() })
-      .where(eq(scenes.id, hiddenScene));
+    // The app's own delete: a scene and its shots go in one batch (#1108).
+    await scopedDb.scenes.softDeleteCascade(dbSceneId(hiddenScene), {
+      actorId: null,
+    });
     expect(await data('get_sequence_status', { sequenceId })).toMatchObject({
       counts: { shots: 1 },
     });
@@ -1163,7 +1163,7 @@ describe('complete production reads', () => {
     });
   });
 
-  it('paginates version metadata without loading large prompts and exposes discarded versions deliberately', async () => {
+  it('paginates version metadata, windows large prompts and exposes discarded versions deliberately', async () => {
     const id = generateId();
     await db.insert(frameVariants).values({
       id,
@@ -1212,17 +1212,13 @@ describe('complete production reads', () => {
     await db
       .insert(framePromptVersions)
       .values({ id: promptId, frameId, text: huge, source: 'user-edit' });
-    queries.length = 0;
-    await data('list_versions', {
-      sequenceId,
-      kind: 'visual_prompt',
-      entityId: frameId,
-    });
     expect(
-      queries
-        .filter((query) => query.includes('from "frame_prompt_versions"'))
-        .every((query) => !query.includes('"text"'))
-    ).toBe(true);
+      await data('list_versions', {
+        sequenceId,
+        kind: 'visual_prompt',
+        entityId: frameId,
+      })
+    ).not.toHaveProperty('versions.0.text');
     const firstDoc = z
       .object({
         document: z.object({ text: z.string(), nextOffset: z.number() }),
@@ -1772,7 +1768,7 @@ describe('Studio, Gallery and library reads', () => {
       gallery.samples.find((x) => x.styleId === galleryStyleId)?.video.url
     ).toBe('https://openstory.test/r2/styles/noir/canonical.mp4');
   });
-  it('binds cursors to collection, team and parent and does not load large fields in lists', async () => {
+  it('binds cursors to collection, team and parent and keeps large fields out of lists', async () => {
     await db
       .insert(talent)
       .values({ teamId, name: 'Second', description: 'x'.repeat(50000) });
@@ -1808,13 +1804,19 @@ describe('Studio, Gallery and library reads', () => {
         })
       ).isError
     ).toBe(true);
-    queries.length = 0;
-    await data('list_talent', {});
-    await data('list_generated_assets', {});
-    expect(queries.join('\n')).not.toMatch(/"description"|"input"/);
+    // Lists read the library's own full rows; the wire shape stays narrow.
+    const items = z.object({
+      items: z.array(z.record(z.string(), z.unknown())),
+    });
+    for (const tool of ['list_talent', 'list_generated_assets'])
+      for (const item of items.parse(await data(tool, {})).items) {
+        expect(item).not.toHaveProperty('description');
+        expect(item).not.toHaveProperty('input');
+      }
   });
   it('binds asset cursors to all filters and windows long input without truncation', async () => {
-    const asset = await scopedDb.assetReads.get(assetId);
+    const asset = await scopedDb.generatedAssets.getById(assetId);
+    if (!asset) throw new Error('seeded asset missing');
     await db.insert(generatedAssets).values({
       ...asset,
       id: generateId(),

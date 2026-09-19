@@ -19,6 +19,8 @@ import {
   textWindowSchema,
 } from '@/platform/server/read-projection';
 import type { ScopedDb } from '@/platform/server/db/scoped';
+import type { Sequence } from '@/platform/server/db/schema';
+import { productionAccess } from './production-access';
 import { ValidationError } from '@/platform/errors';
 
 export const settingsSchema = createSelectSchema(sequences)
@@ -64,7 +66,7 @@ export async function readSequenceSettings(
   sequenceId: string,
   origin: string
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(sequenceId);
+  const sequence = await productionAccess(scopedDb).sequence(sequenceId);
   const style = sequence.styleId
     ? await scopedDb.styles.getById(sequence.styleId)
     : null;
@@ -104,12 +106,7 @@ export const musicReadSchema = z.object({
   generatedAt: readDate.nullable(),
   selection: z.literal('output_url_and_model'),
 });
-export function inspectMusic(
-  sequence: Awaited<
-    ReturnType<ScopedDb['productionInspection']['getSequence']>
-  >,
-  origin: string
-) {
+export function inspectMusic(sequence: Sequence, origin: string) {
   return projectRead(
     musicReadSchema,
     {

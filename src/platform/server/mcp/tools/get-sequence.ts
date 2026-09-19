@@ -5,16 +5,16 @@ import {
   sequenceSummarySchema,
 } from '@/platform/server/api-v1/state';
 import {
-  buildProductionStatus,
+  readProductionStatus,
   productionStatusSchema,
 } from '@/sequences/server/production-status';
 import {
   readOnlyAnnotations,
   readTool,
-  requireSequence,
   sequenceInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 export function registerGetSequence(
   server: McpServer,
   context: ReadToolContextFactory
@@ -34,12 +34,11 @@ export function registerGetSequence(
     },
     ({ sequenceId }) =>
       readTool(context, async ({ scopedDb, origin }) => {
-        const sequence = await requireSequence(scopedDb, sequenceId);
-        const [style, read] = await Promise.all([
+        const sequence = await productionAccess(scopedDb).sequence(sequenceId);
+        const [style, status] = await Promise.all([
           scopedDb.styles.getById(sequence.styleId),
-          scopedDb.sequences.getProductionStatus(sequenceId, false),
+          readProductionStatus(scopedDb, sequence, false),
         ]);
-        const status = buildProductionStatus(sequence, read, false);
         return {
           data: {
             ...buildSequenceSummary({

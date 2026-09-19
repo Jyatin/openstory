@@ -5,10 +5,10 @@ import { serializeScene } from '@/shots/server/inspection';
 import {
   readOnlyAnnotations,
   readTool,
-  requireSequence,
   pageInput,
   type ReadToolContextFactory,
 } from '../tool-context';
+import { productionAccess } from '@/sequences/server/production-access';
 
 export function registerListScenes(
   server: McpServer,
@@ -29,7 +29,9 @@ export function registerListScenes(
     },
     (input) =>
       readTool(context, async ({ scopedDb, origin }) => {
-        const sequence = await requireSequence(scopedDb, input.sequenceId);
+        const sequence = await productionAccess(scopedDb).sequence(
+          input.sequenceId
+        );
         const page = await scopedDb.scenes.listPage(input);
         return {
           data: {

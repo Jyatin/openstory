@@ -39,6 +39,8 @@ import {
   isSelectableFrameVariantKind,
 } from '@/platform/server/db/schema/frame-variants';
 import { simpleHash } from '@/platform/hash';
+import { pageOf } from '@/platform/server/db/read-page';
+import type { VersionListOptions } from '@/platform/server/db/read-page';
 import {
   and,
   asc,
@@ -870,17 +872,20 @@ export function createFrameVariantsMethods(db: Database) {
     /** All versions for a frame, oldest-first. Excludes discarded by default. */
     listByFrame: async (
       frameId: string,
-      options?: { includeDiscarded?: boolean }
+      options?: VersionListOptions
     ): Promise<FrameVariant[]> => {
-      const conditions = [eq(frameVariants.frameId, frameId)];
-      if (!options?.includeDiscarded) {
-        conditions.push(isNull(frameVariants.discardedAt));
-      }
-      return await db
-        .select()
-        .from(frameVariants)
-        .where(and(...conditions))
-        .orderBy(...oldestFirst);
+      return await pageOf(
+        db.select().from(frameVariants).$dynamic(),
+        and(
+          eq(frameVariants.frameId, frameId),
+          options?.includeDiscarded
+            ? undefined
+            : isNull(frameVariants.discardedAt)
+        ),
+        frameVariants.id,
+        options?.page,
+        ...oldestFirst
+      );
     },
 
     /**

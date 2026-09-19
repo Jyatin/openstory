@@ -1,4 +1,5 @@
 import type { ScopedDb } from '@/platform/server/db/scoped';
+import { productionAccess } from '@/sequences/server/production-access';
 import { buildRegenerateCharacterSheetPayload } from './sheets/character-sheet-trigger';
 import { buildRegenerateLocationSheetPayload } from './sheets/location-sheet-trigger';
 import {
@@ -13,61 +14,49 @@ export async function readReferenceStaleness(
   kind: 'character' | 'location',
   entityId: string
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(sequenceId);
+  const access = productionAccess(scopedDb);
   const context = {
     scopedDb,
-    sequence,
+    sequence: await access.sequence(sequenceId),
     userId: scopedDb.userId,
     teamId: scopedDb.teamId,
   };
   if (kind === 'character') {
-    const { character, sheet } = await scopedDb.castReads.getCharacter(
-      sequenceId,
-      entityId
-    );
+    const character = await access.character(sequenceId, entityId);
     if (character.voiceOnly)
       return { status: 'untracked' as const, applicable: false };
     if (character.sheetStatus === 'generating')
       return { status: 'generating' as const, applicable: true };
-    if (!sheet?.inputHash)
+    if (!character.sheetInputHash)
       return { status: 'untracked' as const, applicable: true };
     const payload = await buildRegenerateCharacterSheetPayload({
       ...context,
-      character: {
-        ...character,
-        sheetImageUrl: sheet.url,
-        sheetImagePath: sheet.storagePath,
-        sheetGeneratedAt: sheet.generatedAt,
-        sheetInputHash: sheet.inputHash,
-      },
+      character,
     });
     return {
-      status: (await characterSheetHashMatchesStored(sheet.inputHash, payload))
+      status: (await characterSheetHashMatchesStored(
+        character.sheetInputHash,
+        payload
+      ))
         ? ('fresh' as const)
         : ('stale' as const),
       applicable: true,
     };
   }
-  const { location, sheet } = await scopedDb.castReads.getLocation(
-    sequenceId,
-    entityId
-  );
+  const location = await access.location(sequenceId, entityId);
   if (location.referenceStatus === 'generating')
     return { status: 'generating' as const, applicable: true };
-  if (!sheet?.inputHash)
+  if (!location.referenceInputHash)
     return { status: 'untracked' as const, applicable: true };
   const payload = await buildRegenerateLocationSheetPayload({
     ...context,
-    location: {
-      ...location,
-      referenceImageUrl: sheet.url,
-      referenceImagePath: sheet.storagePath,
-      referenceGeneratedAt: sheet.generatedAt,
-      referenceInputHash: sheet.inputHash,
-    },
+    location,
   });
   return {
-    status: (await locationSheetHashMatchesStored(sheet.inputHash, payload))
+    status: (await locationSheetHashMatchesStored(
+      location.referenceInputHash,
+      payload
+    ))
       ? ('fresh' as const)
       : ('stale' as const),
     applicable: true,

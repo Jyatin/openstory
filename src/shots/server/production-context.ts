@@ -1,5 +1,7 @@
 import type { ScopedDb } from '@/platform/server/db/scoped';
-import type { ReadPageInput } from '@/platform/server/db/read-page';
+import { readPage } from '@/platform/server/read-page';
+import type { PageInput } from '@/platform/server/read-page';
+import { productionAccess } from '@/sequences/server/production-access';
 import type {
   Character,
   SequenceLocation,
@@ -23,6 +25,28 @@ import {
   type ShotStalenessRefs,
 } from './shot-staleness';
 import { z } from 'zod';
+
+type ReadPageInput = PageInput & { sequenceId: string };
+
+/** Page a sequence's live shots by id, optionally within one scene. */
+async function pageShots(
+  scopedDb: ScopedDb,
+  input: ReadPageInput & { sceneId?: string },
+  scope: string
+) {
+  const scene = input.sceneId
+    ? await productionAccess(scopedDb).scene(input.sequenceId, input.sceneId)
+    : null;
+  return readPage(
+    input,
+    [input.sequenceId, 'shots', input.sceneId ?? '', scope],
+    (page) =>
+      scopedDb.shots.listBySequence(input.sequenceId, {
+        sceneId: scene?.id,
+        page,
+      })
+  );
+}
 
 export const referenceKindSchema = z.enum(['character', 'location', 'element']);
 export type ReferenceKind = z.infer<typeof referenceKindSchema>;
@@ -50,7 +74,7 @@ export async function loadInspectionShot(
   shot: Shot
 ) {
   const scene = shot.sceneId
-    ? await scopedDb.productionInspection.getScene(sequenceId, shot.sceneId)
+    ? await productionAccess(scopedDb).scene(sequenceId, shot.sceneId)
     : null;
   const script = scene
     ? await scopedDb.sceneScriptVersions.getSelected(scene.id)
@@ -111,22 +135,20 @@ export async function listShotReferences(
   scopedDb: ScopedDb,
   input: ReadPageInput & { shotId: string; kind: ReferenceKind }
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(
-    input.sequenceId
-  );
-  const shot = await scopedDb.productionInspection.getShot(
-    sequence.id,
-    input.shotId
-  );
+  const access = productionAccess(scopedDb);
+  const sequence = await access.sequence(input.sequenceId);
+  const shot = await access.shot(sequence.id, input.shotId);
   const match = matchReferences(
     await loadInspectionShot(scopedDb, sequence.id, shot),
     sequence
   );
-  const scope = `shot:${shot.id}`;
+  const scope = [sequence.id, input.kind, `shot:${shot.id}`];
   switch (input.kind) {
     case 'character': {
-      const page = await scopedDb.castReads.listCharacters(input, scope);
-      const matched = match.characters(page.items.map((row) => row.character));
+      const page = await readPage(input, scope, (next) =>
+        scopedDb.characters.list(sequence.id, next)
+      );
+      const matched = match.characters(page.items);
       return {
         references: matched.map((row) => ({ id: row.id, name: row.name })),
         examined: page.items.length,
@@ -134,8 +156,10 @@ export async function listShotReferences(
       };
     }
     case 'location': {
-      const page = await scopedDb.castReads.listLocations(input, scope);
-      const matched = match.locations(page.items.map((row) => row.location));
+      const page = await readPage(input, scope, (next) =>
+        scopedDb.sequenceLocations.list(sequence.id, next)
+      );
+      const matched = match.locations(page.items);
       return {
         references: matched.map((row) => ({ id: row.id, name: row.name })),
         examined: page.items.length,
@@ -143,7 +167,9 @@ export async function listShotReferences(
       };
     }
     case 'element': {
-      const page = await scopedDb.castReads.listElements(input, scope);
+      const page = await readPage(input, scope, (next) =>
+        scopedDb.sequenceElements.list(sequence.id, next)
+      );
       return {
         references: match
           .elements(page.items)
@@ -162,34 +188,25 @@ export async function listEntityUsages(
     sceneId?: string;
   }
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(
-    input.sequenceId
-  );
+  const access = productionAccess(scopedDb);
+  const sequence = await access.sequence(input.sequenceId);
   const entity =
     input.kind === 'character'
       ? {
           kind: 'character' as const,
-          row: await scopedDb.productionInspection.getCharacter(
-            sequence.id,
-            input.entityId
-          ),
+          row: await access.character(sequence.id, input.entityId),
         }
       : input.kind === 'location'
         ? {
             kind: 'location' as const,
-            row: await scopedDb.productionInspection.getLocation(
-              sequence.id,
-              input.entityId
-            ),
+            row: await access.location(sequence.id, input.entityId),
           }
         : {
             kind: 'element' as const,
-            row: await scopedDb.productionInspection.getElement(
-              sequence.id,
-              input.entityId
-            ),
+            row: await access.element(sequence.id, input.entityId),
           };
-  const page = await scopedDb.productionInspection.listShotRows(
+  const page = await pageShots(
+    scopedDb,
     input,
     `${input.kind}:${input.entityId}`
   );
@@ -224,8 +241,9 @@ export async function readShotStaleness(
   shotId: string,
   refs?: ShotStalenessRefs
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(sequenceId);
-  const shot = await scopedDb.productionInspection.getShot(sequenceId, shotId);
+  const access = productionAccess(scopedDb);
+  const sequence = await access.sequence(sequenceId);
+  const shot = await access.shot(sequenceId, shotId);
   const ctx = await loadInspectionShot(scopedDb, sequenceId, shot);
   const selected = ctx.frame
     ? await scopedDb.frameVariants.getSelected(ctx.frame.id)
@@ -260,13 +278,8 @@ export async function listShotStaleness(
   scopedDb: ScopedDb,
   input: ReadPageInput & { sceneId?: string }
 ) {
-  const sequence = await scopedDb.productionInspection.getSequence(
-    input.sequenceId
-  );
-  const page = await scopedDb.productionInspection.listShotRows(
-    input,
-    'staleness'
-  );
+  const sequence = await productionAccess(scopedDb).sequence(input.sequenceId);
+  const page = await pageShots(scopedDb, input, 'staleness');
   if (!page.items.length) return { shots: [], nextCursor: page.nextCursor };
   const [characters, locations, elements, style] = await Promise.all([
     scopedDb.characters.listWithSheets(sequence.id),

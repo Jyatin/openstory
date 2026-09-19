@@ -9,12 +9,17 @@ import {
   documentReadSchema,
   readDocument,
 } from '@/sequences/server/production-inspection';
-import { inspectLibraryResource as inspectCast } from '@/cast/server/library-inspection';
 import {
-  inspectLibraryResource as inspectLook,
-  inspectGalleryStyle,
+  listLibraryResources as listCast,
+  readLibraryResource as readCast,
+} from '@/cast/server/library-inspection';
+import {
+  listLibraryResources as listLook,
+  readLibraryResource as readLook,
+  listGalleryStyles,
+  readGalleryStyle,
 } from '@/look/server/library-inspection';
-import { inspectAsset } from '@/models/server/asset-inspection';
+import { listAssets, readAsset } from '@/models/server/asset-inspection';
 import { listStudioUploadReads } from '@/studio/server/upload-reads';
 import { buildSampleEntries } from '@/look/ui/sample-entries';
 import {
@@ -104,8 +109,8 @@ export function registerLibraryReads(
         projectRead(
           pageSchema,
           await (entry.kind === 'style'
-            ? scopedDb.lookLibraryReads.list(entry.kind, input)
-            : scopedDb.castLibraryReads.list(entry.kind, input)),
+            ? listLook(scopedDb, entry.kind, input)
+            : listCast(scopedDb, entry.kind, input)),
           origin
         )
     );
@@ -119,15 +124,8 @@ export function registerLibraryReads(
       async (input, { scopedDb, origin }) => {
         const data =
           entry.kind === 'style'
-            ? inspectGalleryStyle(
-                await scopedDb.lookLibraryReads.getStyle(input.id),
-                origin
-              )
-            : inspectCast(
-                entry.kind,
-                await scopedDb.castLibraryReads.get(entry.kind, input.id),
-                origin
-              );
+            ? await readGalleryStyle(scopedDb, input.id, origin)
+            : await readCast(scopedDb, entry.kind, input.id, '', origin);
         return {
           document: await readDocument(JSON.stringify(data), input, 'json'),
         };
@@ -154,12 +152,8 @@ export function registerLibraryReads(
           projectRead(
             pageSchema,
             await ('parentId' in input
-              ? scopedDb.castLibraryReads.list(
-                  input.kind,
-                  input,
-                  input.parentId
-                )
-              : scopedDb.lookLibraryReads.list(input.kind, input)),
+              ? listCast(scopedDb, input.kind, input, input.parentId)
+              : listLook(scopedDb, input.kind, input)),
             origin
           )
         ),
@@ -182,22 +176,9 @@ export function registerLibraryReads(
     },
     (input) =>
       readTool(context, async ({ scopedDb, origin }) => {
-        const data =
-          'parentId' in input
-            ? inspectCast(
-                input.kind,
-                await scopedDb.castLibraryReads.get(
-                  input.kind,
-                  input.id,
-                  input.parentId
-                ),
-                origin
-              )
-            : inspectLook(
-                input.kind,
-                await scopedDb.lookLibraryReads.get(input.kind, input.id),
-                origin
-              );
+        const data = await ('parentId' in input
+          ? readCast(scopedDb, input.kind, input.id, input.parentId, origin)
+          : readLook(scopedDb, input.kind, input.id, origin));
         return {
           data: documentSchema.parse({
             document: await readDocument(JSON.stringify(data), input, 'json'),
@@ -235,7 +216,7 @@ export function registerLibraryReads(
     pageInput,
     gallerySchema,
     async (input, { scopedDb, origin }) => {
-      const page = await scopedDb.lookLibraryReads.listGalleryStyles(input);
+      const page = await listGalleryStyles(scopedDb, input);
       return projectRead(
         gallerySchema,
         {
@@ -275,7 +256,7 @@ export function registerLibraryReads(
     }),
     assetsSchema,
     async (input, { scopedDb, origin }) =>
-      projectRead(assetsSchema, await scopedDb.assetReads.list(input), origin)
+      projectRead(assetsSchema, await listAssets(scopedDb, input), origin)
   );
   registerProductionRead(
     server,
@@ -286,9 +267,7 @@ export function registerLibraryReads(
     documentSchema,
     async (input, { scopedDb, origin }) => ({
       document: await readDocument(
-        JSON.stringify(
-          inspectAsset(await scopedDb.assetReads.get(input.id), origin)
-        ),
+        JSON.stringify(await readAsset(scopedDb, input.id, origin)),
         input,
         'json'
       ),

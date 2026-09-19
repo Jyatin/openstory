@@ -1,13 +1,13 @@
-/** Bounded, team-authorised scene/shot reads. No repair or generation side effects. */
+/**
+ * Story-order pages of scenes and shots over the editor's shot view query.
+ * Keyset-paged on (scene order, shot number, id) because ULID order is creation
+ * order, not story order. Callers authorise ids through `productionAccess`;
+ * the team join here only keeps a foreign sequence id from returning rows.
+ */
 import { and, asc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Database } from '@/platform/server/db/client';
-import {
-  scenes,
-  shots,
-  sequences,
-  sceneScriptVersions,
-} from '@/platform/server/db/schema';
+import { scenes, shots, sequences } from '@/platform/server/db/schema';
 import { NotFoundError, ValidationError } from '@/platform/errors';
 import { dbSceneId } from '@/shots/scene-id';
 import { assembleShotViews, selectShotViewRows } from './shot-view-query';
@@ -51,31 +51,6 @@ function decode(input: PageOptions, kind: Cursor['kind']) {
 }
 
 export function createProductionReadMethods(db: Database, teamId: string) {
-  async function requireSequence(sequenceId: string) {
-    const [row] = await db
-      .select({ id: sequences.id })
-      .from(sequences)
-      .where(and(eq(sequences.id, sequenceId), eq(sequences.teamId, teamId)))
-      .limit(1);
-    if (!row) throw new NotFoundError('Sequence not found.');
-  }
-  async function requireScene(sequenceId: string, sceneId: string) {
-    const [row] = await db
-      .select({ scene: scenes })
-      .from(scenes)
-      .innerJoin(sequences, eq(scenes.sequenceId, sequences.id))
-      .where(
-        and(
-          eq(sequences.teamId, teamId),
-          eq(scenes.sequenceId, sequenceId),
-          eq(scenes.id, dbSceneId(sceneId)),
-          isNull(scenes.deletedAt)
-        )
-      )
-      .limit(1);
-    if (!row) throw new NotFoundError('Scene not found in this sequence.');
-    return row.scene;
-  }
   const activeShots = (sequenceId: string) =>
     and(
       eq(sequences.teamId, teamId),
@@ -132,8 +107,6 @@ export function createProductionReadMethods(db: Database, teamId: string) {
     );
   }
   async function listShots(input: PageOptions) {
-    await requireSequence(input.sequenceId);
-    if (input.sceneId) await requireScene(input.sequenceId, input.sceneId);
     const cursor = decode(input, 'shots');
     const rows = await db
       .select({ id: shots.id, order: sceneOrder, shotNumber })
@@ -183,24 +156,15 @@ export function createProductionReadMethods(db: Database, teamId: string) {
     };
   }
   async function getShot(sequenceId: string, shotId: string) {
-    await requireSequence(sequenceId);
-    const [row] = await db
-      .select({ id: shots.id })
-      .from(shots)
-      .innerJoin(sequences, eq(shots.sequenceId, sequences.id))
-      .leftJoin(scenes, eq(scenes.id, shots.sceneId))
-      .where(and(activeShots(sequenceId), eq(shots.id, shotId)))
-      .limit(1);
-    if (!row) throw new NotFoundError('Shot not found in this sequence.');
-    const [detail] = await loadShots([row.id], {
+    const [detail] = await loadShots([shotId], {
       includeAssets: true,
       includePrompts: true,
     });
-    if (!detail) throw new NotFoundError('Shot not found in this sequence.');
+    if (detail?.view.sequenceId !== sequenceId)
+      throw new NotFoundError('Shot not found in this sequence.');
     return detail;
   }
   async function listScenes(input: PageOptions) {
-    await requireSequence(input.sequenceId);
     const cursor = decode(input, 'scenes');
     const rows = await db
       .select({ scene: scenes })
@@ -282,36 +246,8 @@ export function createProductionReadMethods(db: Database, teamId: string) {
           : null,
     };
   }
-  async function getScene(sequenceId: string, sceneId: string) {
-    const scene = await requireScene(sequenceId, sceneId);
-    const [script] = scene.selectedScriptVersionId
-      ? await db
-          .select()
-          .from(sceneScriptVersions)
-          .where(
-            and(
-              eq(sceneScriptVersions.id, scene.selectedScriptVersionId),
-              eq(sceneScriptVersions.sceneId, scene.id)
-            )
-          )
-          .limit(1)
-      : [];
-    const page = await listShots({
-      sequenceId,
-      sceneId,
-      limit: 100,
-      includeAssets: true,
-      includePrompts: true,
-    });
-    return {
-      scene,
-      script: script ?? null,
-      shots: page.shots,
-      shotsTruncated: page.nextCursor !== null,
-    };
-  }
   return {
-    scenes: { listPage: listScenes, getDetail: getScene },
+    scenes: { listPage: listScenes },
     shots: { listPage: listShots, getDetail: getShot },
   };
 }
@@ -322,6 +258,6 @@ export type ShotInspectionRead = Awaited<
 >;
 export type SceneInspectionRead = Awaited<
   ReturnType<
-    ReturnType<typeof createProductionReadMethods>['scenes']['getDetail']
+    ReturnType<typeof createProductionReadMethods>['scenes']['listPage']
   >
->;
+>['scenes'][number];

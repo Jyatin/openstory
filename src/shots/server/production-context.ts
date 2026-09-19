@@ -1,52 +1,18 @@
 import type { ScopedDb } from '@/platform/server/db/scoped';
-import { readPage } from '@/platform/server/read-page';
+import { pageRows, readPage } from '@/platform/server/read-page';
 import type { PageInput } from '@/platform/server/read-page';
 import { productionAccess } from '@/sequences/server/production-access';
-import type {
-  Character,
-  SequenceLocation,
-  SequenceElement,
-  Shot,
-} from '@/platform/server/db/schema';
-import {
-  matchCharactersToScene,
-  matchLocationsToScene,
-  matchElementsToShot,
-} from '@/shots/scene-matching';
+import type { Frame, Shot } from '@/platform/server/db/schema';
+import { loadSceneFacets } from './scene-facets';
 import { resolveSceneForShot } from './scene-script';
 import {
-  rendersReferenceOnly,
-  type StartFrameSequence,
-} from '@/shots/use-start-frame';
-import { isElementVoiceToken } from '@/motion/dialogue-tts';
-import {
   computeShotStaleness,
+  loadShotStalenessBatch,
   UNTRACKED_STALENESS,
-  type ShotStalenessRefs,
 } from './shot-staleness';
 import { z } from 'zod';
 
 type ReadPageInput = PageInput & { sequenceId: string };
-
-/** Page a sequence's live shots by id, optionally within one scene. */
-async function pageShots(
-  scopedDb: ScopedDb,
-  input: ReadPageInput & { sceneId?: string },
-  scope: string
-) {
-  const scene = input.sceneId
-    ? await productionAccess(scopedDb).scene(input.sequenceId, input.sceneId)
-    : null;
-  return readPage(
-    input,
-    [input.sequenceId, 'shots', input.sceneId ?? '', scope],
-    (page) =>
-      scopedDb.shots.listBySequence(input.sequenceId, {
-        sceneId: scene?.id,
-        page,
-      })
-  );
-}
 
 export const referenceKindSchema = z.enum(['character', 'location', 'element']);
 export type ReferenceKind = z.infer<typeof referenceKindSchema>;
@@ -68,7 +34,7 @@ export const shotStalenessSchema = z.object({
 });
 
 /** This loader never invokes editor middleware that repairs missing anchor frames. */
-export async function loadInspectionShot(
+async function loadInspectionShot(
   scopedDb: ScopedDb,
   sequenceId: string,
   shot: Shot
@@ -101,36 +67,17 @@ export async function loadInspectionShot(
     motion: motion?.shotId === shot.id ? motion : null,
   };
 }
-function matchReferences(
-  ctx: Awaited<ReturnType<typeof loadInspectionShot>>,
-  sequence: StartFrameSequence
-) {
-  const scene = ctx.scene;
-  return {
-    characters: (rows: Character[]) =>
-      matchCharactersToScene(rows, scene?.continuity?.characterTags ?? []),
-    locations: (rows: SequenceLocation[]) =>
-      matchLocationsToScene(
-        rows,
-        scene?.continuity?.environmentTag ?? '',
-        scene?.metadata?.location ?? '',
-        scene?.originalScript.extract
-      ),
-    elements: (rows: SequenceElement[]) =>
-      matchElementsToShot(rows, {
-        visualPrompt: ctx.visual?.text,
-        motionPrompt: ctx.motion?.text,
-        elementTags: scene?.continuity?.elementTags,
-        sceneExtract: scene?.originalScript.extract,
-        voiceTokens: ctx.motion?.dialogue?.lines.flatMap((line) =>
-          isElementVoiceToken(line.voiceToken) ? [line.voiceToken] : []
-        ),
-        referenceOnly: rendersReferenceOnly(ctx.shot, sequence),
-      }),
-  };
-}
+const facetIds = (
+  facets: Awaited<ReturnType<typeof loadSceneFacets>>,
+  kind: ReferenceKind
+) =>
+  ({
+    character: facets.characterIdsByShot,
+    location: facets.locationIdsByShot,
+    element: facets.elementIdsByShot,
+  })[kind];
 
-/** Filter a bounded candidate page. An empty result may still have a continuation. */
+/** What a shot uses, answered from the inspector's own facet resolution. */
 export async function listShotReferences(
   scopedDb: ScopedDb,
   input: ReadPageInput & { shotId: string; kind: ReferenceKind }
@@ -138,48 +85,23 @@ export async function listShotReferences(
   const access = productionAccess(scopedDb);
   const sequence = await access.sequence(input.sequenceId);
   const shot = await access.shot(sequence.id, input.shotId);
-  const match = matchReferences(
-    await loadInspectionShot(scopedDb, sequence.id, shot),
-    sequence
+  const facets = await loadSceneFacets(scopedDb, sequence);
+  const used = new Set(facetIds(facets, input.kind)[shot.id]);
+  const rows =
+    input.kind === 'element'
+      ? facets.elements.map((row) => ({ id: row.id, name: row.token }))
+      : (input.kind === 'character' ? facets.characters : facets.locations).map(
+          (row) => ({ id: row.id, name: row.name })
+        );
+  const page = await readPage(
+    input,
+    [sequence.id, input.kind, `shot:${shot.id}`],
+    pageRows(rows.filter((row) => used.has(row.id)))
   );
-  const scope = [sequence.id, input.kind, `shot:${shot.id}`];
-  switch (input.kind) {
-    case 'character': {
-      const page = await readPage(input, scope, (next) =>
-        scopedDb.characters.list(sequence.id, next)
-      );
-      const matched = match.characters(page.items);
-      return {
-        references: matched.map((row) => ({ id: row.id, name: row.name })),
-        examined: page.items.length,
-        nextCursor: page.nextCursor,
-      };
-    }
-    case 'location': {
-      const page = await readPage(input, scope, (next) =>
-        scopedDb.sequenceLocations.list(sequence.id, next)
-      );
-      const matched = match.locations(page.items);
-      return {
-        references: matched.map((row) => ({ id: row.id, name: row.name })),
-        examined: page.items.length,
-        nextCursor: page.nextCursor,
-      };
-    }
-    case 'element': {
-      const page = await readPage(input, scope, (next) =>
-        scopedDb.sequenceElements.list(sequence.id, next)
-      );
-      return {
-        references: match
-          .elements(page.items)
-          .map((row) => ({ id: row.id, name: row.token })),
-        examined: page.items.length,
-        nextCursor: page.nextCursor,
-      };
-    }
-  }
+  return { references: page.items, nextCursor: page.nextCursor };
 }
+
+/** The shots using one entity — the same facet resolution, read the other way. */
 export async function listEntityUsages(
   scopedDb: ScopedDb,
   input: ReadPageInput & {
@@ -190,56 +112,63 @@ export async function listEntityUsages(
 ) {
   const access = productionAccess(scopedDb);
   const sequence = await access.sequence(input.sequenceId);
-  const entity =
-    input.kind === 'character'
-      ? {
-          kind: 'character' as const,
-          row: await access.character(sequence.id, input.entityId),
-        }
-      : input.kind === 'location'
-        ? {
-            kind: 'location' as const,
-            row: await access.location(sequence.id, input.entityId),
-          }
-        : {
-            kind: 'element' as const,
-            row: await access.element(sequence.id, input.entityId),
-          };
-  const page = await pageShots(
-    scopedDb,
+  await access[input.kind](sequence.id, input.entityId);
+  const scene = input.sceneId
+    ? await access.scene(sequence.id, input.sceneId)
+    : null;
+  const facets = await loadSceneFacets(scopedDb, sequence);
+  const ids = facetIds(facets, input.kind);
+  const page = await readPage(
     input,
-    `${input.kind}:${input.entityId}`
+    [
+      sequence.id,
+      'usages',
+      input.sceneId ?? '',
+      `${input.kind}:${input.entityId}`,
+    ],
+    pageRows(
+      facets.shots.filter(
+        (shot) =>
+          (!scene || shot.sceneId === scene.id) &&
+          ids[shot.id]?.includes(input.entityId)
+      )
+    )
   );
-  const usages: {
-    shotId: string;
-    sceneId: string | null;
-    shotNumber: number | null;
-  }[] = [];
-  for (const shot of page.items) {
-    const match = matchReferences(
-      await loadInspectionShot(scopedDb, sequence.id, shot),
-      sequence
-    );
-    const matches =
-      entity.kind === 'character'
-        ? match.characters([entity.row])
-        : entity.kind === 'location'
-          ? match.locations([entity.row])
-          : match.elements([entity.row]);
-    if (matches.length)
-      usages.push({
-        shotId: shot.id,
-        sceneId: shot.sceneId,
-        shotNumber: shot.shotNumber,
-      });
-  }
-  return { usages, examined: page.items.length, nextCursor: page.nextCursor };
+  return {
+    usages: page.items.map((shot) => ({
+      shotId: shot.id,
+      sceneId: shot.sceneId,
+      shotNumber: shot.shotNumber,
+    })),
+    nextCursor: page.nextCursor,
+  };
 }
+
+type StalenessInputs = Pick<
+  Parameters<typeof computeShotStaleness>[0],
+  'sequence' | 'shot' | 'selectedImage' | 'scene' | 'refs'
+> & { frame: Frame | null };
+
+/** A shot with no anchor frame has no image surface to compare: untracked. */
+async function shotStaleness(scopedDb: ScopedDb, inputs: StalenessInputs) {
+  const { frame, ...rest } = inputs;
+  const result = frame
+    ? await computeShotStaleness({ scopedDb, frame, ...rest })
+    : UNTRACKED_STALENESS;
+  return {
+    shotId: inputs.shot.id,
+    frameId: frame?.id ?? null,
+    thumbnail: result.thumbnail,
+    visualPrompt: result.visualPrompt,
+    motionPrompt: result.motionPrompt,
+    causes: result.causes,
+  };
+}
+
 export async function readShotStaleness(
   scopedDb: ScopedDb,
   sequenceId: string,
-  shotId: string,
-  refs?: ShotStalenessRefs
+  shotId: string
 ) {
   const access = productionAccess(scopedDb);
   const sequence = await access.sequence(sequenceId);
@@ -248,48 +177,56 @@ export async function readShotStaleness(
   const selected = ctx.frame
     ? await scopedDb.frameVariants.getSelected(ctx.frame.id)
     : null;
-  const result = ctx.frame
-    ? await computeShotStaleness({
-        scopedDb,
-        sequence,
-        shot,
-        frame: ctx.frame,
-        selectedImage:
-          selected?.sequenceId === sequenceId &&
-          selected.frameId === ctx.frame.id
-            ? selected
-            : null,
-        scene: ctx.scene,
-        refs,
-      })
-    : UNTRACKED_STALENESS;
-  return {
-    shotId,
-    frameId: ctx.frame?.id ?? null,
-    thumbnail: result.thumbnail,
-    visualPrompt: result.visualPrompt,
-    motionPrompt: result.motionPrompt,
-    causes: result.causes,
-  };
+  return shotStaleness(scopedDb, {
+    sequence,
+    shot,
+    frame: ctx.frame,
+    selectedImage:
+      selected?.sequenceId === sequenceId && selected.frameId === ctx.frame?.id
+        ? selected
+        : null,
+    scene: ctx.scene,
+  });
 }
 
-/** Load sequence reference dependencies once per page, not once per shot. */
+/**
+ * The editor's batched staleness read (`getShotStalenessBatchFn`) for one page
+ * of shots, without its anchor-frame repair: an MCP read never writes.
+ */
 export async function listShotStaleness(
   scopedDb: ScopedDb,
   input: ReadPageInput & { sceneId?: string }
 ) {
-  const sequence = await productionAccess(scopedDb).sequence(input.sequenceId);
-  const page = await pageShots(scopedDb, input, 'staleness');
+  const access = productionAccess(scopedDb);
+  const sequence = await access.sequence(input.sequenceId);
+  const scene = input.sceneId
+    ? await access.scene(sequence.id, input.sceneId)
+    : null;
+  const page = await readPage(
+    input,
+    [sequence.id, 'shots', input.sceneId ?? '', 'staleness'],
+    (next) =>
+      scopedDb.shots.listBySequence(sequence.id, {
+        sceneId: scene?.id,
+        page: next,
+      })
+  );
   if (!page.items.length) return { shots: [], nextCursor: page.nextCursor };
-  const [characters, locations, elements, style] = await Promise.all([
-    scopedDb.characters.listWithSheets(sequence.id),
-    scopedDb.sequenceLocations.listWithReferences(sequence.id),
-    scopedDb.sequenceElements.list(sequence.id),
-    scopedDb.styles.getById(sequence.styleId),
-  ]);
-  const refs = { characters, locations, elements, style };
-  const shots = [];
-  for (const shot of page.items)
-    shots.push(await readShotStaleness(scopedDb, sequence.id, shot.id, refs));
+  const batch = await loadShotStalenessBatch(scopedDb, sequence);
+  const shots = await Promise.all(
+    page.items.map((shot) => {
+      const frame = batch.anchorsByShot.get(shot.id) ?? null;
+      return shotStaleness(scopedDb, {
+        sequence,
+        shot,
+        frame,
+        selectedImage: frame
+          ? (batch.selectedByFrame.get(frame.id) ?? null)
+          : null,
+        scene: resolveSceneForShot(shot, batch.sceneContext).scene,
+        refs: batch.refs,
+      });
+    })
+  );
   return { shots, nextCursor: page.nextCursor };
 }

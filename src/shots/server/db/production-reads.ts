@@ -9,6 +9,10 @@ import { z } from 'zod';
 import type { Database } from '@/platform/server/db/client';
 import { scenes, shots, sequences } from '@/platform/server/db/schema';
 import { NotFoundError, ValidationError } from '@/platform/errors';
+import {
+  decodeCursorPayload,
+  encodeCursorPayload,
+} from '@/platform/server/read-page';
 import { dbSceneId } from '@/shots/scene-id';
 import { assembleShotViews, selectShotViewRows } from './shot-view-query';
 
@@ -31,11 +35,11 @@ type PageOptions = InspectionOptions & {
   limit: number;
   cursor?: string;
 };
-const encode = (value: Cursor) => btoa(JSON.stringify(value));
+const encode = (value: Cursor) => encodeCursorPayload(value);
 function decode(input: PageOptions, kind: Cursor['kind']) {
   if (!input.cursor) return null;
   try {
-    const value = pageSchema.parse(JSON.parse(atob(input.cursor)));
+    const value = pageSchema.parse(decodeCursorPayload(input.cursor));
     if (
       value.kind !== kind ||
       value.sequenceId !== input.sequenceId ||

@@ -801,6 +801,8 @@ describe('complete production reads', () => {
       url: '/r2/music.mp3',
       status: 'completed',
       prompt: 'Quiet piano',
+      // Provider-measured, so fractional despite the integer() column.
+      durationSeconds: 61.5,
     });
     await db.insert(sequenceMusicPromptVersions).values({
       id: musicPromptId,
@@ -1318,7 +1320,7 @@ describe('complete production reads', () => {
       });
     }
   );
-  it('resolves usage in both directions using database IDs and returns continuations after empty candidate pages', async () => {
+  it('resolves usage in both directions using database IDs and pages the matches', async () => {
     expect(
       await data('list_shot_references', {
         sequenceId,
@@ -1341,6 +1343,25 @@ describe('complete production reads', () => {
       })
     ).toMatchObject({ usages: [{ shotId, sceneId }] });
     const laterShot = await addShot();
+    const first = z
+      .object({ usages: z.array(z.unknown()), nextCursor: z.string() })
+      .parse(
+        await data('list_entity_usages', {
+          sequenceId,
+          kind: 'character',
+          entityId: characterId,
+          limit: 1,
+        })
+      );
+    expect(first.usages).toHaveLength(1);
+    expect(
+      await call('list_entity_usages', {
+        sequenceId,
+        kind: 'element',
+        entityId: elementId,
+        cursor: first.nextCursor,
+      })
+    ).toMatchObject({ isError: true });
     await db
       .update(scenes)
       .set({
@@ -1354,39 +1375,13 @@ describe('complete production reads', () => {
         },
       })
       .where(eq(scenes.id, dbSceneId(sceneId)));
-    const empty = z
-      .object({
-        usages: z.array(z.unknown()),
-        nextCursor: z.string(),
-        examined: z.number(),
-      })
-      .parse(
-        await data('list_entity_usages', {
-          sequenceId,
-          kind: 'character',
-          entityId: characterId,
-          limit: 1,
-        })
-      );
-    expect(empty.usages).toEqual([]);
-    expect(empty.examined).toBe(1);
     expect(
       await data('list_entity_usages', {
         sequenceId,
         kind: 'character',
         entityId: characterId,
-        limit: 1,
-        cursor: empty.nextCursor,
       })
     ).toMatchObject({ usages: [], nextCursor: null });
-    expect(
-      await call('list_entity_usages', {
-        sequenceId,
-        kind: 'element',
-        entityId: elementId,
-        cursor: empty.nextCursor,
-      })
-    ).toMatchObject({ isError: true });
     expect(laterShot).not.toBe(shotId);
   });
   it('returns missing-frame and voice-only staleness without repairs, and detects selected video input changes', async () => {
@@ -1609,7 +1604,7 @@ describe('Studio, Gallery and library reads', () => {
       activity: 'image',
       modelName: 'Test',
       endpointId: 'test/image',
-      input: { prompt: 'A city', aspectRatio: '16:9' },
+      input: { prompt: 'A city', image_urls: ['/r2/ref.jpg'] },
       outputs: [{ url: '/r2/city.jpg', contentType: 'image/jpeg' }],
       status: 'completed',
       isFavorite: true,
@@ -1697,7 +1692,10 @@ describe('Studio, Gallery and library reads', () => {
     expect(actor.voiceId).toBe('voice-1');
     expect(actor.imageUrl).toBe('https://openstory.test/r2/actor.jpg');
     const asset = await document('get_generated_asset', { id: assetId });
-    expect(asset.input).toEqual({ prompt: 'A city', aspectRatio: '16:9' });
+    expect(asset.input).toEqual({
+      prompt: 'A city',
+      image_urls: ['https://openstory.test/r2/ref.jpg'],
+    });
     expect(asset.outputs).toEqual([
       { url: 'https://openstory.test/r2/city.jpg', contentType: 'image/jpeg' },
     ]);

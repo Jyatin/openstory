@@ -55,6 +55,12 @@ function authFromInfo(info: AuthInfo | undefined): McpCallerIdentity {
   return extra;
 }
 
+/** Media URLs are made absolute against the host the caller reached. */
+function originFromRequest(request: { url: string } | undefined): string {
+  if (!request) throw new Error('MCP request is missing request info');
+  return new URL(request.url).origin;
+}
+
 export function toMcpAuthInfo(
   auth: McpCallerIdentity & {
     kind: 'oauth' | 'api_key';
@@ -80,9 +86,7 @@ export function toMcpAuthInfo(
 
 export function createOpenStoryMcpServer(
   auth: McpCallerIdentity,
-  options: { origin: string; scopes?: string[] } = {
-    origin: 'https://openstory.so',
-  }
+  options: { origin: string; scopes?: string[] }
 ): McpServer {
   const server = new McpServer(
     { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
@@ -146,9 +150,7 @@ export function getMcpHttpHandler(): McpHttpHandler {
   handler ??= createMcpHandler(
     (ctx) =>
       createOpenStoryMcpServer(authFromInfo(ctx.authInfo), {
-        origin: ctx.requestInfo
-          ? new URL(ctx.requestInfo.url).origin
-          : 'https://openstory.so',
+        origin: originFromRequest(ctx.requestInfo),
         // API keys are unscoped; OAuth tokens must carry sequences:read.
         scopes:
           ctx.authInfo?.extra?.authKind === 'api_key'

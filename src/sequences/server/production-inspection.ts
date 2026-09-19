@@ -160,6 +160,10 @@ export const audioClipSchema = z.object({
   token: z.string(),
   durationSeconds: z.number().nullable(),
   sourceKey: z.string().optional(),
+  // The wording a fitted take actually delivers (#1651), when it was rewritten.
+  spokenLines: z
+    .array(z.object({ index: z.number(), text: z.string() }))
+    .optional(),
 });
 export const exportReadSchema = createSelectSchema(sequenceExports)
   .pick({

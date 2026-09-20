@@ -31,6 +31,9 @@ import type {
   WorkflowStepConfig,
 } from 'cloudflare:workers';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
+import type { ScopedDb } from '@/platform/server/db/scoped';
+import type { GenerationCheckpoint } from '@/sequences/pipeline';
+import { snapshotDialogueContinuation } from '../dialogue-continuation';
 import type {
   CharacterMinimal,
   SequenceLocationMinimal,
@@ -39,6 +42,7 @@ import { WorkflowValidationError } from '@/platform/server/workflow/errors';
 import type {
   AnalyzeScriptWorkflowInput,
   SceneSplitWorkflowResult,
+  MotionMusicPromptsWorkflowResult,
 } from '@/platform/server/workflow/types';
 import * as realCastRecords from '@/cast/server/workflows/cast-records';
 
@@ -127,6 +131,8 @@ const CHILD_RESULTS: Record<string, unknown> = {
   'spawn-character-bible': [CHARACTER_ROW],
   'spawn-location-bible': [LOCATION_ROW],
   'spawn-visual-prompts': VISUAL_PROMPTS,
+  'spawn-dialogue-audio': { clipsByShotId: { sh_1: [] } },
+  'spawn-motion-batch': {},
   'spawn-shot-images': { imageUrls: [], frameVersionIds: [] },
   'spawn-motion-music-prompts': {
     completeScenes: [],
@@ -503,6 +509,309 @@ describe('AnalyzeScriptWorkflow script checkpoint', () => {
       locationsWithSheets: [LOCATION_ROW],
     });
   });
+
+  test.each([
+    { referenceOnly: false, presence: 'full' as const },
+    { referenceOnly: true, presence: 'full' as const },
+    { referenceOnly: false, presence: 'none' as const },
+    { referenceOnly: true, presence: 'none' as const },
+  ])(
+    'Dialogue continuation preserves sequence music ($referenceOnly / $presence)',
+    async ({ referenceOnly, presence }) => {
+      const scenes: Scene[] = [5, 7].map((durationSeconds, index) => ({
+        sceneId: `as_${index + 1}`,
+        sceneNumber: index + 1,
+        originalScript: { extract: 'A quiet moment.', dialogue: [] },
+        metadata: {
+          title: 'Hallway',
+          durationSeconds,
+          location: '',
+          timeOfDay: '',
+          storyBeat: '',
+        },
+        continuity: {
+          characterTags: [],
+          environmentTag: '',
+          colorPalette: '',
+          lightingSetup: '',
+          styleTag: '',
+        },
+      }));
+      const completeScenes = scenes.map((scene) => ({
+        ...scene,
+        musicDesign: {
+          presence,
+          style: 'ambient',
+          mood: 'warm',
+          atmosphere: 'quiet',
+        },
+      }));
+      const shotMapping = scenes.map((scene, index) => ({
+        analysisSceneId: scene.sceneId,
+        shotId: `sh_${index + 1}`,
+        frameId: `fr_${index + 1}`,
+      }));
+      const previousPrompts = CHILD_RESULTS['spawn-motion-music-prompts'];
+      const previousVisualPrompts = CHILD_RESULTS['spawn-visual-prompts'];
+      CHILD_RESULTS['spawn-visual-prompts'] = { ...VISUAL_PROMPTS, scenes };
+      CHILD_RESULTS['spawn-motion-music-prompts'] = {
+        completeScenes,
+        motionPromptsBySceneId: {},
+        musicPrompt: 'Original sequence score',
+        musicTags: 'ambient',
+      } satisfies MotionMusicPromptsWorkflowResult;
+      let savedCheckpoint: GenerationCheckpoint | undefined;
+      const saveCheckpoint = vi.fn(
+        async (args: { generationCheckpoint?: GenerationCheckpoint }) => {
+          if (args.generationCheckpoint)
+            savedCheckpoint = args.generationCheckpoint;
+        }
+      );
+      try {
+        await makeWorkflow().invokeRunImpl(
+          makeEvent({
+            ...noStyle,
+            referenceOnly,
+            startFrom: 'references',
+            stopAt: referenceOnly ? 'references' : 'images',
+            checkpoint: {
+              ...SPLIT,
+              completedStage: 'script',
+              scenes,
+              shotMapping,
+            },
+          }),
+          makeStep(),
+          makeScopedDb(saveCheckpoint)
+        );
+      } finally {
+        CHILD_RESULTS['spawn-motion-music-prompts'] = previousPrompts;
+        CHILD_RESULTS['spawn-visual-prompts'] = previousVisualPrompts;
+      }
+      if (!savedCheckpoint) throw new Error('Missing completed checkpoint');
+
+      // The real continue-click snapshot refreshes selections from D1. Music
+      // design must survive the persisted checkpoint, without another LLM call.
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- only selection reads are exercised
+      const selectionDb = {
+        shots: {
+          listBySequence: async () =>
+            shotMapping.map((shot) => ({ id: shot.shotId })),
+        },
+        frames: {
+          getAnchorsByShots: async () =>
+            new Map(
+              shotMapping.map((shot) => [shot.shotId, { id: shot.frameId }])
+            ),
+        },
+        frameVariants: {
+          getSelectedByFrameIds: async () =>
+            new Map(
+              shotMapping.map((shot) => [
+                shot.frameId,
+                { id: `image_${shot.frameId}`, url: '/r2/still.png' },
+              ])
+            ),
+        },
+        shotPromptVersions: {
+          getSelectedMotionByShots: async () =>
+            new Map(
+              shotMapping.map((shot) => [
+                shot.shotId,
+                { id: `prompt_${shot.shotId}`, text: 'Selected motion' },
+              ])
+            ),
+        },
+      } as unknown as ScopedDb;
+      savedCheckpoint = await snapshotDialogueContinuation(
+        selectionDb,
+        {
+          id: 'seq_1',
+          musicPrompt: 'Edited sequence score',
+          musicTags: 'cinematic',
+        },
+        savedCheckpoint
+      );
+      spawnAndAwaitChild.mockClear();
+      const update = vi.fn();
+      await makeWorkflow().invokeRunImpl(
+        makeEvent({
+          ...noStyle,
+          referenceOnly,
+          startFrom: 'dialogue',
+          stopAt: 'music',
+          checkpoint: savedCheckpoint,
+        }),
+        makeStep(),
+        makeScopedDb(update)
+      );
+      expect(spawned()).toEqual(['spawn-motion-batch']);
+      expect(childPayload('spawn-motion-batch')).toMatchObject({
+        includeMusic: presence !== 'none',
+        music:
+          presence === 'none'
+            ? undefined
+            : {
+                prompt: 'Edited sequence score',
+                tags: 'cinematic',
+                duration: 12,
+              },
+      });
+      expect(
+        checkpointWrite(update, presence === 'none' ? 'motion' : 'music')
+      ).toBeDefined();
+    }
+  );
+
+  test.each([
+    { referenceOnly: false, stopAt: 'dialogue' as const },
+    { referenceOnly: true, stopAt: 'dialogue' as const },
+    { referenceOnly: false, stopAt: 'music' as const },
+    { referenceOnly: true, stopAt: 'music' as const },
+  ])(
+    'startFrom dialogue reuses selected inputs ($referenceOnly / $stopAt)',
+    async ({ referenceOnly, stopAt }) => {
+      const scene: Scene = {
+        sceneId: 'as_1',
+        sceneNumber: 1,
+        originalScript: {
+          extract: 'Ada speaks.',
+          dialogue: [{ character: 'Ada', line: 'Old script line', tone: '' }],
+        },
+        metadata: {
+          title: 'Hallway',
+          durationSeconds: 5,
+          location: '',
+          timeOfDay: '',
+          storyBeat: '',
+        },
+        continuity: {
+          characterTags: [],
+          environmentTag: '',
+          colorPalette: '',
+          lightingSetup: '',
+          styleTag: '',
+        },
+      };
+      const prompts: MotionMusicPromptsWorkflowResult = {
+        completeScenes: [scene],
+        motionPromptsBySceneId: {},
+        motionPromptsByShotId: {
+          sh_1: {
+            fullPrompt: 'Preserved prompt',
+            dialogue: {
+              presence: true,
+              lines: [
+                { character: 'Ada', line: 'Edited dialogue', tone: 'warm' },
+              ],
+            },
+            audio: { ambientSound: '', soundEffects: [] },
+          },
+        },
+        motionPromptVersionIdsByShotId: { sh_1: 'mp_1' },
+        musicPrompt: 'Preserved music',
+        musicTags: 'ambient',
+      };
+      // A deleted sibling remains in ID-addressed asset reads and the old
+      // checkpoint. Neither Dialogue nor Motion may receive it after continue.
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- only continuation snapshot reads are used
+      const selectionDb = {
+        shots: { listBySequence: async () => [{ id: 'sh_1' }] },
+        frames: {
+          getAnchorsByShots: async () =>
+            new Map([
+              ['sh_1', { id: 'fr_1' }],
+              ['deleted', { id: 'fr_deleted' }],
+            ]),
+        },
+        frameVariants: {
+          getSelectedByFrameIds: async () =>
+            new Map([
+              ['fr_1', { id: 'fv_1', url: '/r2/still.png' }],
+              ['fr_deleted', { id: 'fv_deleted', url: '/r2/deleted.png' }],
+            ]),
+        },
+        shotPromptVersions: {
+          getSelectedMotionByShots: async () =>
+            new Map(
+              ['sh_1', 'deleted'].map((id) => [
+                id,
+                {
+                  id: id === 'sh_1' ? 'mp_1' : 'mp_deleted',
+                  text: 'Preserved prompt',
+                  dialogue: prompts.motionPromptsByShotId?.sh_1?.dialogue,
+                  audio: prompts.motionPromptsByShotId?.sh_1?.audio,
+                },
+              ])
+            ),
+        },
+      } as unknown as ScopedDb;
+      const checkpoint = await snapshotDialogueContinuation(
+        selectionDb,
+        {
+          id: 'seq_1',
+          musicPrompt: prompts.musicPrompt,
+          musicTags: prompts.musicTags,
+        },
+        {
+          ...SPLIT,
+          scenes: [scene],
+          shotMapping: [
+            ...SPLIT.shotMapping,
+            {
+              analysisSceneId: scene.sceneId,
+              shotId: 'deleted',
+              frameId: 'fr_deleted',
+              shotNumber: 2,
+            },
+          ],
+          completedStage: referenceOnly ? 'references' : 'images',
+          charactersWithSheets: [{ ...CHARACTER_ROW, voiceId: 'voice_ada' }],
+        }
+      );
+      const update = vi.fn();
+      const result = await makeWorkflow().invokeRunImpl(
+        makeEvent({
+          ...noStyle,
+          referenceOnly,
+          startFrom: 'dialogue',
+          stopAt,
+          checkpoint,
+        }),
+        makeStep(),
+        makeScopedDb(update)
+      );
+      expect(result).toEqual([scene]);
+      expect(spawned()).toEqual(
+        stopAt === 'dialogue'
+          ? ['spawn-dialogue-audio']
+          : ['spawn-dialogue-audio', 'spawn-motion-batch']
+      );
+      if (stopAt === 'music') {
+        expect(childPayload('spawn-motion-batch')).toMatchObject({
+          shots: [
+            {
+              shotId: 'sh_1',
+              motionPromptVersionId: 'mp_1',
+              frameVersionId: referenceOnly ? null : 'fv_1',
+              motionPrompt: { fullPrompt: 'Preserved prompt' },
+            },
+          ],
+        });
+      }
+      expect(childPayload('spawn-dialogue-audio')).toMatchObject({
+        shots: [{ shotId: 'sh_1', lines: [{ text: 'Edited dialogue' }] }],
+      });
+      expect(writeVisualPrompt).not.toHaveBeenCalled();
+      expect(checkpointWrite(update, 'images')).toBeUndefined();
+      expect(checkpointWrite(update, 'dialogue')).toMatchObject({
+        generationCheckpoint: {
+          completedStage: 'dialogue',
+          dialogueClipsByShotId: { sh_1: [] },
+        },
+      });
+    }
+  );
 
   test('startFrom images: derived visual prompts stamp the verify hash, not the prompt text', async () => {
     const twoShot: Scene = {

@@ -20,6 +20,15 @@ const CHARACTER_BACKGROUND_GUIDANCE = `## Nationality, language and regional voi
 - Include the chosen national/cultural background naturally in the on-screen character's physicalDescription, without adding a new schema field or putting nationality into ethnicity. Carry the spoken language and supported regional variant/accent into voiceDescription so voice generation retains this context. Voice-only characters keep empty appearance fields; put their language/accent in voiceDescription.
 - Apply the same context to narrators and off-screen voices, while preserving any explicit narrator language or accent.`;
 
+const REMOTE_LOCATION_GUIDANCE = `## Remote conversations: physical locations
+
+A video call is a connection between places, not a physical location. Even under one heading such as "INT. VIDEO CALL", create a separate location bible entry for each visible participant joining from a different place. This applies to two-person calls and groups, including participants who join later.
+- Preserve explicitly shared rooms: two people using the same camera in the same room share one location. Do not create one location per person when they are physically together.
+- If remote participants' rooms are unspecified, design a modest, concrete background for each separate feed. Name an inferred location after its participant (e.g., "Nora's study", "Finn's kitchen") instead of naming every room "Office". Keep the participant's name in the description so ownership is unambiguous.
+- Give each room its own stable locationId and consistencyTag, layout, wall colors, furniture, fixed background objects, and lighting. Reuse that entry on every return to its participant; do not merge different people's rooms just because both are offices or appear in the same call.
+- Describe the actual room behind the participant. Do not substitute a call interface, participant grid, screen borders, or a generic virtual meeting space for the physical locations. A shared virtual backdrop does not make remote callers physically co-located.
+- For inferred rooms, firstMention still quotes real script text at the participant's first visible appearance; never fabricate a slugline or quote. An audio-only participant whose surroundings are never shown does not need an invented location.`;
+
 /**
  * Text prompts (used via getPrompt → system message for streaming calls)
  */
@@ -477,6 +486,9 @@ For each location:
 5. Create a short consistency tag for image generation
 
 Focus on visual consistency - locations should be easily recognizable across multiple scenes.
+
+${REMOTE_LOCATION_GUIDANCE}
+
 You will be called via a structured output tool. Follow the provided schema exactly.`,
     },
     {
@@ -955,6 +967,11 @@ The style's camera, shot selection, pace, and energy decide coverage:
 - Honor explicit CUT TO: / new camera setups / "then we see" already in the script — those are coverage the writer already called.
 - Do not invent a new location, time jump, or story beat.
 
+## On-screen cast and arrivals
+
+The cast list covers the whole script; it is not a roster to put in every shot. Track entrances, exits, and remote callers joining in script order. A participant who joins later must not appear in earlier shots, even as a listening reaction, thumbnail, or background figure.
+In framing.subjectStartState and framing.composition, name every character actually visible at the START of this shot using their exact <CHARACTERS> name in ALL CAPS. Frame only the selected subject(s); do not list off-camera listeners or future arrivals. A voice speaking off camera does not make its owner visible. If someone enters during a shot, describe their entrance in action rather than placing them in its starting frame. Respect single-participant webcam framing when the style calls for it.
+
 ## Rules
 
 1. Each scene's \`shots:\` line is its budget. "exactly N" means the scene's length only fits N shots on this model's clip grid — emit exactly N. "up to N" means 1..N; prefer fewer, and a short scene with one action is usually one shot. "N to M" means at least N: the scene is longer than N-1 clips can hold, so cover it in N or more setups — never fewer.
@@ -1061,6 +1078,8 @@ Notes:
 - Combine variations of the same location (e.g., "INT. OFFICE - DAY" and "INT. OFFICE - NIGHT" are the same location)
 - Extract the core location name without time-of-day suffixes
 - Describe the location in its most commonly seen state
+
+${REMOTE_LOCATION_GUIDANCE}
 
 ## Element Bible (recurring products & objects)
 

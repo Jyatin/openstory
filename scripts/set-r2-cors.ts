@@ -37,9 +37,11 @@ const CONFIG: Record<EnvKey, BucketConfig[]> = {
   dev: [
     {
       bucket: 'openstory-dev',
-      // 3000 is the dev server, 3001 is the e2e Playwright server (see
-      // package.json `build:e2e`). Both run against the dev bucket.
-      origins: ['http://localhost:3000', 'http://localhost:3001'],
+      // 3000–3009 are bun dev worktrees; 3020 is the e2e Playwright server.
+      origins: [
+        ...Array.from({ length: 10 }, (_, i) => `http://localhost:${3000 + i}`),
+        'http://localhost:3020',
+      ],
       includeWrites: true,
     },
   ],

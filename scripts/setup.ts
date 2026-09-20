@@ -102,7 +102,7 @@ async function localSetup() {
   );
 
   p.outro(
-    `Run ${chalk.bold('bun dev')} to start the development server.\nTo deploy to production, run: ${chalk.bold('bun setup --prod')}`
+    `Run ${chalk.bold('bun dev')} to start the development server.\nPublic HTTPS: ${chalk.bold('bun tunnel:provision')} then press t + Enter in bun dev.\nTo deploy to production, run: ${chalk.bold('bun setup --prod')}`
   );
 }
 

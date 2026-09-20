@@ -71,8 +71,10 @@ export { PUBLIC_API_KEY_PREFIX } from './public-api-key';
  *     `NODE_ENV` isn't declared in the worker env blocks, so it can't serve
  *     as this gate.)
  *  2. `isLocalRequestHost()` — runtime backstop that cannot be flipped by
- *     env: the request must arrive on localhost or a bare IP. Fails closed
- *     when there is no request context.
+ *     env: every present Host / X-Forwarded-Host must be localhost or a bare
+ *     IP (a public hostname on either signal fails closed, including tunnel
+ *     `*.openstory.so` origins). Fails closed when there is no request
+ *     context.
  *
  * Opt out by setting `EMAIL_FROM` in `.env.local` — that var exists solely to
  * address OTP emails, so setting it means "I want the real email-OTP flow":
@@ -161,6 +163,9 @@ export function createAuth(db: ReturnType<typeof getDb> = getDb()) {
       'http://localhost:*',
       'http://192.168.*:*',
       'http://100.*:*',
+      ...(getEnv().VITE_APP_URL.startsWith('https://')
+        ? [getEnv().VITE_APP_URL]
+        : []),
     ],
 
     // Session configuration

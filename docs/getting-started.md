@@ -30,6 +30,8 @@ bun dev
 
 The app will be available at [http://localhost:3000](http://localhost:3000).
 
+To expose worktrees on public HTTPS (Google OAuth, inbound webhooks), see [Local dev tunnels](/docs/developer-guide/local-dev-tunnels). Ordinary `bun dev` does not need this. Ports 3000–3009 are reserved for those worktrees; e2e uses 3020.
+
 ## AI Keys
 
 To use AI generation features you need two API keys — run `bun setup` to add them interactively, or paste them into `.env.local`:

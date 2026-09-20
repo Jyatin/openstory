@@ -9,7 +9,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { ensureLocalEnv } from './env-file';
+import { applyMappingToEnv, pickFreeDevPort, readMapping } from './dev-hosts';
+import { ensureLocalEnv, upsertEnvVars } from './env-file';
 
 const isOlder = (a: string, b: string): boolean => {
   const pa = a.split('.').map(Number);
@@ -55,4 +56,33 @@ assertSupportedBun();
 const added = ensureLocalEnv();
 if (added.length > 0) {
   console.log(`[ensure-env] .env.local: added ${added.join(', ')}`);
+}
+
+if (process.env.E2E_TEST !== 'true' && process.env.CLOUDFLARE_ENV !== 'test') {
+  const preferred = Number.parseInt(process.env.PORT ?? '3000', 10) || 3000;
+  try {
+    const port = await pickFreeDevPort(preferred);
+    if (port !== preferred) {
+      console.log(`[ensure-env] port ${preferred} in use, using ${port}`);
+    }
+    const mapping = readMapping();
+    if (mapping) {
+      const origin = applyMappingToEnv('.env.local', port, mapping);
+      if (origin) {
+        console.log(
+          `[ensure-env] ${origin} ← port ${port} (~/.openstory/dev-tunnels.json)`
+        );
+      }
+    } else {
+      upsertEnvVars('.env.local', {
+        PORT: String(port),
+        VITE_APP_URL: `http://localhost:${port}`,
+      });
+    }
+  } catch (error) {
+    console.error(
+      `[ensure-env] ${error instanceof Error ? error.message : String(error)}`
+    );
+    process.exit(1);
+  }
 }

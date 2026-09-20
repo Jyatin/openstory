@@ -45,6 +45,11 @@ import {
   ttsCharacterCount,
   voicedDialogueLines,
 } from '@/motion/dialogue-tts';
+import {
+  dialogueContextFor,
+  loadShotDialogueLines,
+  shotDialogueResolver,
+} from '@/shots/server/shot-dialogue';
 import { getEffectiveFalPricing } from '@/billing/server/fal-pricing-live';
 import {
   releaseReservationOnThrow,
@@ -80,7 +85,7 @@ import type {
   MusicWorkflowInput,
 } from '@/platform/server/workflow/types';
 import { buildMusicSceneSummaries } from '@/audio/server/workflows/music-scene-summaries';
-import { sumShotDurationsSeconds } from './shot-durations';
+import { musicRequestDurationSeconds } from '@/audio/server/music-staleness';
 import { getLogger } from '@/platform/logger';
 
 const logger = getLogger(['openstory', 'sequences', 'smart-retry']);
@@ -145,6 +150,8 @@ export async function executeSmartRetry(context: SmartRetryContext) {
     selectedVideoByShot,
     primaryVideoByShot,
     selectedMotionByShot,
+    dialogueLinesByShotId,
+    sceneContext,
   ] = await Promise.all([
     context.scopedDb.frameVariants.getSelectedByFrameIds(
       [...anchorsByShot.values()].map((fr) => fr.id)
@@ -157,7 +164,17 @@ export async function executeSmartRetry(context: SmartRetryContext) {
     context.scopedDb.shotPromptVersions.getSelectedMotionByShots(
       shots.map((s) => s.id)
     ),
+    loadShotDialogueLines(context.scopedDb, sequence.id),
+    loadSceneContextBySequence(context.scopedDb, sequence.id),
   ]);
+  // What each shot says now (#1657) — the one answer for the prompt text,
+  // the voiced lines and the recording context of every retry below.
+  const dialogueOf = shotDialogueResolver({
+    linesByShotId: dialogueLinesByShotId,
+    shots,
+    legacyDialogueOf: (shotId) => selectedMotionByShot.get(shotId)?.dialogue,
+    scriptDialogueOf: (sceneId) => sceneContext.get(sceneId)?.script?.dialogue,
+  });
   const shotViews = shots.flatMap((shot) => {
     const frame = anchorsByShot.get(shot.id);
     if (!frame) return [];
@@ -172,15 +189,11 @@ export async function executeSmartRetry(context: SmartRetryContext) {
         video: selectedVideoByShot.get(shot.id) ?? null,
         primaryVideo: primaryVideoByShot.get(shot.id) ?? null,
         motionPrompt: selectedMotion
-          ? motionPromptFromVersion(selectedMotion)
+          ? motionPromptFromVersion(selectedMotion, dialogueOf(shot))
           : null,
       }),
     ];
   });
-  const sceneContext = await loadSceneContextBySequence(
-    context.scopedDb,
-    sequence.id
-  );
   const sceneOf = (s: Pick<Shot, 'sceneId' | 'durationMs' | 'shotNumber'>) =>
     resolveSceneForShot(s, sceneContext).scene;
   const scenesById = new Map(
@@ -398,10 +411,23 @@ export async function executeSmartRetry(context: SmartRetryContext) {
       const shotVideoModel = videoModelFor(shot);
       const scene = sceneOf(shot);
       const selectedMotion = selectedMotionByShot.get(shot.id) ?? null;
+      const shotDialogue = dialogueOf(shot);
       const voicedLines = modelTakesDialogueAudio(shotVideoModel)
-        ? voicedDialogueLines(selectedMotion?.dialogue, voiceCharacters)
+        ? voicedDialogueLines(shotDialogue, voiceCharacters)
         : [];
       const audioClips = matchingDialogueClips(shot.audioClips, voicedLines);
+      // No matching clip: the run records its own, acted in the conversation
+      // around the shot — snapshotted here, since it cannot read it mid-run.
+      const dialogueContext = dialogueContextFor({
+        shot,
+        voicedLines,
+        audioClips,
+        sceneShots: shotViews.filter(
+          (other) => shot.sceneId && other.sceneId === shot.sceneId
+        ),
+        dialogueOf,
+        characters: voiceCharacters,
+      });
       const ttsChars =
         audioClips.length > 0 ? 0 : ttsCharacterCount(voicedLines);
       const motionCost = addMicros(
@@ -457,6 +483,7 @@ export async function executeSmartRetry(context: SmartRetryContext) {
         prompt: resolveMotionPromptFromVersion(
           selectedMotion,
           {
+            dialogue: shotDialogue,
             characterTags: scene?.continuity?.characterTags,
             description: scene?.originalScript.extract ?? null,
           },
@@ -468,8 +495,9 @@ export async function executeSmartRetry(context: SmartRetryContext) {
         duration: shot.durationMs ? shot.durationMs / 1000 : undefined,
         voicedLines,
         audioClips: audioClips.length > 0 ? audioClips : undefined,
+        ...(dialogueContext ? { dialogueContext } : {}),
         motionPrompt: selectedMotion
-          ? motionPromptFromVersion(selectedMotion)
+          ? motionPromptFromVersion(selectedMotion, shotDialogue)
           : undefined,
         characterTags: scene?.continuity?.characterTags,
       };
@@ -488,10 +516,10 @@ export async function executeSmartRetry(context: SmartRetryContext) {
   // 3. Retry failed music
   if (hasMusicFailure && sequence.musicPrompt) {
     const allShots = await context.scopedDb.shots.listBySequence(sequence.id);
-    const totalDuration = sumShotDurationsSeconds(allShots);
+    const totalDuration = musicRequestDurationSeconds(allShots);
     const musicModel = safeAudioModel(sequence.musicModel, DEFAULT_MUSIC_MODEL);
     const musicCost = gateEstimate(
-      estimateAudioCost(musicModel, totalDuration || 30, { pricing }),
+      estimateAudioCost(musicModel, totalDuration, { pricing }),
       { model: musicModel, operation: 'smart-retry:music' }
     );
     const reservationId =
@@ -511,7 +539,7 @@ export async function executeSmartRetry(context: SmartRetryContext) {
       ownsReservation: true,
       prompt: sequence.musicPrompt,
       tags: sequence.musicTags ?? '',
-      duration: totalDuration || 30,
+      duration: totalDuration,
     };
 
     await context.scopedDb.sequence(sequence.id).updateMusicFields({
@@ -539,7 +567,7 @@ export async function executeSmartRetry(context: SmartRetryContext) {
         return scene ? [scene] : [];
       })
     );
-    const totalDuration = sumShotDurationsSeconds(allShots);
+    const totalDuration = musicRequestDurationSeconds(allShots);
 
     // Generate music prompt
     await triggerWorkflow<MusicPromptWorkflowInput>('/music-prompt', {
@@ -550,7 +578,7 @@ export async function executeSmartRetry(context: SmartRetryContext) {
       analysisModelId:
         getAnalysisModelById(sequence.analysisModel)?.id ??
         DEFAULT_ANALYSIS_MODEL,
-      duration: totalDuration || 30,
+      duration: totalDuration,
       // This branch only runs when the sequence has no music prompt at all.
       promptSource: 'ai-generated',
     });

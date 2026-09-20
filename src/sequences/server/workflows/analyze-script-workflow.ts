@@ -29,8 +29,13 @@ import {
 import {
   dialogueAudioMaxSeconds,
   dialogueAudioMinSeconds,
-  voicedDialogueLines,
 } from '@/motion/dialogue-tts';
+import {
+  sceneShotLines,
+  sceneConversation,
+  voicedShotIds,
+  type ShotDialogueLine,
+} from '@/shots/shot-dialogue';
 import { speakingCharacterIds } from '@/cast/voice';
 import { gateStoryboardRenders } from '@/billing/server/storyboard-render-gate';
 import { reusesTalentSheet } from '@/cast/server/talent/reuse-talent-sheet';
@@ -76,7 +81,10 @@ import {
   createCastRecords,
   findMissingElementEntries,
 } from '@/cast/server/workflows/cast-records';
-import { buildStoryboardMotionBatchShots } from './storyboard-motion-batch-shots';
+import {
+  buildStoryboardMotionBatchShots,
+  sceneShotsOf,
+} from './storyboard-motion-batch-shots';
 import {
   clipDurationSeconds,
   derivedShotForItem,
@@ -348,6 +356,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         characterBible: checkpoint.characterBible,
         locationBible: checkpoint.locationBible,
         elementBible: checkpoint.elementBible,
+        dialogueVersionIdByShotId: checkpoint.dialogueVersionIdByShotId ?? {},
       };
     }
 
@@ -933,6 +942,16 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
 
     let dialogueClipsByShotId: Record<string, MotionAudioClip[]> =
       checkpoint?.dialogueClipsByShotId ?? {};
+    // Authored lines per shot id. Carried on the checkpoint so a continue
+    // records what the user now says, not what the LLM first extracted
+    // (#1657); empty on a fresh run, where the script IS the authored text.
+    const dialogueLinesByShotId: Record<string, ShotDialogueLine[]> =
+      checkpoint?.dialogueLinesByShotId ?? {};
+    // A continue reads the live selection (`refreshCheckpoint`); a fresh run
+    // has the rows scene-split just seeded.
+    const dialogueVersionIdByShotId: Record<string, string> =
+      checkpoint?.dialogueVersionIdByShotId ??
+      sceneSplitResult.dialogueVersionIdByShotId;
 
     if (runReferences) {
       await persistProgress({
@@ -956,6 +975,8 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
               scenesWithVisualPrompts)
             : scenesWithVisualPrompts,
         dialogueClipsByShotId,
+        dialogueLinesByShotId,
+        dialogueVersionIdByShotId,
       });
       if (stopAt === 'references') {
         await recordDuration('references');
@@ -1237,31 +1258,51 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
           phaseName: GENERATION_STAGE_META.dialogue.name,
         });
       });
-      const jobs = shotWorkItems(completeScenes, shotMapping).flatMap(
-        (item) => {
-          if (!item.mapping.shotId) return [];
-          const lines = voicedDialogueLines(
-            startFrom === 'dialogue'
-              ? motionPromptsByShotId?.[item.mapping.shotId]?.dialogue
-              : {
-                  presence: item.scene.originalScript.dialogue.length > 0,
-                  lines: item.scene.originalScript.dialogue,
-                },
-            charactersWithSheets
-          );
-          return lines.length > 0
-            ? [
-                {
-                  shotId: item.mapping.shotId,
-                  lines,
-                  // The clip this take has to fit (#1651), same number the
-                  // motion batch renders at.
-                  shotSeconds: clipDurationSeconds(item),
-                },
-              ]
-            : [];
-        }
+      // One job per SCENE (#1657): the call speaks the whole conversation,
+      // so every turn is acted in context, and each shot keeps its own
+      // section of it. Lines come from the shot dialogue node — re-snapshotted
+      // onto the checkpoint at a continue (`refreshCheckpointFromCast`) so an
+      // edit made while the run was stopped survives — and are derived from
+      // the script for a shot that has no version row yet.
+      const shotSecondsByShotId = new Map(
+        shotWorkItems(completeScenes, shotMapping)
+          .filter((item) => item.mapping.shotId)
+          .map((item) => [item.mapping.shotId, clipDurationSeconds(item)])
       );
+      const jobs = completeScenes.flatMap((scene) => {
+        const sceneShots = sceneShotsOf(shotMapping, scene.sceneId);
+        if (sceneShots.length === 0) return [];
+        const voiced = sceneConversation(
+          sceneShots,
+          sceneShotLines(
+            sceneShots,
+            (shotId) => dialogueLinesByShotId[shotId],
+            scene.originalScript.dialogue
+          ),
+          charactersWithSheets
+        );
+        if (voiced.length === 0) return [];
+        return [
+          {
+            voiced,
+            dialogueVersionIdByShotId: Object.fromEntries(
+              voicedShotIds(voiced).flatMap((shotId) => {
+                const versionId = dialogueVersionIdByShotId[shotId];
+                return versionId ? [[shotId, versionId]] : [];
+              })
+            ),
+            // The clips these slices have to fit (#1651), the same numbers
+            // the motion batch renders at.
+            shotSeconds: Object.fromEntries(
+              voicedShotIds(voiced).map((shotId) => [
+                shotId,
+                shotSecondsByShotId.get(shotId) ?? 0,
+              ])
+            ),
+            forceAdoptShotIds: [],
+          },
+        ];
+      });
       if (jobs.length > 0) {
         const result = await spawnAndAwaitChild<
           DialogueAudioWorkflowInput,
@@ -1276,7 +1317,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
             teamId: input.teamId,
             sequenceId,
             reservationId: input.reservationId,
-            shots: jobs,
+            scenes: jobs,
             minDurationSeconds: dialogueAudioMinSeconds(videoModels),
             maxDurationSeconds: dialogueAudioMaxSeconds(videoModels),
             analysisModelId,
@@ -1291,6 +1332,8 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         ...(checkpoint ?? { completedStage: 'dialogue' }),
         completedStage: 'dialogue',
         dialogueClipsByShotId,
+        dialogueLinesByShotId,
+        dialogueVersionIdByShotId,
       });
       if (stopAt === 'dialogue') {
         return completeScenes;
@@ -1341,6 +1384,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         locations: locationsWithSheets,
         referenceOnly,
         dialogueClipsByShotId,
+        dialogueLinesByShotId,
       });
 
       await step.do('phase-5-start', async () => {

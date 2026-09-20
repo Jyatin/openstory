@@ -9,6 +9,7 @@ import {
   type SegmentShotInput,
   type SegmentVersionInput,
   type SequenceSegment,
+  type LiveShotInputs,
 } from './scene-segments';
 
 const shot = (
@@ -265,14 +266,32 @@ const segShot = (
   renderSegmentId,
   selectedMotionPromptVersionId,
   rendersReferenceOnly,
+  audioClips: null,
+  durationMs: null,
 });
 
-describe('isSelectedVersionStale', () => {
-  const motion = new Map([['shot-1', 'mp-1']]);
-  const frame = new Map([['shot-1', 'fv-1']]);
+const NO_LOADED = {
+  audioSourceKeyByShot: new Map<string, string | null>(),
+  referenceIdentity: new Map<string, string>(),
+};
+const motion = new Map([['shot-1', 'mp-1']]);
+const frame = new Map([['shot-1', 'fv-1']]);
+/** Staleness of `v` against shot-1's pointers, with only the given live maps bound. */
+const stale = (
+  v: SegmentVersionInput | undefined,
+  live: Partial<LiveShotInputs> = {}
+) =>
+  isSelectedVersionStale(v, motion, frame, {
+    ...NO_LOADED,
+    audioClipIdsByShot: new Map(),
+    durationMsByShot: new Map(),
+    audioSecondsByShot: new Map(),
+    ...live,
+  });
 
+describe('isSelectedVersionStale', () => {
   it('is false with no selection', () => {
-    expect(isSelectedVersionStale(undefined, motion, frame)).toBe(false);
+    expect(stale(undefined)).toBe(false);
   });
 
   it('is fresh when the manifest matches current pointers', () => {
@@ -283,7 +302,7 @@ describe('isSelectedVersionStale', () => {
         frameVersionId: 'fv-1',
       },
     ]);
-    expect(isSelectedVersionStale(v, motion, frame)).toBe(false);
+    expect(stale(v)).toBe(false);
   });
 
   it('is stale when the bound dialogue audio identity moved', () => {
@@ -296,14 +315,13 @@ describe('isSelectedVersionStale', () => {
       },
     ]);
     const audio = new Map([['shot-1', 'voice-other\tStay down.\t\televen_v3']]);
-    expect(isSelectedVersionStale(v, motion, frame, audio)).toBe(true);
+    expect(stale(v, { audioSourceKeyByShot: audio })).toBe(true);
     expect(
-      isSelectedVersionStale(
-        v,
-        motion,
-        frame,
-        new Map([['shot-1', 'voice-sarah\tStay down.\t\televen_v3']])
-      )
+      stale(v, {
+        audioSourceKeyByShot: new Map([
+          ['shot-1', 'voice-sarah\tStay down.\t\televen_v3'],
+        ]),
+      })
     ).toBe(false);
   });
 
@@ -315,14 +333,14 @@ describe('isSelectedVersionStale', () => {
         frameVersionId: 'fv-1',
       },
     ]);
-    expect(isSelectedVersionStale(v, motion, frame)).toBe(true);
+    expect(stale(v)).toBe(true);
   });
 
   it('is stale when a manifest shot no longer exists', () => {
     const v = version('v1', 'seg', 'kling', [
       { shotId: 'gone', motionPromptVersionId: 'mp-1', frameVersionId: 'fv-1' },
     ]);
-    expect(isSelectedVersionStale(v, motion, frame)).toBe(true);
+    expect(stale(v)).toBe(true);
   });
 
   it('treats a null-null manifest as unknown-not-stale, not born-stale (#1380)', () => {
@@ -336,7 +354,7 @@ describe('isSelectedVersionStale', () => {
         frameVersionId: null,
       },
     ]);
-    expect(isSelectedVersionStale(v, motion, frame)).toBe(false);
+    expect(stale(v)).toBe(false);
   });
 });
 
@@ -366,6 +384,7 @@ describe('assembleSequenceSegments', () => {
         { shotId: 'shot-2', role: 'first', selectedImageVersionId: 'fv-1' },
         { shotId: 'shot-2', role: 'last', selectedImageVersionId: 'other' },
       ],
+      live: NO_LOADED,
     });
 
     expect(result).toHaveLength(1);
@@ -389,6 +408,7 @@ describe('assembleSequenceSegments', () => {
       ],
       shots: [],
       frames: [],
+      live: NO_LOADED,
     });
     expect(result[0]?.model).toBe('seedance');
     expect(result[0]?.selectedVersion).toBeNull();
@@ -404,6 +424,7 @@ describe('assembleSequenceSegments', () => {
       versions: [],
       shots: [],
       frames: [],
+      live: NO_LOADED,
     });
     expect(result[0]?.shotIds).toEqual([]);
     expect(result[0]?.selectedVersionId).toBe('discarded');
@@ -428,6 +449,7 @@ describe('assembleSequenceSegments', () => {
       ],
       shots: [segShot('shot-1', 'seg-a', 'mp-new')],
       frames: [],
+      live: NO_LOADED,
     });
     expect(result[0]?.stale).toBe(true);
   });
@@ -456,6 +478,7 @@ describe('reference-only shots and staleness', () => {
       frames: [
         { shotId: 'shot-1', role: 'first', selectedImageVersionId: 'fv-1' },
       ],
+      live: NO_LOADED,
     });
 
   it('is fresh when the clip rendered from references and a still exists', () => {
@@ -466,5 +489,119 @@ describe('reference-only shots and staleness', () => {
     // The null-frame escape must not swallow a genuine missing pointer: this
     // clip claims no start frame while the shot animates from one.
     expect(assemble(false)[0]?.stale).toBe(true);
+  });
+});
+
+describe('isSelectedVersionStale — clips, references, duration (#1657)', () => {
+  const entry = {
+    shotId: 'shot-1',
+    motionPromptVersionId: 'mp-1',
+    frameVersionId: 'fv-1',
+  };
+  const key = new Map([['shot-1', 'k']]);
+  const voiced = version('v1', 'seg', 'kling_v3_pro', [
+    { ...entry, audioSourceKey: 'k', audioClipIds: ['section-1'] },
+  ]);
+  const staleWith = (
+    v: SegmentVersionInput,
+    audioClipIdsByShot: ReadonlyMap<string, readonly string[]>
+  ) =>
+    stale(v, {
+      audioSourceKeyByShot: key,
+      audioClipIdsByShot,
+    });
+
+  it('is fresh while the shot still holds the clip the render was sent', () => {
+    expect(staleWith(voiced, new Map([['shot-1', ['section-1']]]))).toBe(false);
+  });
+
+  it('is stale when the shot picks another reading of the same lines', () => {
+    expect(staleWith(voiced, new Map([['shot-1', ['section-2']]]))).toBe(true);
+    // The working set emptied: the clip it was sent is gone.
+    expect(staleWith(voiced, new Map())).toBe(true);
+  });
+
+  it('does not compare an entry with no clip ids, or a row from before the field', () => {
+    // A voice appearing is `audioSourceKey`'s job, not this rule's.
+    const voiceless = version('v1', 'seg', 'kling_v3_pro', [
+      { ...entry, audioClipIds: [] },
+    ]);
+    const old = version('v1', 'seg', 'kling_v3_pro', [entry]);
+    const live = { audioClipIdsByShot: new Map([['shot-1', ['section-2']]]) };
+    expect(stale(voiceless, live)).toBe(false);
+    expect(stale(old, live)).toBe(false);
+  });
+
+  it('keeps a legacy manifest fresh: its clip ids are the ones the working set still holds', () => {
+    // Pre-#1657 clips carry a generated id, not a section id — and no
+    // migration touched either side, so the sets still agree in any order.
+    const legacy = version('v1', 'seg', 'kling_v3_pro', [
+      { ...entry, audioSourceKey: 'k', audioClipIds: ['clip-a', 'clip-b'] },
+    ]);
+    expect(staleWith(legacy, new Map([['shot-1', ['clip-b', 'clip-a']]]))).toBe(
+      false
+    );
+  });
+
+  it('is not staled by a neighbour shot re-recording', () => {
+    expect(
+      staleWith(
+        voiced,
+        new Map([
+          ['shot-1', ['section-1']],
+          ['shot-2', ['section-9']],
+        ])
+      )
+    ).toBe(false);
+  });
+
+  it('is stale when a stamped reference sheet or element media moved', () => {
+    const v = version('v1', 'seg', 'kling_v3_pro', [
+      { ...entry, referenceKeys: ['character:c1:csv-1'] },
+    ]);
+    expect(
+      stale(v, {
+        referenceIdentity: new Map([['character:c1', 'character:c1:csv-1']]),
+      })
+    ).toBe(false);
+    expect(
+      stale(v, {
+        referenceIdentity: new Map([['character:c1', 'character:c1:csv-2']]),
+      })
+    ).toBe(true);
+  });
+
+  it('compares duration snapped on both sides, accepting the audio-raised length', () => {
+    // Kling v3 pro grid is whole seconds 3–15: a 5s render matches a 4.6s
+    // user edit (snaps to 5) and a 9s one does not.
+    const v = version('v1', 'seg', 'kling_v3_pro', [
+      { ...entry, durationMs: 5000 },
+    ]);
+    expect(
+      stale(v, {
+        durationMsByShot: new Map([['shot-1', 4600]]),
+      })
+    ).toBe(false);
+    expect(
+      stale(v, {
+        durationMsByShot: new Map([['shot-1', 9000]]),
+      })
+    ).toBe(true);
+    // Raised to cover 7s of dialogue: 7s is still "unchanged".
+    const raised = version('v1', 'seg', 'kling_v3_pro', [
+      { ...entry, durationMs: 7000 },
+    ]);
+    expect(
+      stale(raised, {
+        durationMsByShot: new Map([['shot-1', 5000]]),
+        audioSecondsByShot: new Map([['shot-1', 7]]),
+      })
+    ).toBe(false);
+    // No user duration: nothing to compare.
+    expect(
+      stale(v, {
+        durationMsByShot: new Map([['shot-1', 0]]),
+      })
+    ).toBe(false);
   });
 });

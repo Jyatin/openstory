@@ -218,6 +218,7 @@ function makeShot({
                 durationMs: shot.durationMs ?? 3000,
                 audioClipIds: [],
                 audioSourceKey: null,
+                referenceKeys: [],
               },
             ],
             createdAt: NOW,
@@ -377,6 +378,8 @@ function makeContext(
       ),
     },
     characters: { listWithSheets, list: listCharacters },
+    // No shot dialogue rows: the retry reads the motion row's mirror (#1657).
+    shotDialogue: { getSelectedBySequence: vi.fn(async () => []) },
     shotPromptVersions: { getSelectedMotionByShots },
     sequence: vi.fn(() => ({ updateStatus, updateMusicFields })),
     teamManagement: {

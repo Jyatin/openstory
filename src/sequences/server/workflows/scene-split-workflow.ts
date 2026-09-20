@@ -113,6 +113,7 @@ import { generateId } from '@/platform/id';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import { durationGridForModel } from '@/motion/snap-duration';
 import { DIALOGUE_WORDS_PER_SECOND } from '@/motion/dialogue-tts';
+import { deriveShotDialogueLines } from '@/shots/shot-dialogue';
 import {
   getChatPrompt,
   type ChatMessage,
@@ -291,6 +292,12 @@ async function triggerPreviewImage({
  * `offsets` are the resolved boundary offsets (used to derive owning scenes
  * for bible `firstMention` lines).
  */
+/** The split as the LLM steps reconcile it — before `persist-scenes` adds row ids. */
+type ReconciledSplit = Omit<
+  SceneSplitWorkflowResult,
+  'dialogueVersionIdByShotId'
+>;
+
 type StreamResult = {
   scenes: SceneSplittingScene[];
   title: string;
@@ -1065,10 +1072,10 @@ export class SceneSplitWorkflow extends OpenStoryWorkflowEntrypoint<SceneSplitWo
           characterBible: biblesResult.characterBible,
           locationBible,
           elementBible,
-        } satisfies SceneSplitWorkflowResult);
+        } satisfies ReconciledSplit);
       }
     );
-    const reconciled: SceneSplitWorkflowResult = JSON.parse(reconcileJson);
+    const reconciled: ReconciledSplit = JSON.parse(reconcileJson);
     if (
       !Array.isArray(reconciled.scenes) ||
       !Array.isArray(reconciled.shotMapping)
@@ -1108,8 +1115,10 @@ export class SceneSplitWorkflow extends OpenStoryWorkflowEntrypoint<SceneSplitWo
     // Do NOT delete-then-recreate: `shots.scene_id` is a bare
     // `REFERENCES scenes(id)` in the migration (no ON DELETE SET NULL), so
     // deleting stream-linked scenes fails with DrizzleQueryError (#1072).
+    let dialogueVersionIdByShotId: Record<string, string> = {};
     if (sequenceId && reconciled.scenes.length > 0) {
-      await step.do('persist-scenes', async () => {
+      dialogueVersionIdByShotId = await step.do('persist-scenes', async () => {
+        const versionIds: Record<string, string> = {};
         const sceneRows = [];
         const scriptSeeds = [];
         for (let index = 0; index < reconciled.scenes.length; index++) {
@@ -1183,6 +1192,38 @@ export class SceneSplitWorkflow extends OpenStoryWorkflowEntrypoint<SceneSplitWo
         // preview; the shot-list call's lines (#1585) are what has to land
         // in the row.
         await scopedDb.sceneScriptVersions.updateSplitContent(scriptSeeds);
+
+        // Seed the shot dialogue node (#1657). This is the first moment the
+        // shot-list lines can belong to a shot ROW rather than name a shot
+        // number: the mapping above is what turns `shotNumber` into one. From
+        // here a reorder needs no restamp and a line follows its shot.
+        // `write` returns the selected row unchanged when nothing moved, so a
+        // re-analysis that produced the same lines appends nothing.
+        for (const seed of scriptSeeds) {
+          const sceneShots = links
+            .filter((link) => link.sceneId === seed.sceneId)
+            .sort((a, b) => a.shotNumber - b.shotNumber);
+          for (const [index, shot] of sceneShots.entries()) {
+            const lines = deriveShotDialogueLines(
+              seed.content.dialogue,
+              shot,
+              index === 0
+            );
+            // No `lines.length` skip: a shot the re-analysis left silent
+            // needs an empty row over its old one (`write` mints nothing for
+            // a shot that never spoke). A re-analysis also replaces a
+            // 'user-edit' selection — the script it was edited against moved.
+            const version = await scopedDb.shotDialogue.write(
+              shot.shotId,
+              lines,
+              'prompt'
+            );
+            if (version && lines.length > 0) {
+              versionIds[shot.shotId] = version.id;
+            }
+          }
+        }
+        return versionIds;
       });
     }
 
@@ -1242,7 +1283,7 @@ export class SceneSplitWorkflow extends OpenStoryWorkflowEntrypoint<SceneSplitWo
       });
     });
 
-    return reconciled;
+    return { ...reconciled, dialogueVersionIdByShotId };
   }
 
   protected override async onFailure({

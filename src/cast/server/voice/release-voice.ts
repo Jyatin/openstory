@@ -39,10 +39,19 @@ export async function releaseVoiceIfUnreferenced(
   }
   try {
     const voice = await getElevenLabsVoice(apiKey, voiceId);
-    if (!voice || !voiceConsumesAccountSlot(voice.category)) {
+    if (!voice) {
+      // Already gone at the provider (a retry after a failed row write, or a
+      // dashboard delete): the history rows naming it are dead all the same.
+      await scopedDb.characters.markVoiceReleased(voiceId);
+      return;
+    }
+    if (!voiceConsumesAccountSlot(voice.category)) {
       return;
     }
     await deleteElevenLabsVoice(apiKey, voiceId);
+    // The id is gone at the provider, so every history row still naming it is
+    // now unselectable (#1657) — stamp them before anyone offers one back.
+    await scopedDb.characters.markVoiceReleased(voiceId);
   } catch (error) {
     // A revoked / wrong key is the unconfigured case with extra steps: no
     // retry with this key can free the slot, so it must not wedge the
@@ -60,12 +69,44 @@ export async function releaseVoiceIfUnreferenced(
   }
 }
 
+/**
+ * Release the voice a row WAS holding, after the row already points at its
+ * replacement. The switch is committed, so a failed release must not read as
+ * a failed switch: it is logged, and the old id's history row stays
+ * un-released, so selecting it and switching away again retries.
+ */
+export async function releaseReplacedVoice(
+  scopedDb: ScopedDb,
+  replacedVoiceId: string | null,
+  currentVoiceId: string | null
+): Promise<void> {
+  if (!replacedVoiceId || replacedVoiceId === currentVoiceId) return;
+  try {
+    await releaseVoiceIfUnreferenced(scopedDb, replacedVoiceId);
+  } catch (error) {
+    logger.error('Replaced voice not released; its slot is still held', {
+      replacedVoiceId,
+      currentVoiceId,
+      err: error,
+    });
+  }
+}
+
 /** Free the slot if nothing else uses it, then drop the character's pointer. */
 export async function releaseCharacterVoice(
   scopedDb: ScopedDb,
-  character: { id: string; voiceId: string | null }
+  character: { id: string; voiceId: string | null },
+  /** Who dropped the voice — stamped on the 'removed' history row. */
+  createdBy: string | null
 ): Promise<void> {
   if (!character.voiceId) return;
   await releaseVoiceIfUnreferenced(scopedDb, character.voiceId, { heldBy: 1 });
-  await scopedDb.characters.update(character.id, { voiceId: null });
+  await scopedDb.characters.updateVoice(
+    character.id,
+    { voiceId: null },
+    // 'removed' says the character dropped the id; only `releasedAt` says the
+    // provider slot was actually freed.
+    'removed',
+    createdBy
+  );
 }

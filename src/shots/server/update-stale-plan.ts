@@ -17,12 +17,18 @@ import {
 } from '@/shots/use-start-frame';
 import { musicPromptInputHashMatches } from '@/shots/input-hash';
 import {
+  musicRequestDurationSeconds,
+  readMusicTrackStaleness,
+} from '@/audio/server/music-staleness';
+import {
   DEFAULT_ANALYSIS_MODEL,
   getAnalysisModelById,
   type AnalysisModelId,
 } from '@/models/models.config';
 import {
   DEFAULT_IMAGE_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  safeImageToVideoModel,
   safeTextToImageModel,
   type TextToImageModel,
 } from '@/models/models';
@@ -31,8 +37,21 @@ import type {
   CharacterBibleEntry,
   ElementBibleEntry,
   LocationBibleEntry,
+  MotionDialogue,
   Scene,
 } from '@/shots/scene-analysis.schema';
+import {
+  dialogueContextFor,
+  sceneDialogueJobs,
+  shotDialogueResolver,
+} from './shot-dialogue';
+import {
+  dialogueAudioMaxSeconds,
+  dialogueAudioMinSeconds,
+  voicedDialogueLines,
+} from '@/motion/dialogue-tts';
+import type { BatchDialogueRecording } from '@/platform/server/workflow/types';
+import type { SceneVoicedLine } from '@/shots/shot-dialogue';
 import type { AspectRatio } from '@/models/aspect-ratios';
 import type { Resolution } from '@/models/resolutions';
 import type {
@@ -140,6 +159,20 @@ export type PlanTarget = {
    * stale. Video/music use status columns rather than pending-claim rows.
    */
   regenVideo: boolean;
+  /**
+   * The lines this shot speaks, from the shot dialogue node at click time
+   * (#1657). Snapshotted here because the node is mutable and the run
+   * renders minutes later: the clip's bound audio, and the TTS the video
+   * stage bills when no clip matches, both come from these words. Resolved
+   * by `shotDialogueResolver`, the same answer every trigger uses.
+   */
+  dialogue: MotionDialogue;
+  /**
+   * The conversation around the shot at click time, for a video stage that
+   * finds no matching clip and has to record one in context. Empty when the
+   * shot voices nothing. The run cannot read its neighbours' lines.
+   */
+  dialogueContext: SceneVoicedLine[];
 };
 
 /**
@@ -174,8 +207,9 @@ export type SkippedShot = {
 /**
  * Sequence-level music slice (depth 'music').
  * - `regenPrompt` — stored music-prompt hash diverges from live.
- * - `regenTrack` — track already exists AND the prompt regenerates (cascade
- *   only; no track-level staleness signal today). Never a FIRST generation.
+ * - `regenTrack` — the track's own `sequence_music_variants.inputHash`
+ *   diverges from the live prompt / tags / durations (#1657), OR the prompt
+ *   regenerates and cascades into it. Never a FIRST generation.
  *
  * Music is always sequence-scoped, even when shot/scene narrows shot targets.
  *
@@ -245,6 +279,13 @@ export type UpdateStalePlan = {
     voiceId: string;
     voiceOnly: boolean;
   }[];
+  /**
+   * Scenes to record ONCE before any video renders (#1657): every scene with
+   * a voiced target whose video is being re-rendered. The recorder checks the
+   * live clips itself, so a scene whose audio still matches costs nothing.
+   * Null when no target speaks.
+   */
+  dialogueRecording: BatchDialogueRecording | null;
   targets: PlanTarget[];
   skipped: SkippedShot[];
 };
@@ -336,6 +377,7 @@ export async function computePlan(args: {
     music,
     promptContext: null,
     characterVoices: [],
+    dialogueRecording: null,
     targets: [],
     skipped: [],
   };
@@ -361,17 +403,37 @@ export async function computePlan(args: {
   // Stills live on the selected `frame_variants` rows (#1067) — one batch read
   // so the per-shot loop below stays query-free on the image surface.
   const frameIds = anchorRows.map((f) => f.id);
-  const [selectedByFrame, selectedPromptByFrame, selectedMotionByShot] =
-    await Promise.all([
-      scopedDb.frameVariants.getSelectedByFrameIds(frameIds),
-      scopedDb.framePromptVersions.getSelectedByFrameIds(frameIds),
-      // Dereference the motion pointer HERE, once, so the video stage never
-      // has to (see `PlanTarget.standingMotionVersionId`).
-      scopedDb.shotPromptVersions.getSelectedMotionByShots(
-        inScope.map((s) => s.id)
-      ),
-    ]);
+  const [
+    selectedByFrame,
+    selectedPromptByFrame,
+    selectedMotionByShot,
+    dialogueVersions,
+  ] = await Promise.all([
+    scopedDb.frameVariants.getSelectedByFrameIds(frameIds),
+    scopedDb.framePromptVersions.getSelectedByFrameIds(frameIds),
+    // Dereference the motion pointer HERE, once, so the video stage never
+    // has to (see `PlanTarget.standingMotionVersionId`).
+    // Every shot, not just the ones in scope: a neighbour's pre-#1657 lines
+    // are part of the conversation a target is recorded in.
+    scopedDb.shotPromptVersions.getSelectedMotionByShots(
+      allShots.map((s) => s.id)
+    ),
+    // The authored dialogue per shot, read once (#1657). Each target carries
+    // only its own shot's lines, so the run never reads the node mid-flight.
+    // The rows, not just the lines: a recording names the version it spoke.
+    scopedDb.shotDialogue.getSelectedBySequence(sequence.id),
+  ]);
+  const dialogueLinesByShotId = new Map(
+    dialogueVersions.map((version) => [version.shotId, version.lines])
+  );
   const refs: ShotStalenessRefs = { characters, locations, elements, style };
+  const dialogueOf = shotDialogueResolver({
+    linesByShotId: dialogueLinesByShotId,
+    shots: allShots,
+    legacyDialogueOf: (shotId) => selectedMotionByShot.get(shotId)?.dialogue,
+    scriptDialogueOf: (sceneId) =>
+      scriptBySceneId.get(sceneId)?.script?.dialogue,
+  });
 
   const targets: PlanTarget[] = [];
   const skipped: SkippedShot[] = [];
@@ -392,6 +454,7 @@ export async function computePlan(args: {
         ? (selectedPromptByFrame.get(frame.id) ?? null)
         : null,
       selectedMotionVersionId: selectedMotionByShot.get(shot.id)?.id ?? null,
+      dialogue: dialogueOf(shot),
       scene,
       refs,
       depth,
@@ -424,22 +487,66 @@ export async function computePlan(args: {
   });
 
   const voiceRows = await scopedDb.characters.list(sequence.id);
+  const characterVoices = voiceRows.flatMap((row) =>
+    row.voiceId
+      ? [{ name: row.name, voiceId: row.voiceId, voiceOnly: row.voiceOnly }]
+      : []
+  );
+  const shotById = new Map(allShots.map((shot) => [shot.id, shot]));
+  for (const target of targets) {
+    const sceneId = shotById.get(target.shotId)?.sceneId;
+    target.dialogueContext =
+      dialogueContextFor({
+        shot: { id: target.shotId },
+        voicedLines: voicedDialogueLines(target.dialogue, characterVoices),
+        // Whether a clip still matches is decided mid-run, against the model
+        // the render resolves; the context rides along either way.
+        audioClips: [],
+        sceneShots: allShots.filter(
+          (shot) => sceneId && shot.sceneId === sceneId && !shot.deletedAt
+        ),
+        dialogueOf,
+        characters: characterVoices,
+      }) ?? [];
+  }
+  const dialogueScenes = sceneDialogueJobs({
+    needing: targets
+      .filter(
+        (target) =>
+          target.regenVideo &&
+          voicedDialogueLines(target.dialogue, characterVoices).length > 0
+      )
+      .map((target) => ({ id: target.shotId })),
+    shots: allShots,
+    dialogueOf,
+    characters: characterVoices,
+    versionIdByShotId: new Map(
+      dialogueVersions.map((version) => [version.shotId, version.id])
+    ),
+    shotSecondsOf: (shotId) => {
+      const durationMs = shotById.get(shotId)?.durationMs;
+      return durationMs && durationMs > 0 ? durationMs / 1000 : undefined;
+    },
+  });
+  // ponytail: bounds come from the sequence's video model; a target whose
+  // selected version used a tighter model is still checked by its own render.
+  const dialogueModels = [
+    safeImageToVideoModel(sequence.videoModel, DEFAULT_VIDEO_MODEL),
+  ];
   return {
     aspectRatio: sequence.aspectRatio,
     resolution: sequence.resolution,
     sequence: toPlanSequence(sequence),
     music,
-    characterVoices: voiceRows.flatMap((row) =>
-      row.voiceId
-        ? [
-            {
-              name: row.name,
-              voiceId: row.voiceId,
-              voiceOnly: row.voiceOnly,
-            },
-          ]
-        : []
-    ),
+    characterVoices,
+    dialogueRecording:
+      dialogueScenes.length > 0
+        ? {
+            scenes: dialogueScenes,
+            minDurationSeconds: dialogueAudioMinSeconds(dialogueModels),
+            maxDurationSeconds: dialogueAudioMaxSeconds(dialogueModels),
+          }
+        : null,
     promptContext: {
       characterBible: [...ctx.characterBible],
       locationBible: [...ctx.locationBible],
@@ -542,6 +649,8 @@ async function decideShotTarget(args: {
   selectedPrompt: FramePromptVersion | null;
   /** Selected motion prompt version id — the video-only-regen default. */
   selectedMotionVersionId: string | null;
+  /** What the shot says now (`PlanTarget.dialogue`). */
+  dialogue: MotionDialogue;
   scene: Scene | null;
   refs: ShotStalenessRefs;
   depth: UpdateStaleDepth;
@@ -557,6 +666,7 @@ async function decideShotTarget(args: {
     selectedImage,
     selectedPrompt,
     selectedMotionVersionId,
+    dialogue,
     scene,
     refs,
     depth,
@@ -640,6 +750,9 @@ async function decideShotTarget(args: {
         DEFAULT_IMAGE_MODEL
       ),
       regenVideo: flags.regenVideo,
+      dialogue,
+      // Filled in by `computePlan` once the voices are loaded.
+      dialogueContext: [],
     },
   };
 }
@@ -707,23 +820,11 @@ function cascadeFlags(args: {
 
 /**
  * Sequence-level music slice. Mirrors `getMusicPromptStalenessFn`'s comparison
- * (latest version's analysis model, fallback to the sequence's). Untracked
- * (no stored hash / no scenes) means nothing — never a first music prompt or
- * track. In-flight generation is left to finish.
+ * (latest version's analysis model, fallback to the sequence's) AND
+ * `readMusicTrackStaleness`'s for the track. Untracked (no stored hash / no
+ * scenes) means nothing — never a first music prompt or track. In-flight
+ * generation is left to finish.
  */
-/** Same rule as `generateMusicFn`: shot durations, 10s each when unset, with
- * a 30s floor for an empty sequence. */
-function musicDurationSeconds(allShots: Shot[]): number {
-  return (
-    Math.round(
-      allShots.reduce(
-        (sum, s) => sum + (s.durationMs ? s.durationMs / 1000 : 10),
-        0
-      )
-    ) || 30
-  );
-}
-
 async function computeMusicPlan(
   scopedDb: ScopedDb,
   sequence: Sequence,
@@ -735,13 +836,24 @@ async function computeMusicPlan(
   // `getMusicPromptStalenessFn`.
   const analysisModelId =
     getAnalysisModelById(sequence.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL;
+  // Shared with the scene-music badge (`getMusicPromptStalenessFn`) so the
+  // plan and the UI agree on the duration they hash.
+  const durationSeconds = musicRequestDurationSeconds(allShots);
+  // Track staleness stands on its own (#1657): a hand-edited prompt NULLs
+  // `musicPromptInputHash`, so gating this behind the prompt's hash would hide
+  // exactly the case the edit created. Never a first generation.
+  const hasIdleTrack =
+    !!sequence.musicUrl && sequence.musicStatus !== 'generating';
+  const trackStale =
+    hasIdleTrack &&
+    (await readMusicTrackStaleness(scopedDb, sequence, allShots)) === 'stale';
   const none: MusicPlan = {
     regenPrompt: false,
-    regenTrack: false,
+    regenTrack: trackStale,
     sceneSummaries: [],
     analysisModelId,
     promptSource: 'ai-generated',
-    durationSeconds: 30,
+    durationSeconds,
   };
   if (!sequence.musicPromptInputHash) return none;
 
@@ -763,15 +875,13 @@ async function computeMusicPlan(
     ));
     return {
       regenPrompt,
-      // Cascade-only: track follows its prompt. No track-level staleness today.
-      regenTrack:
-        regenPrompt &&
-        !!sequence.musicUrl &&
-        sequence.musicStatus !== 'generating',
+      // Either the track's own hash diverged, or the prompt regen cascades
+      // into it.
+      regenTrack: trackStale || (regenPrompt && hasIdleTrack),
       sceneSummaries,
       analysisModelId,
       promptSource: latest ? 'regenerated' : 'ai-generated',
-      durationSeconds: musicDurationSeconds(allShots),
+      durationSeconds,
     };
   } catch (error) {
     // Fail closed — same posture as per-shot 'unknown'.

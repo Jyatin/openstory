@@ -149,11 +149,13 @@ export class CharacterVoiceWorkflow extends OpenStoryWorkflowEntrypoint<Characte
     });
 
     await step.do('persist-voice', async () => {
-      await scopedDb.characters.update(characterDbId, {
-        voiceId,
-        voiceDescription,
-        voicePreviews: previews,
-      });
+      await scopedDb.characters.updateVoice(
+        characterDbId,
+        { voiceId, voiceDescription, voicePreviews: previews },
+        'generated',
+        // The person who asked for this voice (or started the run that did).
+        input.userId
+      );
     });
 
     await channel.emit('generation.character-voice:progress', {

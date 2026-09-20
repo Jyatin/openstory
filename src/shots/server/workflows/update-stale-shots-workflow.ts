@@ -101,6 +101,8 @@ import type {
   FramePromptWorkflowInput,
   ImageWorkflowInput,
   MotionPromptWorkflowInput,
+  DialogueAudioWorkflowInput,
+  DialogueAudioWorkflowResult,
   MotionWorkflowInput,
   MotionWorkflowResult,
   MusicPromptWorkflowInput,
@@ -612,6 +614,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
           const prompt = resolveMotionPromptFromVersion(
             motionVersion,
             {
+              dialogue: target.dialogue,
               characterTags: scene?.continuity?.characterTags,
               description: scene?.originalScript.extract ?? null,
             },
@@ -637,8 +640,10 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             durationMs: target.durationMs,
             model,
           });
+          // What the shot says, snapshotted on the target at click time
+          // (#1657).
           const voicedLines = modelTakesDialogueAudio(model)
-            ? voicedDialogueLines(motionVersion.dialogue, plan.characterVoices)
+            ? voicedDialogueLines(target.dialogue, plan.characterVoices)
             : [];
           const audioClips = matchingDialogueClips(
             shot.audioClips,
@@ -700,7 +705,15 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             referenceImages,
             voicedLines,
             audioClips: audioClips.length > 0 ? audioClips : undefined,
-            motionPrompt: motionPromptFromVersion(motionVersion),
+            // Only read when no clip matches: the recording is then acted in
+            // the conversation around the shot, not as a cold read.
+            ...(voicedLines.length > 0 && target.dialogueContext.length > 0
+              ? { dialogueContext: target.dialogueContext }
+              : {}),
+            motionPrompt: motionPromptFromVersion(
+              motionVersion,
+              target.dialogue
+            ),
             characterTags: scene?.continuity?.characterTags,
           };
           return JSON.stringify(motionInput);
@@ -779,6 +792,70 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             : undefined,
         };
       });
+
+    // Dialogue is recorded ONCE PER SCENE (#1657), started now because what a
+    // shot says does not wait on its prompts or its still. Every video render
+    // awaits this first: `prepare-video` reads the shot's clips live, so the
+    // clip the recording saved is simply there, and the motion child attaches
+    // it instead of recording its own window of the scene. Never fatal — a
+    // scene that cannot be recorded leaves its shots to record themselves, in
+    // context, which fails that shot and not the run.
+    const dialogueRecording = plan.dialogueRecording;
+    // Same balance gate the per-shot render applies to its own TTS, priced on
+    // the whole conversation. Short of it, skip the up-front recording: each
+    // shot's own gate then refuses it by name instead of the run failing here.
+    const canRecordScenes = dialogueRecording
+      ? await step.do('gate-dialogue-audio', async () => {
+          try {
+            await requireCredits(
+              scopedDb.liveRead,
+              estimateTtsCost(
+                dialogueRecording.scenes.reduce(
+                  (sum, job) => sum + ttsCharacterCount(job.voiced),
+                  0
+                )
+              ),
+              { errorMessage: 'Insufficient credits for dialogue audio' }
+            );
+            return true;
+          } catch (error) {
+            if (isInsufficientCreditsError(error)) return false;
+            throw error;
+          }
+        })
+      : false;
+    const dialogueRecorded: Promise<void> =
+      dialogueRecording && canRecordScenes
+        ? spawnAndAwaitChild<
+            DialogueAudioWorkflowInput,
+            DialogueAudioWorkflowResult
+          >(step, {
+            binding: this.env.DIALOGUE_AUDIO_WORKFLOW,
+            parentBindingName: PARENT_BINDING_NAME,
+            parentInstanceId,
+            childId: `dialogue-audio:${sequenceId}:${parentInstanceId}`,
+            childPayload: {
+              userId,
+              teamId,
+              sequenceId,
+              reservationId: input.reservationId,
+              scenes: dialogueRecording.scenes,
+              minDurationSeconds: dialogueRecording.minDurationSeconds,
+              maxDurationSeconds: dialogueRecording.maxDurationSeconds,
+            },
+            spawnStepName: 'spawn-dialogue-audio',
+            awaitStepName: 'await-dialogue-audio',
+            timeout: '60 minutes',
+          }).then(
+            () => undefined,
+            (error: unknown) => {
+              logger.warn(
+                '[UpdateStaleShotsWorkflow] Scene dialogue not recorded up front; each shot records its own',
+                { sequenceId, err: error }
+              );
+            }
+          )
+        : Promise.resolve();
 
     // ============================================================
     // PHASE 2: fan out — one job per shot, so a shot's scene step runs once
@@ -1047,6 +1124,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             if (target.regenVideo) {
               if (upstream.motionOk && upstream.imageOk) {
                 try {
+                  await dialogueRecorded;
                   await spawnVideo(target, claims, prompted.motionVersionId);
                 } catch (error) {
                   failures.push(toFailure(target.shotId, 'video', error));
@@ -1066,8 +1144,8 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
 
     // ============================================================
     // PHASE 3 (depth 'music', #1085): sequence-level music, alongside the
-    // shot jobs. Prompt first; the track cascades only behind a successful
-    // prompt regeneration (see MusicPlan).
+    // shot jobs. Prompt first; the track then renders when it is stale on its
+    // own hash or the prompt regeneration cascades into it (see MusicPlan).
     // ============================================================
     const musicJob = musicToRun
       ? (async (music: MusicPlan): Promise<void> => {
@@ -1161,14 +1239,6 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             const musicInputJson = await step.do(
               'prepare-music-track',
               async (): Promise<string | null> => {
-                if (!regeneratedPrompt) {
-                  // Unreachable: the plan only cascades a track behind a
-                  // prompt regen, and a skipped/failed prompt returns above.
-                  throw new NonRetryableError(
-                    'Sequence has no music prompt to regenerate from',
-                    'WorkflowValidationError'
-                  );
-                }
                 // Live only for the guard: a concurrent run or manual
                 // regenerate already has a track render in flight — it is
                 // producing the fix, don't double-bill.
@@ -1181,14 +1251,26 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                   );
                 }
                 if (sequence.musicStatus === 'generating') return null;
+                // A track stale on its OWN hash (#1657) renders from the
+                // prompt already on the sequence — there was no prompt child
+                // to take it from.
+                const prompt =
+                  regeneratedPrompt?.prompt ?? sequence.musicPrompt;
+                const tags = regeneratedPrompt?.tags ?? sequence.musicTags;
+                if (!prompt || !tags) {
+                  throw new NonRetryableError(
+                    'Sequence has no music prompt to regenerate from',
+                    'WorkflowValidationError'
+                  );
+                }
                 // Model stays the workflow default — parity with the manual
                 // regenerate path.
                 const payload: MusicWorkflowInput = {
                   userId,
                   teamId,
                   sequenceId,
-                  prompt: regeneratedPrompt.prompt,
-                  tags: regeneratedPrompt.tags,
+                  prompt,
+                  tags,
                   duration: music.durationSeconds,
                   isPrimary: true,
                 };

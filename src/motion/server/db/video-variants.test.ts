@@ -181,6 +181,7 @@ function versionInput(
         durationMs: 3000,
         audioClipIds: [],
         audioSourceKey: null,
+        referenceKeys: [],
       },
     ],
     status: 'completed',
@@ -460,6 +461,7 @@ describe('listSelectedModelsBySequence (#1066)', () => {
             durationMs: 3000,
             audioClipIds: [],
             audioSourceKey: null,
+            referenceKeys: [],
           },
         ],
       })
@@ -545,6 +547,7 @@ describe('listLastFailedModelsBySequence (#1066)', () => {
             durationMs: 3000,
             audioClipIds: [],
             audioSourceKey: null,
+            referenceKeys: [],
           },
         ],
       })

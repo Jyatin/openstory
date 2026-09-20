@@ -1,36 +1,46 @@
 /**
- * Dialogue audio workflow — one ElevenLabs Text to Dialogue clip per shot
- * (#1554). Runs in the References stage after Voice Design, so the clip is
- * an audio reference (like a character sheet) that motion only attaches.
+ * Dialogue audio workflow — record each SCENE's conversation, keep it per
+ * SHOT (#1554, #1657). Runs as its own `dialogue` stage, after images and
+ * before motion, so the clips are audio references (like a character sheet)
+ * that motion only attaches.
  *
- * Each take is fitted to the clip that will carry it (#1651) — see
- * `fitDialogueClip`: trailing silence off, bounded rewrite-and-re-record when
- * it still overruns, and a hard failure rather than a file no model can take.
+ * Record wide: Text to Dialogue acts the turns it is given against each
+ * other, so a shot recorded alone is a cold read of a reply to a line the
+ * model never heard — the call speaks the scene. Keep narrow: only the shots
+ * whose working-set clip no longer matches their lines ADOPT the new audio.
+ * Every other shot keeps the reading it had (and gains an unselected section
+ * the user can pick), so editing one line re-records the scene without
+ * marking its other videos out of date. A scene where every clip still
+ * matches is not sent to the provider at all.
  *
- * All shots run concurrently; successes persist before any failure is
- * surfaced so a retry skips clips whose `sourceKey` still matches.
+ * `recordDialogue` owns the calls, the #1651 fit ladder (per adopting shot:
+ * trailing silence off, bounded rewrite-and-re-record, then a hard failure
+ * rather than a file no model can take), the cuts and the rows.
+ *
+ * All scenes run concurrently; a scene persists its own shots before any
+ * failure is surfaced, so a retry skips the shots whose clips now match.
  */
 
 import { matchingDialogueClips } from '@/motion/dialogue-tts';
-import { fitDialogueClip } from '@/motion/server/fit-dialogue-clip';
+import { recordDialogue } from '@/motion/server/record-dialogue';
 import type { MotionAudioClip } from '@/platform/server/db/schema';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import type {
+  DialogueAudioSceneJob,
   DialogueAudioWorkflowInput,
   DialogueAudioWorkflowResult,
 } from '@/platform/server/workflow/types';
 import { getLogger } from '@/platform/logger';
-import { getGenerationChannel } from '@/platform/realtime';
+import { voicedShotIds } from '@/shots/shot-dialogue';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 
 const logger = getLogger(['openstory', 'workflow', 'dialogue-audio']);
 
+/** Merge the per-scene results, reporting every scene that failed. */
 export function collectDialogueResults(
-  settled: Array<
-    PromiseSettledResult<{ shotId: string; clips: MotionAudioClip[] }>
-  >,
-  shots: Array<{ shotId: string }>
+  settled: Array<PromiseSettledResult<Record<string, MotionAudioClip[]>>>,
+  scenes: ReadonlyArray<{ voiced: ReadonlyArray<{ shotId: string }> }>
 ): Record<string, MotionAudioClip[]> {
   const failures: { name: string; reason: string }[] = [];
   const clipsByShotId: Record<string, MotionAudioClip[]> = {};
@@ -38,19 +48,44 @@ export function collectDialogueResults(
     if (outcome.status === 'rejected') {
       const reason = outcome.reason;
       failures.push({
-        name: shots[index]?.shotId ?? `index ${index}`,
+        name: scenes[index]?.voiced[0]?.shotId ?? `index ${index}`,
         reason: reason instanceof Error ? reason.message : String(reason),
       });
       continue;
     }
-    clipsByShotId[outcome.value.shotId] = outcome.value.clips;
+    Object.assign(clipsByShotId, outcome.value);
   }
   if (failures.length > 0) {
     throw new Error(
-      `Dialogue audio failed for ${failures.length}/${settled.length} shot(s) — ${failures.map((f) => `${f.name}: ${f.reason}`).join('; ')}`
+      `Dialogue audio failed for ${failures.length}/${settled.length} scene(s) — ${failures.map((f) => `${f.name}: ${f.reason}`).join('; ')}`
     );
   }
   return clipsByShotId;
+}
+
+/**
+ * Which of the scene's speaking shots take new audio. The clips on the shots
+ * are the working set, so they are the evidence: a shot whose clip was made
+ * from exactly its lines and voices (`matchingDialogueClips`) keeps it, and
+ * every other shot — no clip, an unkeyed clip, moved lines, a recast voice —
+ * adopts. Per shot, so one edited line moves one shot.
+ */
+export function planSceneAdoption(
+  job: Pick<DialogueAudioSceneJob, 'voiced' | 'forceAdoptShotIds'>,
+  shots: ReadonlyArray<{ id: string; audioClips?: MotionAudioClip[] | null }>
+): { adoptShotIds: string[]; kept: Record<string, MotionAudioClip[]> } {
+  const byShot = new Map(shots.map((shot) => [shot.id, shot.audioClips]));
+  // "Regenerate dialogue": the user wants another reading of lines that did not move.
+  const forced = new Set(job.forceAdoptShotIds);
+  const adoptShotIds: string[] = [];
+  const kept: Record<string, MotionAudioClip[]> = {};
+  for (const shotId of voicedShotIds(job.voiced)) {
+    const lines = job.voiced.filter((line) => line.shotId === shotId);
+    const matched = matchingDialogueClips(byShot.get(shotId), lines);
+    if (matched.length === 0 || forced.has(shotId)) adoptShotIds.push(shotId);
+    else kept[shotId] = matched;
+  }
+  return { adoptShotIds, kept };
 }
 
 export class DialogueAudioWorkflow extends OpenStoryWorkflowEntrypoint<DialogueAudioWorkflowInput> {
@@ -60,63 +95,51 @@ export class DialogueAudioWorkflow extends OpenStoryWorkflowEntrypoint<DialogueA
     scopedDb: WorkflowScopedDb
   ): Promise<DialogueAudioWorkflowResult> {
     const input = event.payload;
-    const { sequenceId, shots } = input;
-    if (shots.length === 0) {
+    const { sequenceId, scenes } = input;
+    if (scenes.length === 0) {
       return { clipsByShotId: {} };
     }
 
     logger.info(
-      `[DialogueAudioWorkflow:cf] Synthesising ${shots.length} dialogue clip(s) for sequence ${sequenceId}`
+      `[DialogueAudioWorkflow:cf] Recording dialogue for ${scenes.length} scene(s) for sequence ${sequenceId}`
     );
 
     const workflowRunId = event.instanceId;
     const settled = await Promise.allSettled(
-      shots.map(async (entry, index) => {
-        // The reuse check is its own step so a refit's extra steps do not
-        // shift the durable names of a clip that was already good.
-        const matched = await step.do(
-          `dialogue-audio-${index}-existing`,
-          async (): Promise<MotionAudioClip[]> => {
-            const existing = await scopedDb.liveRead.shots.getById(
-              entry.shotId
-            );
-            return matchingDialogueClips(existing?.audioClips, entry.lines);
-          }
+      scenes.map(async (job, index) => {
+        const stepPrefix = `dialogue-scene-${index}`;
+        // Its own step, so a refit's extra steps do not shift the durable
+        // names of a scene that needed no recording. The live read is the
+        // point: the clips on the shots are what a retry has to see.
+        const plan = await step.do(`${stepPrefix}-prepare`, async () =>
+          planSceneAdoption(
+            job,
+            await scopedDb.liveRead.shots.getByIds(voicedShotIds(job.voiced))
+          )
         );
-        if (matched.length > 0) {
-          return { shotId: entry.shotId, clips: matched };
-        }
-        const fitted = await fitDialogueClip(step, {
+        if (plan.adoptShotIds.length === 0) return plan.kept;
+
+        const recorded = await recordDialogue(step, {
           scopedDb,
           workflowRunId,
           userId: input.userId,
           teamId: input.teamId,
           sequenceId,
-          shotId: entry.shotId,
-          lines: entry.lines,
+          lines: job.voiced,
+          adoptShotIds: plan.adoptShotIds,
+          dialogueVersionIdByShotId: job.dialogueVersionIdByShotId,
+          shotSeconds: job.shotSeconds,
           minDurationSeconds: input.minDurationSeconds,
           maxDurationSeconds: input.maxDurationSeconds,
-          shotSeconds: entry.shotSeconds,
           analysisModelId: input.analysisModelId,
           reservationId: input.reservationId,
-          stepPrefix: `dialogue-audio-${index}`,
+          stepPrefix,
           workflowName: 'DialogueAudioWorkflow',
         });
-        await step.do(`dialogue-audio-${index}-persist`, async () => {
-          await scopedDb.shots.setAudioClips(entry.shotId, [fitted.clip]);
-          await getGenerationChannel(sequenceId).emit(
-            'generation.shot:updated',
-            {
-              shotId: entry.shotId,
-              updateType: 'dialogue-audio',
-              metadata: null,
-            }
-          );
-        });
-        return { shotId: entry.shotId, clips: [fitted.clip] };
+        return { ...plan.kept, ...recorded };
       })
     );
 
-    return { clipsByShotId: collectDialogueResults(settled, shots) };
+    return { clipsByShotId: collectDialogueResults(settled, scenes) };
   }
 }

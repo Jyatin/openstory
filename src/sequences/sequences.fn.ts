@@ -17,8 +17,9 @@ import {
   gateEstimate,
 } from '@/billing/cost-estimation';
 import { getEffectiveFalPricing } from '@/billing/server/fal-pricing-live';
-import { sumShotDurationsSeconds } from '@/sequences/server/shot-durations';
-import { addMicros, ZERO_MICROS } from '@/billing/money';
+import { musicRequestDurationSeconds } from '@/audio/server/music-staleness';
+import { estimateTtsCost } from '@/billing/elevenlabs-pricing';
+import { addMicros } from '@/billing/money';
 import { buildMotionReferenceImages } from '@/motion/server/build-motion-references';
 import { resolveShotDuration } from '@/motion/resolve-shot-duration';
 import {
@@ -32,6 +33,10 @@ import {
   loadSceneContextBySequence,
   resolveSceneForShot,
 } from '@/shots/server/scene-script';
+import {
+  shotDialogueResolver,
+  snapshotBatchDialogue,
+} from '@/shots/server/shot-dialogue';
 import { buildShotImageWorkflowInput } from '@/stills/server/build-shot-image-input';
 import { toShotView, type ShotView } from '@/shots/shot-view';
 import {
@@ -715,7 +720,7 @@ export const archiveSequenceFn = createServerFn({ method: 'POST' })
     for (const character of await context.scopedDb.characters.list(
       context.sequence.id
     )) {
-      await releaseCharacterVoice(context.scopedDb, character);
+      await releaseCharacterVoice(context.scopedDb, character, context.user.id);
     }
     await context.scopedDb
       .sequence(context.sequence.id)
@@ -954,7 +959,9 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
         );
       }
       const allShots = await scopedDb.shots.listBySequence(sequence.id);
-      const totalDuration = sumShotDurationsSeconds(allShots) || 30;
+      // The one rule for a track's length — the staleness read re-derives it
+      // with the same function, so a fresh track can never read stale.
+      const totalDuration = musicRequestDurationSeconds(allShots);
 
       const reservationId = await reserveRunCredits(
         scopedDb,
@@ -1109,13 +1116,51 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
       // Cast / element sheets bind per shot on the motion path (#873); with no
       // still the location sheet is the set, so it is loaded only when a shot
       // renders reference-only — the same shape as the batch path.
-      const [characters, elements, locations] = await Promise.all([
+      const [
+        characters,
+        elements,
+        locations,
+        voiceCharacters,
+        dialogueVersions,
+        dialogueSceneContext,
+        selectedMotionByShot,
+      ] = await Promise.all([
         scopedDb.characters.listWithSheets(sequence.id),
         scopedDb.sequenceElements.list(sequence.id),
         anyReferenceOnly
           ? scopedDb.sequenceLocations.listWithReferences(sequence.id)
           : Promise.resolve([]),
+        scopedDb.characters.list(sequence.id),
+        scopedDb.shotDialogue.getSelectedBySequence(sequence.id),
+        loadSceneContextBySequence(scopedDb, sequence.id),
+        // Every shot: a neighbour's pre-#1657 lines are part of the
+        // conversation a recording is acted in.
+        scopedDb.shotPromptVersions.getSelectedMotionByShots(
+          allShots.map((shot) => shot.id)
+        ),
       ]);
+      // What each shot says, and the audio that goes with it (#1657). Read
+      // before the reservation: a scene that has to be recorded is billed.
+      const dialogueOf = shotDialogueResolver({
+        linesByShotId: new Map(
+          dialogueVersions.map((version) => [version.shotId, version.lines])
+        ),
+        shots: allShots,
+        legacyDialogueOf: (shotId) =>
+          selectedMotionByShot.get(shotId)?.dialogue,
+        scriptDialogueOf: (sceneId) =>
+          dialogueSceneContext.get(sceneId)?.script?.dialogue,
+      });
+      const batchDialogue = snapshotBatchDialogue({
+        rendering: eligible,
+        modelOf: () => model,
+        shots: allShots,
+        dialogueOf,
+        characters: voiceCharacters,
+        versionIdByShotId: new Map(
+          dialogueVersions.map((version) => [version.shotId, version.id])
+        ),
+      });
 
       const pricing = await getEffectiveFalPricing();
       const reservationId = await reserveRunCredits(
@@ -1143,7 +1188,8 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
                 { model, operation: 'add-video-model' }
               )
             ),
-          ZERO_MICROS
+          // Usually zero: the primary render already left a clip that matches.
+          estimateTtsCost(batchDialogue.ttsChars)
         ),
         {
           errorMessage: 'Insufficient credits to add this video model',
@@ -1156,10 +1202,7 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
           scopedDb,
           reservationId,
           async () => {
-            const sceneContext = await loadSceneContextBySequence(
-              scopedDb,
-              sequence.id
-            );
+            const sceneContext = dialogueSceneContext;
             const sceneOf = (
               s: Pick<Shot, 'sceneId' | 'durationMs' | 'shotNumber'>
             ) => resolveSceneForShot(s, sceneContext).scene;
@@ -1175,10 +1218,6 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
             // Structured motion prompt now lives on the shot's selected
             // `shot_prompt_versions` row (#713), not `metadata.prompts.motion`. Batch
             // it once; `motion-batch` re-assembles per model from `motionPrompt`.
-            const selectedMotionByShot =
-              await scopedDb.shotPromptVersions.getSelectedMotionByShots(
-                eligible.map((f) => f.id)
-              );
             const workflowInput: BatchMotionMusicWorkflowInput = {
               ...baseCtx,
               reservationId,
@@ -1187,10 +1226,15 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
               // Adding a video model lands as an alternate only — never the primary
               // video. Promote later with "Set". (#547)
               variantOnly: true,
+              // Record each scene once before the fan-out (#1657).
+              ...(batchDialogue.dialogueRecording
+                ? { dialogueRecording: batchDialogue.dialogueRecording }
+                : {}),
               shots: eligible.map((f) => {
                 const selectedMotion = selectedMotionByShot.get(f.id);
+                const spoken = batchDialogue.byShotId.get(f.id);
                 const motionPrompt = selectedMotion
-                  ? motionPromptFromVersion(selectedMotion)
+                  ? motionPromptFromVersion(selectedMotion, dialogueOf(f))
                   : undefined;
                 const referenceOnly = shotIsReferenceOnly(f);
                 return {
@@ -1222,6 +1266,16 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
                   ),
                   model,
                   motionPrompt,
+                  // The audio that goes with the words in the prompt: the clip
+                  // when one matches, the lines either way, and the
+                  // conversation to fall back on. This path used to send none.
+                  voicedLines: spoken?.voicedLines ?? [],
+                  ...(spoken && spoken.audioClips.length > 0
+                    ? { audioClips: spoken.audioClips }
+                    : {}),
+                  ...(spoken?.dialogueContext
+                    ? { dialogueContext: spoken.dialogueContext }
+                    : {}),
                   sceneTitle: sceneOf(f)?.metadata?.title,
                   characterTags: sceneOf(f)?.continuity?.characterTags,
                   duration: f.durationMs ? f.durationMs / 1000 : 3,
@@ -1609,13 +1663,13 @@ export const generateMusicFn = createServerFn({ method: 'POST' })
       data.sequenceId
     );
 
-    const totalDuration = sumShotDurationsSeconds(allShots);
+    const totalDuration = musicRequestDurationSeconds(allShots);
 
     const baseInput = {
       userId: user.id,
       teamId: sequence.teamId,
       sequenceId: sequence.id,
-      duration: data.duration ?? (totalDuration || 30),
+      duration: data.duration ?? totalDuration,
       model:
         data.model && isValidAudioModel(data.model) ? data.model : undefined,
     };

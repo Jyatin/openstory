@@ -60,6 +60,11 @@ import { sequenceMusicVariants } from './sequence-music-variants';
 import { sequenceExports } from './sequence-exports';
 
 import { characters } from './characters';
+import { characterVoiceVersions } from './character-voice-versions';
+import { shotDialogueVersions } from './shot-dialogue-versions';
+import { dialogueRecordings } from './dialogue-recordings';
+import { shotDialogueSections } from './shot-dialogue-sections';
+import { shotDialogueClaims } from './shot-dialogue-claims';
 
 // Location Library (team-level templates)
 import { locationLibrary } from './location-library';
@@ -157,6 +162,24 @@ export type {
 
 // Shots
 export { shots };
+export {
+  shotDialogueVersions,
+  dialogueRecordings,
+  shotDialogueSections,
+  shotDialogueClaims,
+};
+
+export type {
+  ShotDialogueLine,
+  ShotDialogueSource,
+  ShotDialogueVersion,
+} from './shot-dialogue-versions';
+export type {
+  DialogueRecording,
+  DialogueRecordingTurn,
+} from './dialogue-recordings';
+export type { ShotDialogueSection } from './shot-dialogue-sections';
+export type { ShotDialogueClaim } from './shot-dialogue-claims';
 
 export type { NewShot, Shot } from './shots';
 
@@ -287,7 +310,9 @@ export { sequenceExports };
 export type { SequenceExport } from './sequence-exports';
 
 // Characters (scripted roles)
-export { characters };
+export { characters, characterVoiceVersions };
+
+export type { CharacterVoiceVersionSource } from './character-voice-versions';
 
 export type {
   CharacterWithSheet,
@@ -452,6 +477,10 @@ export const schema = {
   scenes,
   sceneScriptVersions,
   shots,
+  shotDialogueVersions,
+  dialogueRecordings,
+  shotDialogueSections,
+  shotDialogueClaims,
   shotVariants,
   // SSF redesign (#990) — render segments + flat video render versions
   renderSegments,
@@ -471,6 +500,7 @@ export const schema = {
 
   // Characters (scripted roles extracted from script)
   characters,
+  characterVoiceVersions,
 
   // Location Library (team-level templates)
   locationLibrary,

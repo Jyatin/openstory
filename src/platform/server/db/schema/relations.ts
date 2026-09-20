@@ -61,6 +61,14 @@ export const relations = defineRelations(schema, (r) => ({
     locations: r.many.sequenceLocations(),
     elements: r.many.sequenceElements(),
     musicPromptVariants: r.many.sequenceMusicPromptVersions(),
+    dialogueRecordings: r.many.dialogueRecordings(),
+  },
+
+  dialogueRecordings: {
+    sequence: r.one.sequences({
+      from: r.dialogueRecordings.sequenceId,
+      to: r.sequences.id,
+    }),
   },
 
   // ---- Scenes ----
@@ -124,6 +132,30 @@ export const relations = defineRelations(schema, (r) => ({
     frames: r.many.frames(),
     variants: r.many.shotVariants(),
     promptVariants: r.many.shotPromptVersions(),
+    dialogueVersions: r.many.shotDialogueVersions(),
+    dialogueSections: r.many.shotDialogueSections(),
+    dialogueClaims: r.many.shotDialogueClaims(),
+  },
+
+  shotDialogueVersions: {
+    shot: r.one.shots({
+      from: r.shotDialogueVersions.shotId,
+      to: r.shots.id,
+    }),
+  },
+
+  shotDialogueSections: {
+    shot: r.one.shots({
+      from: r.shotDialogueSections.shotId,
+      to: r.shots.id,
+    }),
+  },
+
+  shotDialogueClaims: {
+    shot: r.one.shots({
+      from: r.shotDialogueClaims.shotId,
+      to: r.shots.id,
+    }),
   },
 
   // ---- Shot Variants ----
@@ -218,11 +250,23 @@ export const relations = defineRelations(schema, (r) => ({
       from: r.characters.sequenceId,
       to: r.sequences.id,
     }),
+    voiceVersions: r.many.characterVoiceVersions(),
     talent: r.one.talent({
       from: r.characters.talentId,
       to: r.talent.id,
     }),
     sheetVariants: r.many.characterSheetVariants(),
+  },
+
+  characterVoiceVersions: {
+    character: r.one.characters({
+      from: r.characterVoiceVersions.characterId,
+      to: r.characters.id,
+    }),
+    createdByUser: r.one.user({
+      from: r.characterVoiceVersions.createdBy,
+      to: r.user.id,
+    }),
   },
 
   // ---- Character Sheet Variants ----

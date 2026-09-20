@@ -91,6 +91,11 @@ vi.doMock('@/shots/input-hash', () => ({
   ) => `${model}:${manifest[0]?.motionPromptVersionId ?? 'null'}`,
 }));
 
+const mockRecordDialogue = vi.fn();
+vi.doMock('@/motion/server/record-dialogue', () => ({
+  recordDialogue: mockRecordDialogue,
+}));
+
 const { MotionWorkflow } = await import('./motion-workflow');
 
 class Probe extends MotionWorkflow {
@@ -132,7 +137,7 @@ function makeStep(): WorkflowStep & { names: string[] } {
   } as unknown as WorkflowStep & { names: string[] };
 }
 
-function makeScopedDb() {
+function makeScopedDb(shotAudioClips: unknown[] = []) {
   const shotPromptVersions = {
     write: vi.fn(async () => ({ id: 'spv-soft' })),
     setAudioClips: vi.fn(async () => {}),
@@ -159,6 +164,7 @@ function makeScopedDb() {
           sceneId: 'live-scene-ulid',
           sequenceId: 'seq-1',
           renderSegmentId: null,
+          audioClips: shotAudioClips,
         }),
         getByIds: async (ids: string[]) =>
           ids.map((id) => ({
@@ -178,9 +184,6 @@ function makeScopedDb() {
           analysisModel: 'anthropic/claude-haiku-4.5',
         }),
       },
-    },
-    shots: {
-      setAudioClips: vi.fn(async () => {}),
     },
     shotPromptVersions,
     videoVariants,
@@ -653,6 +656,199 @@ describe('MotionWorkflow packed in-clip job (#1510)', () => {
           }),
         ],
       })
+    );
+  });
+});
+
+describe('manifest audio key (#1671)', () => {
+  it('stamps the AUTHORED lines, not the shortened wording the clip spoke', async () => {
+    const { scopedDb, videoVariants } = makeScopedDb();
+    const authored = {
+      index: 0,
+      token: 'DIALOGUE',
+      voiceId: 'voice-sarah',
+      text: 'Stay down, and do not move until I say so.',
+      tone: '',
+      ttsModel: 'eleven_v3',
+      character: 'Sarah',
+    };
+    const authoredKey = `voice-sarah\t${authored.text}\t\televen_v3`;
+
+    await makeWorkflow().runBody(
+      makeEvent({
+        voicedLines: [authored],
+        audioClips: [
+          {
+            id: 'clip-1',
+            url: '/r2/audio/clip-1.wav',
+            token: 'DIALOGUE',
+            durationSeconds: 3,
+            sourceKey: authoredKey,
+            // The #1651 rewrite shortened the take; the prompt says this,
+            // the manifest must not.
+            spokenLines: [{ index: 0, text: 'Stay down.' }],
+          },
+        ],
+      }),
+      makeStep(),
+      scopedDb
+    );
+
+    expect(videoVariants.appendVersion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        manifest: [
+          expect.objectContaining({
+            shotId: 'shot-1',
+            audioClipIds: ['clip-1'],
+            audioSourceKey: authoredKey,
+          }),
+        ],
+      })
+    );
+  });
+});
+
+describe('recording its own dialogue (#1657)', () => {
+  const voiced = (index: number, text: string) => ({
+    index,
+    token: 'DIALOGUE',
+    voiceId: 'voice-sarah',
+    text,
+    tone: '',
+    ttsModel: 'eleven_v3',
+    character: 'Sarah',
+  });
+  const own = voiced(0, 'Now run.');
+  const recordedClip = {
+    id: 'section-1',
+    url: '/r2/audio/section-1.wav',
+    token: 'DIALOGUE',
+    durationSeconds: 2,
+    sourceKey: `voice-sarah\t${own.text}\t\televen_v3`,
+    recordingId: 'rec-1',
+  };
+
+  it('speaks the snapshotted conversation, adopts only its own shot, and stamps the clip', async () => {
+    mockRecordDialogue.mockReset();
+    mockRecordDialogue.mockResolvedValue({ 'shot-1': [recordedClip] });
+    const { scopedDb, videoVariants } = makeScopedDb();
+    const context = [
+      { ...voiced(0, 'Stay down.'), shotId: 'shot-0' },
+      { ...own, shotId: 'shot-1' },
+    ];
+
+    await makeWorkflow().runBody(
+      makeEvent({ voicedLines: [own], dialogueContext: context }),
+      makeStep(),
+      scopedDb
+    );
+
+    expect(mockRecordDialogue).toHaveBeenCalledTimes(1);
+    expect(mockRecordDialogue.mock.calls[0]?.[1]).toMatchObject({
+      lines: context,
+      // The neighbour is spoken for the acting; its audio is not touched.
+      adoptShotIds: ['shot-1'],
+    });
+    expect(videoVariants.appendVersion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        manifest: [
+          expect.objectContaining({
+            audioClipIds: ['section-1'],
+            audioSourceKey: recordedClip.sourceKey,
+          }),
+        ],
+      })
+    );
+  });
+
+  it('falls back to the shot’s own lines when the payload carries no context for it', async () => {
+    mockRecordDialogue.mockReset();
+    mockRecordDialogue.mockResolvedValue({ 'shot-1': [recordedClip] });
+    const { scopedDb } = makeScopedDb();
+
+    await makeWorkflow().runBody(
+      makeEvent({
+        voicedLines: [own],
+        // A context that does not contain this shot is not this shot's.
+        dialogueContext: [{ ...voiced(0, 'Elsewhere.'), shotId: 'shot-9' }],
+      }),
+      makeStep(),
+      scopedDb
+    );
+
+    expect(mockRecordDialogue.mock.calls[0]?.[1]).toMatchObject({
+      lines: [{ ...own, shotId: 'shot-1' }],
+      adoptShotIds: ['shot-1'],
+    });
+  });
+
+  it('fails instead of rendering voiced lines with no audio', async () => {
+    mockRecordDialogue.mockReset();
+    mockRecordDialogue.mockResolvedValue({});
+    const { scopedDb } = makeScopedDb();
+
+    await expect(
+      makeWorkflow().runBody(
+        makeEvent({ voicedLines: [own] }),
+        makeStep(),
+        scopedDb
+      )
+    ).rejects.toThrow(/Shot shot-1 has no audio for its lines yet/);
+  });
+
+  it("renders with the shot's own audio when nothing was promoted for it", async () => {
+    // Another run held the claim for these words, or the user picked a
+    // reading while this recorded: the recorder hands back nothing, and the
+    // clip the shot holds NOW is the truth.
+    mockRecordDialogue.mockReset();
+    mockRecordDialogue.mockResolvedValue({});
+    const { scopedDb, shotPromptVersions } = makeScopedDb([recordedClip]);
+
+    await makeWorkflow().runBody(
+      makeEvent({ voicedLines: [own] }),
+      makeStep(),
+      scopedDb
+    );
+
+    expect(shotPromptVersions.setAudioClips).toHaveBeenCalledWith(
+      expect.anything(),
+      [recordedClip]
+    );
+  });
+});
+
+describe('manifest reference keys (#1657)', () => {
+  const sheet = {
+    referenceImageUrl: '/r2/sheets/maya.png',
+    description: 'Maya',
+    role: 'character' as const,
+    provenanceKey: 'character:char-1:sheet-v1',
+  };
+  const stampedKeys = async (model: MotionWorkflowInput['model']) => {
+    const { scopedDb, videoVariants } = makeScopedDb();
+    await makeWorkflow().runBody(
+      makeEvent({ model, referenceImages: [sheet] }),
+      makeStep(),
+      scopedDb
+    );
+    return videoVariants.appendVersion;
+  };
+  const withKeys = (referenceKeys: string[]) =>
+    expect.objectContaining({
+      manifest: [expect.objectContaining({ referenceKeys })],
+    });
+
+  it('stamps a reference the model was sent', async () => {
+    expect(await stampedKeys(MODEL)).toHaveBeenCalledWith(
+      withKeys([sheet.provenanceKey])
+    );
+  });
+
+  it('stamps nothing for a model with no reference slot — it only got a description', async () => {
+    // A stamped key here would read Stale on the next sheet re-select and
+    // sell a re-render that produces the identical clip.
+    expect(await stampedKeys('grok_imagine_video_1_5')).toHaveBeenCalledWith(
+      withKeys([])
     );
   });
 });

@@ -84,6 +84,15 @@ export type VideoManifestEntry = {
    * so stored voiceless digests do not move.
    */
   audioSourceKey: string | null;
+  /**
+   * Provenance of every reference that rode on the wire for this render
+   * (#1657), in either mode: `character:<id>:<sheetVersionId|url>`,
+   * `location:<id>:<refVersionId|url>` and `element:<id>:<url>` (see
+   * `reference-provenance.ts`). Sorted, so order is not identity. The hash
+   * body drops an empty list so stored digests do not move. Absent on rows
+   * from before #1657: unknown, never stale.
+   */
+  referenceKeys: string[];
 };
 
 /** Ordered, one entry per covered shot. @public consumed from #990+ */

@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AUDIO_MIN_PAD_SLACK_SECONDS,
   ELEVENLABS_PCM_SAMPLE_RATE,
-  padWavToMinDuration,
+  parseWavHeader,
   pcmToWav,
-  trimWavTrailingSilence,
+  trimmedEndSeconds,
   wavDurationSeconds,
+  wavHeader,
 } from './pad-dialogue-audio';
-import { speechEndFrom } from './synthesize-dialogue';
+import { decodeBase64 } from './synthesize-dialogue';
 
 /** Mono 16-bit PCM WAV of `seconds` of silence. */
 function wav(seconds: number, sampleRate = 8000): Uint8Array {
@@ -34,7 +34,7 @@ function wav(seconds: number, sampleRate = 8000): Uint8Array {
 }
 
 describe('pcmToWav', () => {
-  it('wraps ElevenLabs PCM so duration is sample-count / 44100', () => {
+  it('wraps raw PCM so duration can be read', () => {
     const pcm = new Uint8Array(ELEVENLABS_PCM_SAMPLE_RATE * 2); // 1s mono 16-bit
     const wrapped = pcmToWav(pcm);
     expect(wavDurationSeconds(wrapped)).toBeCloseTo(1, 5);
@@ -42,42 +42,61 @@ describe('pcmToWav', () => {
 });
 
 describe('wavDurationSeconds', () => {
-  it('reads a PCM WAV’s length from its data chunk', () => {
+  it('reads PCM duration', () => {
     expect(wavDurationSeconds(wav(1.3))).toBeCloseTo(1.3, 5);
   });
-  it('rejects a non-WAV buffer', () => {
+  it('returns null for non-WAV', () => {
     expect(wavDurationSeconds(new Uint8Array([1, 2, 3, 4]))).toBeNull();
   });
 });
 
-describe('padWavToMinDuration', () => {
-  it('leaves a clip that already covers the floor', () => {
-    const input = wav(2.5);
-    const padded = padWavToMinDuration(input, 2);
-    expect(padded.bytes.byteLength).toBe(input.byteLength);
-    expect(padded.durationSeconds).toBeCloseTo(2.5, 5);
+describe('parseWavHeader / wavHeader (#1657)', () => {
+  it('reads a header from a prefix — the samples need not be there', () => {
+    // What `cutAudioSection` has: the first bytes of a file it never loads.
+    const prefix = wav(30).subarray(0, 64);
+    expect(parseWavHeader(prefix)).toEqual({
+      sampleRate: 8000,
+      channels: 1,
+      bitsPerSample: 16,
+      dataStart: 44,
+      dataSize: 30 * 8000 * 2,
+    });
   });
 
-  it('extends a short line past H3 Max’s 2s floor plus slack', () => {
-    const padded = padWavToMinDuration(wav(1.306122), 2);
-    expect(padded.durationSeconds).toBeGreaterThanOrEqual(
-      2 + AUDIO_MIN_PAD_SLACK_SECONDS
-    );
-    expect(wavDurationSeconds(padded.bytes)).toBeCloseTo(
-      padded.durationSeconds,
-      5
-    );
+  it('finds `data` behind another chunk', () => {
+    const plain = wav(1);
+    const list = new Uint8Array([
+      0x4c, 0x49, 0x53, 0x54, 4, 0, 0, 0, 1, 2, 3, 4,
+    ]);
+    const bytes = new Uint8Array(plain.length + list.length);
+    bytes.set(plain.subarray(0, 36));
+    bytes.set(list, 36);
+    bytes.set(plain.subarray(36), 36 + list.length);
+    expect(parseWavHeader(bytes)?.dataStart).toBe(44 + list.length);
   });
 
-  it('covers the 1.959s rounding miss', () => {
-    const padded = padWavToMinDuration(wav(1.959184), 2);
-    expect(padded.durationSeconds).toBeGreaterThan(2);
+  it('refuses anything that is not PCM WAV', () => {
+    expect(parseWavHeader(new Uint8Array(64))).toBeNull();
+    const float = wav(1);
+    new DataView(float.buffer).setUint16(20, 3, true);
+    expect(parseWavHeader(float)).toBeNull();
+  });
+
+  it('builds the header its own parser reads back', () => {
+    const fmt = { sampleRate: 44_100, channels: 2, bitsPerSample: 16 };
+    const header = wavHeader(1000, fmt);
+    expect(header).toHaveLength(44);
+    expect(parseWavHeader(header)).toEqual({
+      ...fmt,
+      dataStart: 44,
+      dataSize: 1000,
+    });
   });
 });
 
 /**
  * Mono 16-bit PCM WAV: `speechSeconds` of tone, then `silenceSeconds` of
- * digital silence. The tail is what `trimWavTrailingSilence` has to find.
+ * digital silence. The tail is what `trimmedEndSeconds` has to find.
  */
 function wavWithTail(
   speechSeconds: number,
@@ -93,87 +112,91 @@ function wavWithTail(
   return bytes;
 }
 
-describe('trimWavTrailingSilence (#1651)', () => {
-  it('cuts the silent tail back to the last audible sample plus a pad', () => {
-    const trimmed = trimWavTrailingSilence(wavWithTail(2, 3));
-    // 2s of speech + the 0.1s pad; the other 2.9s of silence is gone.
-    expect(trimmed.durationSeconds).toBeCloseTo(2.1, 2);
-    expect(wavDurationSeconds(trimmed.bytes)).toBeCloseTo(2.1, 2);
+describe('trimmedEndSeconds (#1651, #1657)', () => {
+  it('ends at the last audible sample plus a pad', () => {
+    // 2s of speech + the 0.1s pad; the other 2.9s of silence is off.
+    expect(trimmedEndSeconds(wavWithTail(2, 3), 0, 5)).toBeCloseTo(2.1, 2);
   });
 
-  it('leaves a take with no silent tail alone, bytes and all', () => {
-    const original = wavWithTail(2, 0);
-    const trimmed = trimWavTrailingSilence(original, 2);
-    expect(trimmed.bytes.byteLength).toBe(original.byteLength);
-    expect(trimmed.durationSeconds).toBeCloseTo(2, 5);
+  it('leaves a section with no silent tail alone', () => {
+    expect(trimmedEndSeconds(wavWithTail(2, 0), 0, 2, 2)).toBeCloseTo(2, 5);
   });
 
-  it('never trims before the alignment end, even when samples read silent', () => {
+  it('never ends before the alignment end, even when samples read silent', () => {
     // A quiet breath the sample scan would cut: the alignment says speech runs
-    // to 4.5s, so the trim point is 4.5s + pad, not 2s + pad.
-    const trimmed = trimWavTrailingSilence(wavWithTail(2, 3), 4.5);
-    expect(trimmed.durationSeconds).toBeCloseTo(4.6, 2);
+    // to 4.5s, so the end is 4.5s + pad, not 2s + pad.
+    expect(trimmedEndSeconds(wavWithTail(2, 3), 0, 5, 4.5)).toBeCloseTo(4.6, 2);
   });
 
-  it('never trims before the last audible sample, even when the alignment under-reports', () => {
+  it('never ends before the last audible sample, even when the alignment under-reports', () => {
     // Alignment claims 0.5s; 2s of audible speech follows it. Nothing spoken
     // may be cut — this is the "timestamps exclude trailing audio" trap.
-    const trimmed = trimWavTrailingSilence(wavWithTail(2, 3), 0.5);
-    expect(trimmed.durationSeconds).toBeCloseTo(2.1, 2);
+    expect(trimmedEndSeconds(wavWithTail(2, 3), 0, 5, 0.5)).toBeCloseTo(2.1, 2);
   });
 
   it('measures the file, not the alignment, when the alignment is missing', () => {
-    // No alignment and no silence to find: the whole take survives, so an
+    // No alignment and no silence to find: the whole section survives, so an
     // absent alignment cannot shrink a file past the duration guard.
-    const trimmed = trimWavTrailingSilence(wavWithTail(3, 0), null);
-    expect(trimmed.durationSeconds).toBeCloseTo(3, 5);
+    expect(trimmedEndSeconds(wavWithTail(3, 0), 0, 3, null)).toBeCloseTo(3, 5);
   });
 
   it('throws on audio it cannot parse rather than reporting a length', () => {
-    expect(() => trimWavTrailingSilence(new Uint8Array(64))).toThrow(/PCM WAV/);
+    expect(() => trimmedEndSeconds(new Uint8Array(64), 0, 1)).toThrow(
+      /PCM WAV/
+    );
   });
 
-  it('trims a take that is over the cap only because of its tail', () => {
-    // 14.5s of speech, 1.2s of silence: 15.7s submitted, 14.6s after the trim
-    // — under H3 Max's 14.8s target without touching a word.
-    const trimmed = trimWavTrailingSilence(wavWithTail(14.5, 1.2), 14.5);
-    expect(trimmed.durationSeconds).toBeLessThanOrEqual(14.8);
-    expect(trimmed.durationSeconds).toBeCloseTo(14.6, 1);
+  it('brings a section under the cap when only its tail was over', () => {
+    // 14.5s of speech, 1.2s of silence: 15.7s recorded, 14.6s kept — under
+    // H3 Max's 14.8s limit without touching a word.
+    const end = trimmedEndSeconds(wavWithTail(14.5, 1.2), 0, 15.7, 14.5);
+    expect(end).toBeLessThanOrEqual(14.8);
+    expect(end).toBeCloseTo(14.6, 1);
+  });
+
+  it("measures inside the window only, in the recording's own time", () => {
+    // Two shots in one recording: speech 0–2s, silence, speech 5–6s, silence.
+    const bytes = wav(8);
+    const view = new DataView(bytes.buffer);
+    for (const [from, to] of [
+      [0, 2],
+      [5, 6],
+    ] as const) {
+      for (let i = from * 8000; i < to * 8000; i++) {
+        view.setInt16(44 + i * 2, 12_000, true);
+      }
+    }
+    // The first shot's window ends where the second starts speaking; the
+    // second shot's later speech must not stretch it.
+    expect(trimmedEndSeconds(bytes, 0, 5, 2)).toBeCloseTo(2.1, 2);
+    expect(trimmedEndSeconds(bytes, 2, 8, 6)).toBeCloseTo(6.1, 2);
+    // The pad never runs past the window.
+    expect(trimmedEndSeconds(bytes, 0, 2.05, 2)).toBeCloseTo(2.05, 2);
+  });
+
+  it('copies nothing', () => {
+    const bytes = wavWithTail(2, 3);
+    const before = bytes.slice();
+    trimmedEndSeconds(bytes, 0, 5, 2);
+    expect(bytes).toEqual(before);
   });
 });
 
-describe('speechEndFrom (#1651)', () => {
-  it('takes the last voice segment end', () => {
-    expect(
-      speechEndFrom({
-        voiceSegments: [{ endTimeSeconds: 3.2 }, { endTimeSeconds: 7.9 }],
-      })
-    ).toBe(7.9);
+describe('decodeBase64 (#1657)', () => {
+  it('decodes slice by slice to exactly the bytes a whole-file decode gives', () => {
+    // Over one slice, with every padding shape.
+    for (const length of [0, 1, 2, 3, 24_575, 24_576, 24_577, 70_001]) {
+      const bytes = new Uint8Array(length).map((_, i) => (i * 31 + 7) % 256);
+      const base64 = Buffer.from(bytes).toString('base64');
+      expect(decodeBase64(base64)).toEqual(bytes);
+    }
   });
 
-  it('falls back to the character alignment when there are no segments', () => {
-    expect(
-      speechEndFrom({
-        voiceSegments: [],
-        alignment: { characterEndTimesSeconds: [0.1, 0.4, 2.75] },
-      })
-    ).toBe(2.75);
-  });
-
-  it.each([
-    ['nothing at all', {}],
-    [
-      'empty everything',
-      { voiceSegments: [], alignment: { characterEndTimesSeconds: [] } },
-    ],
-    [
-      'nulls',
-      { voiceSegments: null, alignment: null, normalizedAlignment: null },
-    ],
-    ['non-finite numbers', { voiceSegments: [{ endTimeSeconds: Number.NaN }] }],
-    ['a negative end', { voiceSegments: [{ endTimeSeconds: -1 }] }],
-    ['a missing end', { voiceSegments: [{}] }],
-  ])('reads %s as no alignment rather than as zero', (_label, response) => {
-    expect(speechEndFrom(response)).toBeNull();
+  it('skips whitespace the way a whole-file decode would', () => {
+    const bytes = new Uint8Array(100).map((_, i) => i);
+    const base64 = Buffer.from(bytes).toString('base64');
+    expect(decodeBase64(`${base64.slice(0, 41)}\n${base64.slice(41)}`)).toEqual(
+      bytes
+    );
   });
 });

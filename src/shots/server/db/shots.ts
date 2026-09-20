@@ -11,12 +11,7 @@ import {
   shots,
 } from '@/platform/server/db/schema';
 import { dbSceneId } from '@/shots/scene-id';
-import type {
-  MotionAudioClip,
-  NewFrame,
-  Shot,
-  NewShot,
-} from '@/platform/server/db/schema';
+import type { NewFrame, Shot, NewShot } from '@/platform/server/db/schema';
 import type { Sequence } from '@/platform/server/db/schema/sequences';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { PageOptions } from '@/platform/server/db/read-page';
@@ -255,21 +250,6 @@ export function createShotsMethods(db: Database) {
       }
 
       return shot;
-    },
-
-    /**
-     * Stamp the References-stage dialogue clip onto the shot (#1554).
-     * Working set: motion attaches it, and synthesises only when the
-     * stored clip is missing or the lines/voices moved.
-     */
-    setAudioClips: async (
-      shotId: string,
-      audioClips: MotionAudioClip[]
-    ): Promise<void> => {
-      await db
-        .update(shots)
-        .set({ audioClips, updatedAt: new Date() })
-        .where(eq(shots.id, shotId));
     },
 
     upsert: async (data: NewShot): Promise<ShotWithAnchorFrame> => {

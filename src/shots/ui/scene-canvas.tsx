@@ -1,5 +1,6 @@
 import { ScenePlayer } from '@/motion/ui/scene-player';
 import { CanvasMediaStage } from './canvas-media-stage';
+import { ShotDialogueUnderVideo } from './shot-dialogue-readings';
 import { ShotMediaDropZone } from './shot-media-drop-zone';
 import { StartingFrameVariants } from './starting-frame-variants';
 import { formatExportProgress } from './sequence-export-actions';
@@ -230,7 +231,14 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = ({
       />
     );
     return (
-      <CanvasMediaStage aspectRatio={aspectRatio}>
+      <CanvasMediaStage
+        aspectRatio={aspectRatio}
+        below={
+          selectedShot ? (
+            <ShotDialogueUnderVideo shot={selectedShot} />
+          ) : undefined
+        }
+      >
         {selectedShot ? (
           <ShotMediaDropZone
             sequenceId={selectedShot.sequenceId}

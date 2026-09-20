@@ -119,9 +119,9 @@ export function useSaveShotPrompt(args: {
 }) {
   const queryClient = useQueryClient();
   return useMutation<
-    { unchanged: true } | { unchanged: false; versionId: string },
+    { unchanged: boolean },
     Error,
-    /** `dialogue` only when the user changed a voice binding (#1559). */
+    /** `dialogue` only when the user changed a line or a voice binding. */
     { text: string; dialogue?: MotionDialogue }
   >({
     mutationFn: ({ text, dialogue }) =>
@@ -147,6 +147,14 @@ export function useSaveShotPrompt(args: {
         }),
         queryClient.invalidateQueries({
           queryKey: shotStalenessNamespace,
+        }),
+        // A changed line or voice binding appends a dialogue version, and
+        // moves which readings still match (#1657).
+        queryClient.invalidateQueries({
+          queryKey: shotKeys.dialogueVersions(args.shotId),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: shotKeys.dialogueSections(args.shotId),
         }),
         // Which elements a shot uses follows its prompts — a new @-mention,
         // or a voice bound to a dialogue line (#1559) — so the Elements tab

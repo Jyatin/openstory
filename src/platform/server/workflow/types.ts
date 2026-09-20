@@ -11,13 +11,13 @@ import type {
 } from '@/models/models';
 import type { AnalysisModelId } from '@/models/models.config';
 import type { VoicedDialogueLine } from '@/motion/dialogue-tts';
+import type { SceneVoicedLine } from '@/shots/shot-dialogue';
 import type {
   AssemblableMotionPrompt,
   CharacterBibleEntry,
   ElementBibleEntry,
   LocationBibleEntry,
   MotionAudio,
-  MotionDialogue,
   MotionPrompt,
   Scene,
   VisualPrompt,
@@ -31,15 +31,15 @@ import type {
 } from '@/shots/input-hash';
 
 /**
- * Structured motion direction (dialogue + audio) carried forward onto a
- * user-edit motion prompt version. Captured at trigger time from the version
+ * Structured audio direction carried forward onto a user-edit motion prompt
+ * version. (Not the dialogue, #1657: what a shot says lives on the shot's
+ * dialogue version, not on a prompt row.) Captured at trigger time from the version
  * being edited and threaded through the workflow input, so the workflow does
  * NOT re-read the DB to find it — that read would be racy (concurrent
  * append-only version writes) and replay-unsafe (after the user-edit row is
  * written, the selection pointer moves to it). #713/#991.
  */
 type PriorMotionDirection = {
-  dialogue?: MotionDialogue | null;
   audio?: MotionAudio | null;
 };
 
@@ -460,6 +460,12 @@ export type SceneSplitWorkflowResult = {
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
   elementBible: ElementBibleEntry[];
+  /**
+   * The `shot_dialogue_versions` row seeded (or already selected) for each
+   * shot with lines (#1657), so a fresh run's recordings can name the version
+   * they spoke instead of only a continue's.
+   */
+  dialogueVersionIdByShotId: Record<string, string>;
 };
 
 /**
@@ -495,30 +501,42 @@ export interface ElementSheetWorkflowResult {
 }
 
 /**
- * Per-shot Text to Dialogue in the References stage (#1554). One acted
- * conversation clip per shot, persisted on `shots.audioClips` so motion
- * only attaches it.
+ * Per-SCENE Text to Dialogue in the `dialogue` stage, after images and before
+ * motion (#1554, #1657). The
+ * scene's conversation is recorded whole so every turn is acted in context,
+ * but only the shots whose clip no longer matches their lines adopt the new
+ * audio — each as a section of the recording, cut to a file and persisted on
+ * `shots.audioClips` so motion only attaches it.
  */
+export interface DialogueAudioSceneJob {
+  /** The scene's voiced turns in speaking order (shot order, then line order). */
+  voiced: SceneVoicedLine[];
+  /** shot id → the shot_dialogue_versions row its lines came from (absent = derived from the script). */
+  dialogueVersionIdByShotId: Record<string, string>;
+  /**
+   * Each shot's clip length, keyed by shot id (#1651). What a rewrite aims
+   * at, so a reading fits the cut rather than stretching it to the cap.
+   */
+  shotSeconds: Record<string, number>;
+  /**
+   * Shots that adopt the new audio even though their clip still matches —
+   * the user asked for another reading ("Regenerate dialogue"). Empty everywhere else.
+   */
+  forceAdoptShotIds: string[];
+}
+
 export interface DialogueAudioWorkflowInput extends UserWorkflowContext {
   sequenceId: string;
-  shots: Array<{
-    shotId: string;
-    lines: VoicedDialogueLine[];
-    /**
-     * This shot's clip length (#1651). What a rewrite aims at, so the take
-     * fits the cut rather than stretching it up to the provider's cap.
-     */
-    shotSeconds?: number;
-  }>;
-  /** Provider per-file floor (H3 Max 2s). Short one-liners are padded. */
+  scenes: DialogueAudioSceneJob[];
+  /** Provider per-file floor (H3 Max 2s). Short sections are padded. */
   minDurationSeconds?: number;
   /**
-   * Longest take every selected model can carry (`dialogueAudioMaxSeconds`,
+   * Longest clip every selected model can carry (`dialogueAudioMaxSeconds`,
    * #1651). REQUIRED: a default here would be a silent cap, and an absent one
-   * is how a 16s take reached a provider that rejects anything over 15.
+   * is how a 16s section reached a provider that rejects anything over 15.
    */
   maxDurationSeconds: number;
-  /** Model that rewrites an over-long take. Defaults to the analysis default. */
+  /** Model that rewrites an over-long section. Defaults to the analysis default. */
   analysisModelId?: AnalysisModelId;
 }
 
@@ -599,7 +617,7 @@ export interface MotionWorkflowInput extends SequenceWorkflowContext {
    */
   userEditText?: string;
   /**
-   * Only meaningful when `userEditedPrompt`: the dialogue/audio direction of the
+   * Only meaningful when `userEditedPrompt`: the audio direction of the
    * version being edited, captured at trigger time so the recorded user-edit
    * version carries it forward (audio-capable models still get enrichment after
    * a raw-text edit). Threaded in instead of re-read in-workflow — see
@@ -634,11 +652,17 @@ export interface MotionWorkflowInput extends SequenceWorkflowContext {
    */
   voicedLines?: VoicedDialogueLine[];
   /**
-   * Dialogue clips already synthesised in the References stage (#1554).
+   * Dialogue clips already synthesised in the `dialogue` stage (#1554).
    * When present, motion attaches them and does not call ElevenLabs.
    * Snapshotted at the trigger from `shots.audioClips`.
    */
   audioClips?: MotionAudioClip[];
+  /**
+   * The conversation around this shot (#1657), snapshotted at the trigger
+   * when the shot has voiced lines and no matching clip. Motion's fallback
+   * records it and keeps only this shot's section.
+   */
+  dialogueContext?: SceneVoicedLine[];
   /**
    * Structured motion prompt so the TTS step can re-assemble with audio
    * tokens after the clips exist. Absent on paths that only pass `prompt`.
@@ -1524,7 +1548,25 @@ export interface MusicWorkflowResult {
  * Orchestrates parallel motion generation for all shots + optional music,
  * then merges videos and muxes audio.
  */
+/**
+ * Dialogue to record ONCE PER SCENE before a motion fan-out (#1657). Built at
+ * the trigger for every scene with a batch shot whose clip no longer matches
+ * its lines (no clip, an edited line, a recast voice). The batch runs
+ * `DialogueAudioWorkflow` over it first and hands each child its clip, so N
+ * shots of one scene are ONE ElevenLabs call acted as one conversation — not N
+ * overlapping windows, each billed in full.
+ */
+export type BatchDialogueRecording = {
+  scenes: DialogueAudioSceneJob[];
+  /** See `DialogueAudioWorkflowInput`. */
+  minDurationSeconds?: number;
+  maxDurationSeconds: number;
+  analysisModelId?: AnalysisModelId;
+};
+
 export interface BatchMotionMusicWorkflowInput extends SequenceWorkflowContext {
+  /** See {@link BatchDialogueRecording}. Absent when no shot needs a recording. */
+  dialogueRecording?: BatchDialogueRecording;
   /** Per-shot motion inputs (ordered by scene) */
   shots: Array<{
     shotId: string;
@@ -1589,6 +1631,8 @@ export interface BatchMotionMusicWorkflowInput extends SequenceWorkflowContext {
     voicedLines?: VoicedDialogueLine[];
     /** See `MotionWorkflowInput.audioClips`. */
     audioClips?: MotionAudioClip[];
+    /** See `MotionWorkflowInput.dialogueContext`. */
+    dialogueContext?: SceneVoicedLine[];
     /** See `MotionWorkflowInput.coveredShots`. */
     coveredShots?: PackedMotionCoveredShot[];
   }>;

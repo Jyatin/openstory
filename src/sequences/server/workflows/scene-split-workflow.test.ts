@@ -215,6 +215,15 @@ const updateSplitContent = vi.fn<
   (seeds: Array<{ content: { dialogue: unknown[] } }>) => Promise<void>
 >(() => Promise.resolve());
 
+/** The shot dialogue node seeded in `persist-scenes` (#1657). */
+const shotDialogueWrite = vi.fn<
+  (
+    shotId: string,
+    lines: Array<{ character: string; line: string }>,
+    source: string
+  ) => Promise<{ id: string }>
+>(() => Promise.resolve({ id: 'dialogue-version-1' }));
+
 function makeScopedDb(
   resolveLlmKey: (model?: string) => Promise<{
     source: string;
@@ -259,6 +268,9 @@ function makeScopedDb(
     sceneScriptVersions: {
       seedSplitVersions: () => Promise.resolve(),
       updateSplitContent: updateSplitContent,
+    },
+    shotDialogue: {
+      write: shotDialogueWrite,
     },
     shots: {
       // No stream-time `shots.upsert` (#1593): the first shot rows are
@@ -718,6 +730,7 @@ describe('SceneSplitWorkflow shot-list pass (#1486)', () => {
   });
 
   test("persists each shot's lines on its scene, stamped per shot (#1585)", async () => {
+    shotDialogueWrite.mockClear();
     shotListParsed = {
       scenes: [
         {
@@ -752,6 +765,21 @@ describe('SceneSplitWorkflow shot-list pass (#1486)', () => {
     // shot-list lines must overwrite it (seedSplitVersions skips existing rows).
     const seeds = updateSplitContent.mock.calls.at(-1)?.[0] ?? [];
     expect(seeds.map((s) => s.content.dialogue.length)).toEqual([2, 0, 0]);
+
+    // …and each shot's dialogue node is seeded with its own lines (#1657) —
+    // this is the one moment shotNumber can be resolved to a shot row, which
+    // is what makes a later reorder need no restamp. Silent shots are
+    // written too, with no lines: `write` mints nothing for a shot that never
+    // spoke, and an empty row over one that lost its lines.
+    const seeded = shotDialogueWrite.mock.calls;
+    expect(seeded.map((call) => call[1].map((l) => l.line))).toEqual([
+      ['Steady.'],
+      ['Lane four.'],
+      [],
+      [],
+    ]);
+    expect(seeded.every((call) => call[2] === 'prompt')).toBe(true);
+    expect(new Set(seeded.map((call) => call[0])).size).toBe(4);
   });
 
   test('persists two shots on a scene with an internal cut', async () => {

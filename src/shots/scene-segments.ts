@@ -17,15 +17,22 @@
  */
 
 import {
+  isValidImageToVideoModel,
   videoModelSupportsInClipMultiShot,
   type ImageToVideoModel,
 } from '@/models/models';
+import { referenceKeysMoved } from '@/motion/reference-provenance';
+import {
+  raiseShotDurationToCoverAudio,
+  resolveShotDuration,
+} from '@/motion/resolve-shot-duration';
 import { durationGridForModel } from '@/motion/model-capabilities';
 import {
   DEFAULT_SEGMENT_CAP_MS,
   tileSceneIntoSegments,
 } from '@/motion/tile-segments';
 import type {
+  MotionAudioClip,
   VideoManifestEntry,
   VideoVariant,
 } from '@/platform/server/db/schema';
@@ -210,12 +217,43 @@ export type SegmentVersionInput = SegmentVideoVersion & {
   > & {
     /** Absent on pre-pointer rows; treated as voiceless. */
     audioSourceKey?: string | null;
+    /** Absent on very old rows: unknown, never stale. */
+    audioClipIds?: readonly string[];
+    /** Absent on rows from before #1657: unknown, never stale. */
+    referenceKeys?: readonly string[];
+    /** Absent on rows from before #767's value snapshot. */
+    durationMs?: number;
   })[];
 };
+
+/**
+ * What a shot would be rendered from NOW, beyond its prompt and frame
+ * pointers (#1657). A map that lacks a shot reads as "nothing bound" for
+ * that input.
+ */
+export type LiveShotInputs = {
+  /** Voice id + line + tone + model key per shot; `null` = voiceless. */
+  audioSourceKeyByShot: ReadonlyMap<string, string | null>;
+  /** Ids of the clips in the shot's working set (`shots.audioClips`). */
+  audioClipIdsByShot: ReadonlyMap<string, readonly string[]>;
+  /** `kind:entityId` → the provenance key a render would be sent now. */
+  referenceIdentity: ReadonlyMap<string, string>;
+  /** Raw `shots.durationMs` (unset/0 = no user duration, not compared). */
+  durationMsByShot: ReadonlyMap<string, number | null>;
+  /** Seconds of dialogue audio bound to the shot, for the audio raise. */
+  audioSecondsByShot: ReadonlyMap<string, number>;
+};
+/** The half of {@link LiveShotInputs} that takes I/O; the rest is on the shot rows. */
+export type LoadedShotInputs = Pick<
+  LiveShotInputs,
+  'audioSourceKeyByShot' | 'referenceIdentity'
+>;
 export type SegmentShotInput = {
   id: string;
   renderSegmentId: string | null;
   selectedMotionPromptVersionId: string | null;
+  audioClips: readonly Pick<MotionAudioClip, 'id' | 'durationSeconds'>[] | null;
+  durationMs: number | null;
   /**
    * Does this shot render from reference sheets rather than a still?
    * `rendersReferenceOnly(shot, sequence)` — REQUIRED, not defaulted: such a
@@ -258,7 +296,7 @@ export function isSelectedVersionStale(
   selected: SegmentVersionInput | undefined,
   currentMotionByShot: ReadonlyMap<string, string | null>,
   currentFrameByShot: ReadonlyMap<string, string | null>,
-  currentAudioSourceKeyByShot: ReadonlyMap<string, string | null> = new Map()
+  live: LiveShotInputs
 ): boolean {
   if (!selected) return false;
   return selected.manifest.some((entry) => {
@@ -270,13 +308,64 @@ export function isSelectedVersionStale(
     }
     const currentMotion = currentMotionByShot.get(entry.shotId) ?? null;
     const currentFrame = currentFrameByShot.get(entry.shotId) ?? null;
-    const currentAudio = currentAudioSourceKeyByShot.get(entry.shotId) ?? null;
+    const currentAudio = live.audioSourceKeyByShot.get(entry.shotId) ?? null;
     return (
       entry.motionPromptVersionId !== currentMotion ||
       entry.frameVersionId !== currentFrame ||
-      (entry.audioSourceKey ?? null) !== currentAudio
+      (entry.audioSourceKey ?? null) !== currentAudio ||
+      audioClipsMoved(entry, live) ||
+      referenceKeysMoved(entry.referenceKeys, live.referenceIdentity) ||
+      durationMoved(entry, selected.model, live)
     );
   });
+}
+
+/**
+ * The clip a render was sent is a pointer, like the frame version: a generated
+ * dialogue clip's id is its `shot_dialogue_sections.id`, so picking another
+ * reading of the same lines re-stales the clip even though the key (lines +
+ * voices) did not move. Compared as SETS against the shot's own working set,
+ * so a neighbour re-recording never reaches this shot. An entry with no clip
+ * ids is not compared — a voice appearing is `audioSourceKey`'s job — and an
+ * absent field is a very old row: unknown, never stale.
+ */
+function audioClipsMoved(
+  entry: { shotId: string; audioClipIds?: readonly string[] },
+  live: LiveShotInputs
+): boolean {
+  if (!entry.audioClipIds || entry.audioClipIds.length === 0) return false;
+  const current = new Set(live.audioClipIdsByShot.get(entry.shotId) ?? []);
+  const rendered = new Set(entry.audioClipIds);
+  return (
+    rendered.size !== current.size ||
+    [...rendered].some((id) => !current.has(id))
+  );
+}
+
+/**
+ * Duration, snapped on BOTH sides (#767): the manifest holds the length the
+ * model was asked for, so the live `shots.durationMs` is snapped onto the
+ * same model's grid before comparing. A shot with dialogue audio may have
+ * been raised to cover it (`raiseShotDurationToCoverAudio`), and a packed
+ * member may not, so either candidate counts as unchanged. No user duration
+ * (unset / 0) means nothing to compare.
+ */
+function durationMoved(
+  entry: { shotId: string; durationMs?: number },
+  model: string,
+  live: LiveShotInputs
+): boolean {
+  if (entry.durationMs === undefined) return false;
+  const rawMs = live.durationMsByShot.get(entry.shotId);
+  if (!rawMs || rawMs <= 0 || !isValidImageToVideoModel(model)) return false;
+  const snapped = resolveShotDuration({ durationMs: rawMs, model });
+  const audioSeconds = live.audioSecondsByShot.get(entry.shotId) ?? 0;
+  const raised = raiseShotDurationToCoverAudio(snapped, audioSeconds, model);
+  const candidates = new Set([
+    Math.round(snapped * 1000),
+    Math.round(raised * 1000),
+  ]);
+  return !candidates.has(entry.durationMs);
 }
 
 /**
@@ -291,19 +380,31 @@ export function assembleSequenceSegments(input: {
   shots: readonly SegmentShotInput[];
   frames: readonly SegmentFrameInput[];
   /**
-   * Live dialogue-audio identity per shot (voice id + line + tone + TTS
-   * model). Omitted keys are voiceless (`null`). Same pointer comparison as
-   * motion-prompt / frame version ids.
+   * What each shot would render from now that its row does not hold:
+   * dialogue key and reference provenance. See {@link LiveShotInputs}.
    */
-  currentAudioSourceKeyByShot?: ReadonlyMap<string, string | null>;
+  live: LoadedShotInputs;
 }): SequenceSegment[] {
   // Membership lives on the shot; callers pass shots already in hierarchical
   // order (scene, then shot number).
   const orderedShots = input.shots;
   const shotIdsBySegment = new Map<string, string[]>();
   const currentMotionByShot = new Map<string, string | null>();
+  const audioClipIdsByShot = new Map<string, readonly string[]>();
+  const durationMsByShot = new Map<string, number | null>();
+  const audioSecondsByShot = new Map<string, number>();
   for (const shot of orderedShots) {
     currentMotionByShot.set(shot.id, shot.selectedMotionPromptVersionId);
+    const clips = shot.audioClips ?? [];
+    audioClipIdsByShot.set(
+      shot.id,
+      clips.map((clip) => clip.id)
+    );
+    durationMsByShot.set(shot.id, shot.durationMs);
+    audioSecondsByShot.set(
+      shot.id,
+      clips.reduce((sum, clip) => sum + (clip.durationSeconds ?? 0), 0)
+    );
     if (!shot.renderSegmentId) continue;
     const list = shotIdsBySegment.get(shot.renderSegmentId) ?? [];
     list.push(shot.id);
@@ -336,6 +437,13 @@ export function assembleSequenceSegments(input: {
     versionsBySegment.set(v.renderSegmentId, list);
   }
 
+  const live: LiveShotInputs = {
+    ...input.live,
+    audioClipIdsByShot,
+    durationMsByShot,
+    audioSecondsByShot,
+  };
+
   return input.segments.map((segment): SequenceSegment => {
     const segVersions = versionsBySegment.get(segment.id) ?? [];
     const selected =
@@ -355,7 +463,7 @@ export function assembleSequenceSegments(input: {
         selected,
         currentMotionByShot,
         currentFrameByShot,
-        input.currentAudioSourceKeyByShot
+        live
       ),
     };
   });

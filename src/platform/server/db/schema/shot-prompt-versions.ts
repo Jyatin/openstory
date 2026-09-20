@@ -54,6 +54,12 @@ export type MotionAudioClip = {
    * would re-synthesise the take on every later read.
    */
   spokenLines?: { index: number; text: string }[];
+  /**
+   * The `dialogue_recordings` row this clip was cut from (#1657); the clip's
+   * `id` is then its `shot_dialogue_sections.id`. Absent on a row from before
+   * recordings, and on a user-bound element clip.
+   */
+  recordingId?: string;
 };
 import { type InferSelectModel, sql } from 'drizzle-orm';
 import {

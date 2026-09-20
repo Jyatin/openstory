@@ -19,6 +19,7 @@
  * off the client.
  */
 
+import type { Likeness } from '@/cast/likeness';
 import { analyzeTalentMediaForTeam } from '@/cast/server/talent/analyze-talent-media';
 import type { TalentSubjectKind } from '@/cast/subject-kind';
 import type { PortraitAttestation, UploadRights } from '@/cast/upload-rights';
@@ -196,6 +197,28 @@ export async function requireUploadRights(
 }
 
 /**
+ * Signed or detected → `real`; classifier cleared → `none` (#1682).
+ * Detected-but-unsigned is still a real person — `requireUploadRights`
+ * refuses use until signed. No row returns null. A `none` still is a
+ * plain URL; anything else registers.
+ */
+export async function likenessFromLedger(
+  scopedDb: ScopedDb,
+  url: string
+): Promise<Likeness | null> {
+  const row = await latestRow(scopedDb, url);
+  if (!row) return null;
+  switch (rightsFromRow(row).status) {
+    case 'signed':
+      return 'real';
+    case 'cleared':
+      return 'none';
+    case 'needs_portrait':
+      return 'real';
+  }
+}
+
+/**
  * After a finalize moves an object, cover the new URL with the same row so
  * the library copy passes the gate without a second look.
  */
@@ -220,24 +243,4 @@ export async function carryUploadRights(
     ipAddress: row.ipAddress,
     userAgent: row.userAgent,
   });
-}
-
-/**
- * The URLs the ledger says show no person (the classifier cleared them).
- * BytePlus registers a still as a virtual portrait only so Ark accepts a
- * face, and CreateAsset is 3/min per account — so these go as plain URLs
- * (#1674). No row, or a signed portrait, is not "no person": Ark would
- * reject a photoreal face sent as a URL, so an unknown still is registered.
- */
-export async function imagesWithoutPerson(
-  scopedDb: ScopedDb,
-  urls: string[]
-): Promise<string[]> {
-  const cleared: string[] = [];
-  for (const url of new Set(urls)) {
-    const row = await latestRow(scopedDb, url);
-    if (row?.statementVersion === LIKENESS_CLEARED_V1.version)
-      cleared.push(url);
-  }
-  return cleared;
 }

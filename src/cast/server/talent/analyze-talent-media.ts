@@ -99,6 +99,7 @@ export function sheetMetadataFromAnalysis(
     voiceDescription: '',
     // A talent photo is a face by definition.
     voiceOnly: false,
+    isPerson: true,
     consistencyTag: slug,
   };
 }

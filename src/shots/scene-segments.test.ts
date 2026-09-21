@@ -306,7 +306,7 @@ describe('isSelectedVersionStale', () => {
   });
 
   it('is stale when the bound dialogue audio identity moved', () => {
-    const v = version('v1', 'seg', 'kling', [
+    const v = version('v1', 'seg', 'seedance_v2', [
       {
         shotId: 'shot-1',
         motionPromptVersionId: 'mp-1',
@@ -323,6 +323,55 @@ describe('isSelectedVersionStale', () => {
         ]),
       })
     ).toBe(false);
+  });
+
+  it.each(['grok_imagine_video_1_5', 'kling_v3_pro', 'gemini_omni_flash'])(
+    'keeps a fresh %s video fresh when the shot has a designed voice (#1720)',
+    (model) => {
+      const v = version('v1', 'seg', model, [
+        {
+          shotId: 'shot-1',
+          motionPromptVersionId: 'mp-1',
+          frameVersionId: 'fv-1',
+          audioSourceKey: null,
+          audioClipIds: [],
+        },
+      ]);
+      // Render triggers omit voicedLines for models without an audio input.
+      // The live loader still resolves the voice for dialogue staleness.
+      expect(
+        stale(v, {
+          audioSourceKeyByShot: new Map([
+            ['shot-1', 'voice-sarah\tStay down.\t\televen_v3'],
+          ]),
+        })
+      ).toBe(false);
+      expect(
+        isSelectedVersionStale(v, new Map([['shot-1', 'mp-2']]), frame, {
+          ...NO_LOADED,
+          audioClipIdsByShot: new Map(),
+          durationMsByShot: new Map(),
+          audioSecondsByShot: new Map(),
+        })
+      ).toBe(true);
+    }
+  );
+
+  it('still compares explicitly stamped audio on a legacy or fallback render', () => {
+    const v = version('v1', 'seg', 'grok_imagine_video_1_5', [
+      {
+        shotId: 'shot-1',
+        motionPromptVersionId: 'mp-1',
+        frameVersionId: 'fv-1',
+        audioSourceKey: 'recorded-key',
+      },
+    ]);
+    expect(
+      stale(v, { audioSourceKeyByShot: new Map([['shot-1', 'recorded-key']]) })
+    ).toBe(false);
+    expect(
+      stale(v, { audioSourceKeyByShot: new Map([['shot-1', 'changed-key']]) })
+    ).toBe(true);
   });
 
   it('is stale when a shot repointed its frame or motion prompt', () => {
@@ -455,6 +504,87 @@ describe('assembleSequenceSegments', () => {
   });
 });
 
+describe('legacy packed video provenance (#1720)', () => {
+  const firstKey = 'voice-a\tHello.\tcalm\televen_v3';
+  const secondKey = 'voice-b\tGoodbye.\tcalm\televen_v3';
+  const v = version('packed', 'seg', 'minimax_h3_max', [
+    {
+      shotId: 'a',
+      motionPromptVersionId: 'mp-a',
+      frameVersionId: null,
+      durationMs: 3000,
+      audioSourceKey: `${firstKey}\n${secondKey}`,
+      audioClipIds: ['clip-a'],
+    },
+    {
+      shotId: 'b',
+      motionPromptVersionId: 'mp-b',
+      frameVersionId: null,
+      durationMs: 2000,
+      audioSourceKey: secondKey,
+      audioClipIds: ['clip-b'],
+    },
+  ]);
+  const live: LiveShotInputs = {
+    ...NO_LOADED,
+    audioSourceKeyByShot: new Map([
+      ['a', firstKey],
+      ['b', secondKey],
+    ]),
+    audioClipIdsByShot: new Map([
+      ['a', ['clip-a']],
+      ['b', ['clip-b']],
+    ]),
+    durationMsByShot: new Map([
+      ['a', 3000],
+      ['b', 2000],
+    ]),
+    audioSecondsByShot: new Map(),
+  };
+  const check = (changes: Partial<LiveShotInputs> = {}) =>
+    isSelectedVersionStale(
+      v,
+      new Map([
+        ['a', 'mp-a'],
+        ['b', 'mp-b'],
+      ]),
+      new Map(),
+      { ...live, ...changes }
+    );
+
+  it('recognizes an unchanged historical conversation and sub-minimum member durations', () => {
+    expect(check()).toBe(false);
+  });
+  it.each(['a', 'b'])(
+    'still detects changed words or voice on member %s',
+    (id) => {
+      const keys = new Map(live.audioSourceKeyByShot);
+      keys.set(id, 'changed-voice\tChanged words.\tcalm\televen_v3');
+      expect(check({ audioSourceKeyByShot: keys })).toBe(true);
+    }
+  );
+  it('still detects a different recording of unchanged dialogue', () => {
+    expect(
+      check({
+        audioClipIdsByShot: new Map([
+          ['a', ['new-take']],
+          ['b', ['clip-b']],
+        ]),
+      })
+    ).toBe(true);
+  });
+  it('detects editorial duration changes even below the model minimum', () => {
+    expect(
+      check({
+        durationMsByShot: new Map([
+          ['a', 4000],
+          ['b', 2000],
+        ]),
+      })
+    ).toBe(true);
+  });
+});
+
 describe('reference-only shots and staleness', () => {
   // A shot rendering from reference sheets animates from no still, so its
   // manifest entry records `frameVersionId: null`. The shot may still HAVE a
@@ -499,7 +629,7 @@ describe('isSelectedVersionStale — clips, references, duration (#1657)', () =>
     frameVersionId: 'fv-1',
   };
   const key = new Map([['shot-1', 'k']]);
-  const voiced = version('v1', 'seg', 'kling_v3_pro', [
+  const voiced = version('v1', 'seg', 'seedance_v2', [
     { ...entry, audioSourceKey: 'k', audioClipIds: ['section-1'] },
   ]);
   const staleWith = (
@@ -535,7 +665,7 @@ describe('isSelectedVersionStale — clips, references, duration (#1657)', () =>
   it('keeps a legacy manifest fresh: its clip ids are the ones the working set still holds', () => {
     // Pre-#1657 clips carry a generated id, not a section id — and no
     // migration touched either side, so the sets still agree in any order.
-    const legacy = version('v1', 'seg', 'kling_v3_pro', [
+    const legacy = version('v1', 'seg', 'seedance_v2', [
       { ...entry, audioSourceKey: 'k', audioClipIds: ['clip-a', 'clip-b'] },
     ]);
     expect(staleWith(legacy, new Map([['shot-1', ['clip-b', 'clip-a']]]))).toBe(

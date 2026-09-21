@@ -22,6 +22,7 @@ import {
   type ImageToVideoModel,
 } from '@/models/models';
 import { referenceKeysMoved } from '@/motion/reference-provenance';
+import { modelTakesDialogueAudio } from '@/motion/dialogue-tts';
 import {
   raiseShotDurationToCoverAudio,
   resolveShotDuration,
@@ -299,7 +300,7 @@ export function isSelectedVersionStale(
   live: LiveShotInputs
 ): boolean {
   if (!selected) return false;
-  return selected.manifest.some((entry) => {
+  return selected.manifest.some((entry, index) => {
     // Both ids null = unknown provenance (pre-#1380 storyboard clips, or a
     // trigger that forgot to pin). Same contract as a legacy null hash:
     // unknown is not stale, so a regression cannot mark every clip Stale.
@@ -308,16 +309,49 @@ export function isSelectedVersionStale(
     }
     const currentMotion = currentMotionByShot.get(entry.shotId) ?? null;
     const currentFrame = currentFrameByShot.get(entry.shotId) ?? null;
-    const currentAudio = live.audioSourceKeyByShot.get(entry.shotId) ?? null;
+    // Match the render triggers: models without an uploaded-audio input
+    // receive no voiced lines and stamp a null key, even with voices enabled.
+    // Keep the shared live key intact for the dialogue recording's own check.
+    const currentAudio =
+      entry.audioSourceKey == null &&
+      isValidImageToVideoModel(selected.model) &&
+      !modelTakesDialogueAudio(selected.model)
+        ? null
+        : (live.audioSourceKeyByShot.get(entry.shotId) ?? null);
     return (
       entry.motionPromptVersionId !== currentMotion ||
       entry.frameVersionId !== currentFrame ||
-      (entry.audioSourceKey ?? null) !== currentAudio ||
+      ((entry.audioSourceKey ?? null) !== currentAudio &&
+        !legacyPackedAudioMatches(selected, index, live)) ||
       audioClipsMoved(entry, live) ||
       referenceKeysMoved(entry.referenceKeys, live.referenceIdentity) ||
-      durationMoved(entry, selected.model, live)
+      durationMoved(entry, selected.model, live, selected.manifest.length > 1)
     );
   });
+}
+
+/**
+ * Before #1720 the lead entry keyed the whole packed conversation. Accept
+ * that exact historical stamp only while ALL of those live words/voices
+ * still match. Other members and their recording IDs are compared normally.
+ */
+function legacyPackedAudioMatches(
+  selected: SegmentVersionInput,
+  index: number,
+  live: LiveShotInputs
+): boolean {
+  if (index !== 0 || selected.manifest.length < 2) return false;
+  const stamped = selected.manifest[0]?.audioSourceKey;
+  if (!stamped) return false;
+  const keys = selected.manifest.flatMap((member) => {
+    const key = live.audioSourceKeyByShot.get(member.shotId);
+    return key ? key.split('\n') : [];
+  });
+  // Source keys canonicalize the conversation order. Compare the same
+  // multiset here, including duplicate lines, without changing stored rows.
+  return (
+    JSON.stringify(stamped.split('\n').sort()) === JSON.stringify(keys.sort())
+  );
 }
 
 /**
@@ -343,21 +377,22 @@ function audioClipsMoved(
 }
 
 /**
- * Duration, snapped on BOTH sides (#767): the manifest holds the length the
- * model was asked for, so the live `shots.durationMs` is snapped onto the
- * same model's grid before comparing. A shot with dialogue audio may have
- * been raised to cover it (`raiseShotDurationToCoverAudio`), and a packed
- * member may not, so either candidate counts as unchanged. No user duration
- * (unset / 0) means nothing to compare.
+ * Single-shot durations are snapped to the model's grid and may be raised
+ * to cover dialogue audio. Packed members instead store their exact editorial
+ * duration; only the whole clip is snapped. Unset durations are not compared.
  */
 function durationMoved(
   entry: { shotId: string; durationMs?: number },
   model: string,
-  live: LiveShotInputs
+  live: LiveShotInputs,
+  packed: boolean
 ): boolean {
   if (entry.durationMs === undefined) return false;
   const rawMs = live.durationMsByShot.get(entry.shotId);
   if (!rawMs || rawMs <= 0 || !isValidImageToVideoModel(model)) return false;
+  // Packed entries store each member's editorial duration, not a standalone
+  // request duration. The model's minimum applies to the whole clip (#1720).
+  if (packed) return entry.durationMs !== Math.round(rawMs);
   const snapped = resolveShotDuration({ durationMs: rawMs, model });
   const audioSeconds = live.audioSecondsByShot.get(entry.shotId) ?? 0;
   const raised = raiseShotDurationToCoverAudio(snapped, audioSeconds, model);

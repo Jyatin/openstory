@@ -4,11 +4,15 @@ import {
   VOICE_NATIONALITIES,
   catalogVoiceBrief,
   designedTakeIsInUse,
+  designedTakeLabel,
+  designedTakesForDisplay,
+  markPreviewUnusable,
   inferVoiceAccent,
   inferVoiceAge,
   inferVoiceGender,
   matchSpeaker,
   parseVoiceLocale,
+  previewListWithChosenTake,
   recommendVoiceFilters,
   speakingCharacterIds,
   toCatalogVoiceFromLibrary,
@@ -157,6 +161,106 @@ describe('designedTakeIsInUse', () => {
   });
   it('is never in use without a saved voice id', () => {
     expect(designedTakeIsInUse(0, null, 'generated')).toBe(false);
+  });
+});
+
+const preview = (
+  generatedVoiceId: string,
+  takeNumber?: number,
+  unusable?: 'saved' | 'expired'
+): {
+  generatedVoiceId: string;
+  url: string;
+  path: string;
+  takeNumber?: number;
+  unusable?: 'saved' | 'expired';
+} => ({
+  generatedVoiceId,
+  url: `/${generatedVoiceId}.mp3`,
+  path: generatedVoiceId,
+  ...(takeNumber == null ? {} : { takeNumber }),
+  ...(unusable == null ? {} : { unusable }),
+});
+
+describe('designedTakeLabel', () => {
+  it('uses a stamped take number so the label survives a reorder', () => {
+    expect(designedTakeLabel(preview('b', 2), 0)).toBe('Take 2');
+  });
+  it('falls back to 1-based position when the row predates take numbers', () => {
+    expect(designedTakeLabel(preview('a'), 0)).toBe('Take 1');
+    expect(designedTakeLabel(preview('b'), 1)).toBe('Take 2');
+  });
+});
+
+describe('previewListWithChosenTake', () => {
+  it('stamps missing numbers then moves the chosen take to the front', () => {
+    expect(
+      previewListWithChosenTake([preview('a'), preview('b'), preview('c')], 'b')
+    ).toEqual([preview('b', 2), preview('a', 1), preview('c', 3)]);
+  });
+  it('keeps existing take numbers when promoting', () => {
+    expect(
+      previewListWithChosenTake(
+        [preview('a', 1), preview('b', 2), preview('c', 3)],
+        'c'
+      )
+    ).toEqual([preview('c', 3), preview('a', 1), preview('b', 2)]);
+  });
+  it('returns null when the take is not in the list', () => {
+    expect(previewListWithChosenTake([preview('a')], 'missing')).toBeNull();
+  });
+});
+
+describe('designedTakesForDisplay', () => {
+  it('labels In use and Other takes from stamped numbers, not leftover-list order', () => {
+    const takes = designedTakesForDisplay(
+      [preview('b', 2), preview('a', 1), preview('c', 3)],
+      'voice-1',
+      'generated'
+    );
+    expect(
+      takes.map((take) => ({ label: take.label, inUse: take.inUse }))
+    ).toEqual([
+      { label: 'Take 2', inUse: true },
+      { label: 'Take 1', inUse: false },
+      { label: 'Take 3', inUse: false },
+    ]);
+  });
+  it('offers Use only on takes that can still be saved', () => {
+    const takes = designedTakesForDisplay(
+      [
+        preview('b', 2, 'saved'),
+        preview('a', 1, 'saved'),
+        preview('c', 3, 'expired'),
+      ],
+      'voice-1',
+      'generated'
+    );
+    expect(
+      takes.map((take) => ({
+        label: take.label,
+        inUse: take.inUse,
+        canUse: take.canUse,
+        unusable: take.unusable,
+      }))
+    ).toEqual([
+      { label: 'Take 2', inUse: true, canUse: false, unusable: 'saved' },
+      { label: 'Take 1', inUse: false, canUse: false, unusable: 'saved' },
+      { label: 'Take 3', inUse: false, canUse: false, unusable: 'expired' },
+    ]);
+  });
+});
+
+describe('markPreviewUnusable', () => {
+  it('stamps the matching take and leaves the others', () => {
+    expect(
+      markPreviewUnusable([preview('a', 1), preview('b', 2)], 'b', 'expired')
+    ).toEqual([preview('a', 1), preview('b', 2, 'expired')]);
+  });
+  it('returns null when the take is not in the list', () => {
+    expect(
+      markPreviewUnusable([preview('a', 1)], 'missing', 'saved')
+    ).toBeNull();
   });
 });
 

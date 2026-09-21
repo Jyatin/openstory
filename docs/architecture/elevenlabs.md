@@ -50,8 +50,14 @@ lines just have no designed voice for TTS. The LLM drafts `voiceDescription` whe
 (`characters.voicePreviews`, AUDIO bucket) and the first is saved as the
 voice; "Use" on another take saves it instead (`chooseCharacterVoiceTakeFn`,
 which writes the new id then releases the old, and moves the take to the
-front — while `voiceId` is set, `voicePreviews[0]` is the saved voice; a 404
-is reported as an expired take). Previews cost no slot; a saved voice is an
+front — while `voiceId` is set, `voicePreviews[0]` is the saved voice; a gone
+preview is reported as an expired take — ElevenLabs uses HTTP 400
+`voice_not_found`, not 404). Each preview keeps a 1-based `takeNumber`
+stamped at design (and lazily on promote for older rows) so the In use card
+shows Take 2 after promoting the second preview, not a generic “Designed
+take” (#1709). A `generatedVoiceId` can be saved once; after create()
+succeeds (or ElevenLabs says it already did / the preview aged out) the
+take is `unusable` and Use this take is hidden — the R2 MP3 stays. Previews cost no slot; a saved voice is an
 **account-wide** ElevenLabs slot, so the id is shared by copy (talent ↔
 character at cast / save-to-library) and freed only through
 `releaseVoiceIfUnreferenced` (`getVoiceReferenceCount` over both tables,
@@ -73,7 +79,8 @@ version — required on `updateVoice` so no writer forgets it, null when nobody
 did (the cast-records seed). 'removed' means the character dropped its voice id;
 only `releasedAt` means the ElevenLabs slot was actually freed.
 `releaseVoiceIfUnreferenced` stamps `releasedAt` on every row holding the id
-it deletes — and on one it finds already gone at ElevenLabs (404) — and
+it deletes — and on one it finds already gone at ElevenLabs (404 or 400
+`voice_not_found`) — and
 `selectVoiceVersion` refuses a released row, because that id no longer exists
 at ElevenLabs and would 404 at TTS. A failed release AFTER a committed voice
 switch is logged, not thrown (`releaseReplacedVoice`): the switch stands and

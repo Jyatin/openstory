@@ -152,6 +152,14 @@ describe('CharacterVoiceWorkflow', () => {
       expect.objectContaining({
         voiceId: 'voice-1',
         voiceDescription: 'Warm alto, unhurried.',
+        voicePreviews: [
+          expect.objectContaining({
+            generatedVoiceId: 'g1',
+            takeNumber: 1,
+            unusable: 'saved',
+          }),
+          expect.objectContaining({ generatedVoiceId: 'g2', takeNumber: 2 }),
+        ],
       }),
       'generated',
       // The person who asked for the voice is stamped on the version.

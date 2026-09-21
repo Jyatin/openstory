@@ -58,7 +58,14 @@ export const characterReadSchema = createSelectSchema(characters)
     updatedAt: readDate,
     effectiveUseVoice: z.boolean(),
     voicePreviews: z
-      .array(z.object({ generatedVoiceId: z.string(), url: z.string() }))
+      .array(
+        z.object({
+          generatedVoiceId: z.string(),
+          url: z.string(),
+          takeNumber: z.number().int().positive().optional(),
+          unusable: z.enum(['saved', 'expired']).optional(),
+        })
+      )
       .nullable(),
     selectedSheet: referenceSchema.nullable(),
   });

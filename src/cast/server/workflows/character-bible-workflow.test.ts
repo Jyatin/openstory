@@ -32,7 +32,10 @@ function makeWorkflow(): Probe {
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- tests construct the entrypoint directly; runImpl never reads ctx
   const ctx = undefined as unknown as Ctor[0];
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- the binding is only handed to the (mocked) spawn
-  const env = { CHARACTER_SHEET_WORKFLOW: {} } as unknown as Ctor[1];
+  const env = {
+    CHARACTER_SHEET_WORKFLOW: {},
+    CHARACTER_VOICE_WORKFLOW: {},
+  } as unknown as Ctor[1];
   return new Probe(ctx, env);
 }
 
@@ -46,11 +49,25 @@ function makeStep(): WorkflowStep {
 const characterCreate = vi.fn(
   async (row: { id: string; characterId: string }) => row
 );
+const createPendingVoiceClaim = vi.fn(
+  async (): Promise<{
+    version: { id: string; workflowRunId: string | null };
+    created: boolean;
+  }> => ({
+    version: { id: 'husk-1', workflowRunId: null },
+    created: true,
+  })
+);
+const markVoiceClaimTerminal = vi.fn(async () => ({ id: 'husk-1' }));
 
 function makeScopedDb(): WorkflowScopedDb {
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stub covering only the scoped-db surface runImpl touches
   return {
-    characters: { create: characterCreate },
+    characters: {
+      create: characterCreate,
+      createPendingVoiceClaim,
+      markVoiceClaimTerminal,
+    },
   } as unknown as WorkflowScopedDb;
 }
 
@@ -87,7 +104,8 @@ const narrator = entry({
 });
 
 function makeEvent(
-  characterBible: CharacterBibleEntry[] = [sam, narrator]
+  characterBible: CharacterBibleEntry[] = [sam, narrator],
+  opts: { generateVoices?: boolean; speakingCharacterIds?: string[] } = {}
 ): Readonly<WorkflowEvent<CharacterBibleWorkflowInput>> {
   return {
     payload: {
@@ -95,8 +113,8 @@ function makeEvent(
       teamId: 'team-1',
       sequenceId: 'seq-1',
       characterBible,
-      generateVoices: false,
-      speakingCharacterIds: [],
+      generateVoices: opts.generateVoices ?? false,
+      speakingCharacterIds: opts.speakingCharacterIds ?? [],
       analysisModelId: 'anthropic/claude-sonnet-5',
     },
     instanceId: 'run-1',
@@ -213,5 +231,121 @@ describe('CharacterBibleWorkflow voice-only characters', () => {
         selectedSheetVersionId: 'ver-pat',
       }),
     ]);
+  });
+
+  it('stamps voice generating before spawning the voice child (#1715)', async () => {
+    mockSpawnAndAwaitChild.mockImplementation(
+      async (_step: unknown, opts: { childId: string }) =>
+        opts.childId.startsWith('character-voice:')
+          ? { voiceId: 'voice-1', voiceDescription: 'Warm alto' }
+          : {
+              sheetImageUrl: '/r2/characters/sam.png',
+              sheetVersionId: 'ver-sam',
+            }
+    );
+    await makeWorkflow().runBody(
+      makeEvent([sam], { generateVoices: true, speakingCharacterIds: ['sam'] }),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(createPendingVoiceClaim).toHaveBeenCalledWith(
+      expect.any(String),
+      'u1'
+    );
+    expect(mockSpawnAndAwaitChild).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        childId: expect.stringMatching(/^character-voice:/),
+        childPayload: expect.objectContaining({ targetVersionId: 'husk-1' }),
+      })
+    );
+  });
+
+  it('fails the husk if the voice child never starts (#1715)', async () => {
+    mockSpawnAndAwaitChild.mockImplementation(
+      async (_step: unknown, opts: { childId: string }) => {
+        if (opts.childId.startsWith('character-voice:')) {
+          throw new Error('workflow binding missing');
+        }
+        return {
+          sheetImageUrl: '/r2/characters/sam.png',
+          sheetVersionId: 'ver-sam',
+        };
+      }
+    );
+    await makeWorkflow().runBody(
+      makeEvent([sam], { generateVoices: true, speakingCharacterIds: ['sam'] }),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(markVoiceClaimTerminal).toHaveBeenCalledWith(
+      'husk-1',
+      'failed',
+      'workflow binding missing'
+    );
+  });
+
+  it('skips spawn when a live husk already has a run id (#1715)', async () => {
+    createPendingVoiceClaim.mockResolvedValueOnce({
+      version: { id: 'husk-live', workflowRunId: 'run-live' },
+      created: false,
+    });
+    mockSpawnAndAwaitChild.mockImplementation(
+      async (_step: unknown, opts: { childId: string }) =>
+        opts.childId.startsWith('character-voice:')
+          ? { voiceId: 'voice-1', voiceDescription: 'Warm alto' }
+          : {
+              sheetImageUrl: '/r2/characters/sam.png',
+              sheetVersionId: 'ver-sam',
+            }
+    );
+    await makeWorkflow().runBody(
+      makeEvent([sam], { generateVoices: true, speakingCharacterIds: ['sam'] }),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(mockSpawnAndAwaitChild).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        childId: expect.stringMatching(/^character-voice:/),
+      })
+    );
+    expect(markVoiceClaimTerminal).not.toHaveBeenCalled();
+  });
+
+  it('adopts a zombie husk and fails it if spawn never starts (#1715)', async () => {
+    createPendingVoiceClaim.mockResolvedValueOnce({
+      version: { id: 'husk-zombie', workflowRunId: null },
+      created: false,
+    });
+    mockSpawnAndAwaitChild.mockImplementation(
+      async (_step: unknown, opts: { childId: string }) => {
+        if (opts.childId.startsWith('character-voice:')) {
+          throw new Error('workflow binding missing');
+        }
+        return {
+          sheetImageUrl: '/r2/characters/sam.png',
+          sheetVersionId: 'ver-sam',
+        };
+      }
+    );
+    await makeWorkflow().runBody(
+      makeEvent([sam], { generateVoices: true, speakingCharacterIds: ['sam'] }),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(mockSpawnAndAwaitChild).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        childPayload: expect.objectContaining({
+          targetVersionId: 'husk-zombie',
+        }),
+      })
+    );
+    expect(markVoiceClaimTerminal).toHaveBeenCalledWith(
+      'husk-zombie',
+      'failed',
+      'workflow binding missing'
+    );
   });
 });

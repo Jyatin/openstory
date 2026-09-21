@@ -253,6 +253,331 @@ describe('characters bible CRUD + soft-remove', () => {
     expect(stamped.selectedVoiceVersionId).toBe(saved.selectedVoiceVersionId);
   });
 
+  it('creates a generating voice husk and points pending-promote at it (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk',
+      name: 'Maya',
+    });
+    const before = await methods.listVoiceVersions(created.id);
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    expect(husk.status).toBe('generating');
+    expect(husk.source).toBe('generated');
+    expect(husk.voiceId).toBeNull();
+    const live = await methods.getById(created.id);
+    expect(live?.pendingPromoteVoiceVersionId).toBe(husk.id);
+    expect(await methods.listVoiceVersions(created.id)).toHaveLength(
+      before.length + 1
+    );
+    expect(await methods.listLiveVoiceClaims(created.id)).toEqual([
+      expect.objectContaining({ id: husk.id, status: 'generating' }),
+    ]);
+  });
+
+  it('returns the existing live husk instead of inserting a second (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_unique',
+      name: 'Maya',
+    });
+    const first = await methods.createPendingVoiceClaim(created.id, actorId);
+    const second = await methods.createPendingVoiceClaim(created.id, actorId);
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.version.id).toBe(first.version.id);
+    expect(await methods.listLiveVoiceClaims(created.id)).toHaveLength(1);
+  });
+
+  it('does not touch the live voice while a husk is inserted or completed (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_keep_live',
+      name: 'Maya',
+    });
+    const saved = await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-old', voiceDescription: 'Original' },
+      'generated',
+      actorId
+    );
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    const afterInsert = await methods.getById(created.id);
+    expect(afterInsert?.voiceId).toBe('voice-old');
+    expect(afterInsert?.selectedVoiceVersionId).toBe(
+      saved.selectedVoiceVersionId
+    );
+    expect(afterInsert?.pendingPromoteVoiceVersionId).toBe(husk.id);
+    await methods.completeVoiceClaimIfLive(husk.id, { voiceId: 'voice-new' });
+    const afterComplete = await methods.getById(created.id);
+    expect(afterComplete?.voiceId).toBe('voice-old');
+    expect(afterComplete?.selectedVoiceVersionId).toBe(
+      saved.selectedVoiceVersionId
+    );
+    const promoted = await methods.promoteVoiceClaimIfPending(
+      created.id,
+      husk.id
+    );
+    expect(promoted?.voiceId).toBe('voice-new');
+    expect(promoted?.selectedVoiceVersionId).toBe(husk.id);
+  });
+
+  it('completes a live husk in place without appending history (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_complete',
+      name: 'Maya',
+    });
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    const completed = await methods.completeVoiceClaimIfLive(husk.id, {
+      voiceId: 'voice-new',
+      description: 'Warm alto',
+      previews: [
+        {
+          generatedVoiceId: 'take-1',
+          url: '/r2/a.mp3',
+          path: 'a.mp3',
+          takeNumber: 1,
+        },
+      ],
+    });
+    expect(completed?.id).toBe(husk.id);
+    expect(completed?.status).toBe('completed');
+    expect(completed?.voiceId).toBe('voice-new');
+    expect(await methods.listVoiceVersions(created.id)).toHaveLength(1);
+    expect(await methods.listLiveVoiceClaims(created.id)).toEqual([]);
+    expect(
+      await methods.completeVoiceClaimIfLive(husk.id, { voiceId: 'other' })
+    ).toBeNull();
+  });
+
+  it('does not complete a husk that already failed (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_fail',
+      name: 'Maya',
+    });
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    const failed = await methods.markVoiceClaimTerminal(
+      husk.id,
+      'failed',
+      'Voice Design returned no previews'
+    );
+    expect(failed?.status).toBe('failed');
+    expect(failed?.error).toBe('Voice Design returned no previews');
+    const after = await methods.getById(created.id);
+    expect(after?.pendingPromoteVoiceVersionId).toBeNull();
+    expect(
+      await methods.completeVoiceClaimIfLive(husk.id, { voiceId: 'voice-x' })
+    ).toBeNull();
+  });
+
+  it('clears pending-promote when selecting a different completed voice (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_demote',
+      name: 'Maya',
+    });
+    const saved = await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-a', voiceDescription: 'Original' },
+      'generated',
+      actorId
+    );
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    expect(
+      (await methods.getById(created.id))?.pendingPromoteVoiceVersionId
+    ).toBe(husk.id);
+    if (!saved.selectedVoiceVersionId) {
+      throw new Error('expected a selected voice version');
+    }
+    const restored = await methods.selectVoiceVersion(
+      created.id,
+      saved.selectedVoiceVersionId
+    );
+    expect(restored.pendingPromoteVoiceVersionId).toBeNull();
+    expect(restored.voiceId).toBe('voice-a');
+  });
+
+  it('promotes a completed husk only while pending-promote still names it (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_promote',
+      name: 'Maya',
+    });
+    await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-old', voiceDescription: 'Original' },
+      'generated',
+      actorId
+    );
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    await methods.completeVoiceClaimIfLive(husk.id, {
+      voiceId: 'voice-new',
+      description: 'Warm alto',
+      previews: [
+        {
+          generatedVoiceId: 'take-1',
+          url: '/r2/a.mp3',
+          path: 'a.mp3',
+          takeNumber: 1,
+        },
+      ],
+    });
+    const promoted = await methods.promoteVoiceClaimIfPending(
+      created.id,
+      husk.id
+    );
+    expect(promoted?.voiceId).toBe('voice-new');
+    expect(promoted?.selectedVoiceVersionId).toBe(husk.id);
+    expect(promoted?.pendingPromoteVoiceVersionId).toBeNull();
+  });
+
+  it('does not promote when the pointer moved mid-run (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_promote_demote',
+      name: 'Maya',
+    });
+    await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-old', voiceDescription: 'Original' },
+      'generated',
+      actorId
+    );
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    await methods.completeVoiceClaimIfLive(husk.id, {
+      voiceId: 'voice-new',
+    });
+    await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-lib' },
+      'library',
+      actorId
+    );
+    expect(
+      (await methods.getById(created.id))?.pendingPromoteVoiceVersionId
+    ).toBeNull();
+    expect(
+      await methods.promoteVoiceClaimIfPending(created.id, husk.id)
+    ).toBeNull();
+    const live = await methods.getById(created.id);
+    expect(live?.voiceId).toBe('voice-lib');
+    expect(live?.pendingPromoteVoiceVersionId).toBeNull();
+  });
+
+  it('does not promote a generating husk or a completed empty husk (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_promote_empty',
+      name: 'Maya',
+    });
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    expect(
+      await methods.promoteVoiceClaimIfPending(created.id, husk.id)
+    ).toBeNull();
+    await methods.completeVoiceClaimIfLive(husk.id, { voiceId: null });
+    expect(
+      await methods.promoteVoiceClaimIfPending(created.id, husk.id)
+    ).toBeNull();
+  });
+
+  it('clears pending-promote on a library updateVoice (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_library_demote',
+      name: 'Maya',
+    });
+    await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-a' },
+      'generated',
+      actorId
+    );
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    await methods.updateVoice(
+      created.id,
+      { voiceId: 'voice-lib' },
+      'library',
+      actorId
+    );
+    const live = await methods.getById(created.id);
+    expect(live?.pendingPromoteVoiceVersionId).toBeNull();
+    expect(live?.voiceId).toBe('voice-lib');
+    expect(
+      await methods.promoteVoiceClaimIfPending(created.id, husk.id)
+    ).toBeNull();
+  });
+
+  it('refuses to select a generating voice husk (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_select',
+      name: 'Maya',
+    });
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    await expect(
+      methods.selectVoiceVersion(created.id, husk.id)
+    ).rejects.toThrow(/not finished/i);
+  });
+
+  it('refuses to select a completed husk with no voiceId (#1715)', async () => {
+    const methods = createCharactersMethods(db);
+    const created = await methods.create({
+      sequenceId,
+      characterId: 'voice_husk_empty_select',
+      name: 'Maya',
+    });
+    const { version: husk } = await methods.createPendingVoiceClaim(
+      created.id,
+      actorId
+    );
+    await methods.completeVoiceClaimIfLive(husk.id, { voiceId: null });
+    await expect(
+      methods.selectVoiceVersion(created.id, husk.id)
+    ).rejects.toThrow(/no saved take/i);
+  });
+
   it('refuses a released voice version, across every character holding the id', async () => {
     const methods = createCharactersMethods(db);
     const maya = await methods.create({

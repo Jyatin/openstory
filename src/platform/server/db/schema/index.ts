@@ -312,7 +312,10 @@ export type { SequenceExport } from './sequence-exports';
 // Characters (scripted roles)
 export { characters, characterVoiceVersions };
 
-export type { CharacterVoiceVersionSource } from './character-voice-versions';
+export type {
+  CharacterVoiceVersionSource,
+  CharacterVoiceVersionStatus,
+} from './character-voice-versions';
 
 export type {
   CharacterWithSheet,

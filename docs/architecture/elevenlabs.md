@@ -32,6 +32,26 @@ unaudited like xAI/Google/Ark spend. Do not alias onto
 overrides it per character (NULL = inherit) — resolve with `usesVoice()`.
 The launcher refuses the flag when `isElevenLabsConfigured()` is false and
 the Generate dialog hides the switch (`getVoiceDesignAvailableFn`).
+In-flight Voice Design is a stills-style husk (#1715): a
+`character_voice_versions` row with `status: 'generating'` (no `voiceId` /
+previews yet) and `characters.pendingPromoteVoiceVersionId` pointing at it.
+`generateCharacterVoiceFn` and `CharacterBibleWorkflow` insert the husk
+before trigger / spawn; a second Generate while live no-ops. The current
+saved voice stays until the husk promotes (do not release first). The child
+stamps `workflowRunId` from `event.instanceId` on its first step so reconcile
+can verify the child (bible insert has no run id). Persist completes that
+row in place and selects it only if the pointer still names it. Picking a
+library voice or an older history row mid-run clears
+`pendingPromoteVoiceVersionId` (demote); persist then fails the husk and
+releases the unused ElevenLabs id. `onFailure` and the reconcile sweep mark
+the husk failed (5 min verified with a run id; 30 min blind-fail if none).
+Verified means the husk is older than 5 min and `resolveRunState` is not
+`null`/`unknown` — an in-flight stamped run is skipped. Blind 30 min is for
+unstamped husks (insert-then-crash, or bible spawn before
+`stamp-voice-claim-run`). A stamped bible child running up to the 30 min
+spawn timeout is protected by the in-flight skip, not the blind timer.
+The card shows a Pending take while a generating husk exists; history lists
+completed rows that have a `voiceId`.
 `CharacterBibleWorkflow` spawns a `CharacterVoiceWorkflow` child per
 _speaking_ character (`speakingCharacterIds()`: a bible name sharing a
 non-stopword token with a dialogue speaker cue, or equal to it once
@@ -70,7 +90,7 @@ delete, and the upsert keeps a voice the row already holds. Billed at
 `VOICE_DESIGN_COST` per design call; pre-flight prices one call per
 estimated character (`generateVoices` on `estimateStoryboardCost`), the
 in-run gate the real speaking count. **Voices are versioned (#1657):** every
-write appends a `character_voice_versions` row with an explicit `source`
+`updateVoice` write appends a `character_voice_versions` row with an explicit `source`
 ('analysis' | 'generated' | 'library' | 'user-edit' | 'disabled' |
 'removed' — never inferred from which columns moved) and moves
 `characters.selectedVoiceVersionId`, the only selection pointer, whose values

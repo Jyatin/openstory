@@ -60,6 +60,7 @@ function makeCharacter(
     sheetInputHash: 'jack-hash-v1',
     selectedSheetVersionId: null,
     selectedVoiceVersionId: null,
+    pendingPromoteVoiceVersionId: null,
     talentId: null,
     firstMentionLine: null,
     firstMentionText: null,

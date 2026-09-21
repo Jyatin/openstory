@@ -56,6 +56,7 @@ function makeCharacter(
     voicePreviews: null,
     useVoice: null,
     selectedVoiceVersionId: null,
+    pendingPromoteVoiceVersionId: null,
     consistencyTag: 'jack-the-pi',
     sheetImageUrl: 'https://example.com/jack.png',
     sheetImagePath: null,

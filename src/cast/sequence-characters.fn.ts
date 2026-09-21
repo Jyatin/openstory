@@ -27,6 +27,7 @@ import { triggerWorkflow } from '@/platform/server/workflow/client';
 import type { RecastCharacterWorkflowInput } from '@/platform/server/workflow/types';
 import { buildRecastRegenerateSnapshots } from '@/cast/server/workflows/recast-snapshot';
 import { characterToBible } from '@/cast/server/bibles-from-scoped';
+import { enqueueCharacterVoiceDesign } from '@/cast/server/voice/enqueue-character-voice';
 import {
   releaseCharacterVoice,
   releaseReplacedVoice,
@@ -44,11 +45,6 @@ import {
   saveDesignedVoice,
   type AssignableVoicePick,
 } from '@/cast/server/voice/elevenlabs-voice';
-import {
-  DEFAULT_ANALYSIS_MODEL,
-  getAnalysisModelById,
-} from '@/models/models.config';
-import type { CharacterVoiceWorkflowInput } from '@/platform/server/workflow/types';
 import { buildRegenerateCharacterSheetPayload } from '@/cast/server/sheets/character-sheet-trigger';
 import type { SheetStaleness } from '@/cast/server/sheets/sheet-staleness';
 import { characterSheetHashMatchesStored } from '@/cast/server/workflows/sheet-snapshots';
@@ -221,9 +217,9 @@ export const softDeleteSequenceCharacterFn = createServerFn({ method: 'POST' })
   });
 
 /**
- * Design (or re-design) a character's voice (#1553). The old voice is
- * released before the run starts so a regenerate never holds two slots; the
- * workflow drafts a description from the bible when the row has none.
+ * Design (or re-design) a character's voice (#1553 / #1715). Inserts a
+ * generating husk and keeps the current voice until that husk promotes.
+ * A second Generate while a live husk exists no-ops (`alreadyInFlight`).
  */
 export const generateCharacterVoiceFn = createServerFn({ method: 'POST' })
   .middleware([sequenceAccessMiddleware])
@@ -233,20 +229,28 @@ export const generateCharacterVoiceFn = createServerFn({ method: 'POST' })
       throw new ValidationError('Voice design is not configured');
     }
     const character = await requireCharacter(context.scopedDb, data);
-    await releaseCharacterVoice(context.scopedDb, character, context.user.id);
-    const payload: CharacterVoiceWorkflowInput = {
+    const enqueued = await enqueueCharacterVoiceDesign({
+      scopedDb: context.scopedDb,
+      character,
       userId: context.user.id,
-      teamId: context.teamId,
-      sequenceId: character.sequenceId,
-      characterDbId: character.id,
-      characterBible: characterToBible(character),
-      voiceDescription: character.voiceDescription ?? '',
-      analysisModelId:
-        getAnalysisModelById(context.sequence.analysisModel)?.id ??
-        DEFAULT_ANALYSIS_MODEL,
+      analysisModel: context.sequence.analysisModel,
+      trigger: (payload) => triggerWorkflow('/character-voice', payload),
+    });
+    if (!enqueued.alreadyInFlight) {
+      try {
+        await getGenerationChannel(character.sequenceId).emit(
+          'generation.character-voice:progress',
+          { characterId: character.id, status: 'generating' }
+        );
+      } catch (error) {
+        logger.error('realtime emit failed', { err: error });
+      }
+    }
+    return {
+      characterId: enqueued.characterId,
+      workflowRunId: enqueued.workflowRunId,
+      alreadyInFlight: enqueued.alreadyInFlight,
     };
-    const workflowRunId = await triggerWorkflow('/character-voice', payload);
-    return { characterId: character.id, workflowRunId };
   });
 
 /**

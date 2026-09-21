@@ -12,6 +12,8 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  characterVoiceVersions,
+  characters,
   framePromptVersions,
   frameVariants,
   generatedAssets,
@@ -31,8 +33,10 @@ type SchemaTable =
   | typeof generatedAssets
   | typeof framePromptVersions
   | typeof shotPromptVersions
-  | typeof frameVariants;
-type SetPayload = Record<string, Date | string>;
+  | typeof frameVariants
+  | typeof characterVoiceVersions
+  | typeof characters;
+type SetPayload = Record<string, Date | string | null>;
 type UpdateCall = {
   table: SchemaTable;
   payload: SetPayload;
@@ -186,13 +190,13 @@ describe('reconcileAllStuckJobs — run-id-verified passes', () => {
   test('caps stuck-row selection at MAX_ROWS_PER_PASS (100) per verified pass', async () => {
     const { reconcileAllStuckJobs } = await import('./reconcile-all');
     await reconcileAllStuckJobs();
-    // 11 verified (run-id) passes: frames.image + frame_variants.status +
+    // 12 verified (run-id) passes: frames.image + frame_variants.status +
     // video_variants.status (#1076) + 2 shot_variants + sequences.status (#989)
     // + generated_assets.status (#458) + the three pending-claim passes (#1085:
     // frame/shot prompt claims + image claims) + dialogue recording claims
-    // (#1657). The old shots.video pass went with the shot's video columns —
-    // video_variants.status already swept it.
-    expect(limitArgs.filter((n) => n === 100)).toHaveLength(11);
+    // (#1657) + character voice husks (#1715). The old shots.video pass went
+    // with the shot's video columns — video_variants.status already swept it.
+    expect(limitArgs.filter((n) => n === 100)).toHaveLength(12);
   });
 
   test('in-flight instance (resolveRunState null) → no per-row update on verified tables', async () => {
@@ -406,5 +410,70 @@ describe('reconcileAllStuckJobs — pending artifact claim passes (#1085)', () =
     );
     expect(orphanFail).toBeDefined();
     expect(counts['frame_prompt_versions.claims']).toBeGreaterThan(0);
+  });
+});
+
+describe('reconcileAllStuckJobs — character voice husks (#1715)', () => {
+  test('dead instance → husk failed and pending-promote pointer cleared', async () => {
+    stuckRows = [{ id: 'cvv_1', runId: 'openstory-so_character-voice_dead' }];
+    stuckSelectTable = characterVoiceVersions;
+    runStateResult = 'failed';
+    const { reconcileAllStuckJobs } = await import('./reconcile-all');
+
+    const counts = await reconcileAllStuckJobs();
+
+    const huskFail = updateCalls.find(
+      (c) =>
+        c.table === characterVoiceVersions &&
+        c.returning &&
+        c.payload.status === 'failed'
+    );
+    expect(huskFail).toBeDefined();
+    expect(huskFail?.payload.error).toMatch(/died before completing/);
+    const pointerClear = updateCalls.find(
+      (c) =>
+        c.table === characters &&
+        c.payload.pendingPromoteVoiceVersionId === null
+    );
+    expect(pointerClear).toBeDefined();
+    expect('updatedAt' in (pointerClear?.payload ?? {})).toBe(false);
+    expect(counts['character_voice_versions.claims']).toBeGreaterThan(0);
+  });
+
+  test('in-flight instance → no husk fail', async () => {
+    stuckRows = [
+      { id: 'cvv_1', runId: 'openstory-so_character-voice_running' },
+    ];
+    stuckSelectTable = characterVoiceVersions;
+    runStateResult = null;
+    const { reconcileAllStuckJobs } = await import('./reconcile-all');
+
+    const counts = await reconcileAllStuckJobs();
+
+    // Verified path continues without a status-guarded fail. The orphan
+    // UPDATE is still issued (returns no rows here). Count stays 0.
+    expect(counts['character_voice_versions.claims']).toBe(0);
+  });
+
+  test('orphan husk (no run id) blind-fails and clears the pointer', async () => {
+    blindFailReturning = [{ id: 'cvv_orphan' }];
+    const { reconcileAllStuckJobs } = await import('./reconcile-all');
+
+    const counts = await reconcileAllStuckJobs();
+
+    const orphanFail = updateCalls.find(
+      (c) =>
+        c.table === characterVoiceVersions &&
+        c.returning &&
+        c.payload.status === 'failed'
+    );
+    expect(orphanFail).toBeDefined();
+    const pointerClear = updateCalls.find(
+      (c) =>
+        c.table === characters &&
+        c.payload.pendingPromoteVoiceVersionId === null
+    );
+    expect(pointerClear).toBeDefined();
+    expect(counts['character_voice_versions.claims']).toBeGreaterThan(0);
   });
 });

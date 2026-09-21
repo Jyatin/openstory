@@ -97,6 +97,12 @@ export const characters = snakeCase.table(
     // moves the pointer and the mirror together. Null on rows from before
     // voice history, and until the first voice write.
     selectedVoiceVersionId: text(),
+    // Soft pointer to the in-flight `character_voice_versions` husk that
+    // should become selected when Voice Design completes (#1715) — same job
+    // as `frames.pendingPromoteVersionId`. One live husk (a second Generate
+    // no-ops); picking a completed voice or failing this husk clears it.
+    // Persist promotes only when this still names the finishing row.
+    pendingPromoteVoiceVersionId: text(),
     consistencyTag: text(), // e.g. "char_001: Jack-denim-jacket"
     // First appearance in script
     firstMentionSceneId: text(),

@@ -186,11 +186,12 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       };
     });
 
-    // Voices (#1553) ride alongside the sheets: one child per speaking
-    // character that resolves `usesVoice()` true and has none yet. A failed
-    // child is logged (its own `onFailure` emitted the realtime `failed`
-    // event for the card) and the run goes on — that character's lines just
-    // have no designed voice for dialogue TTS (#1554).
+    // Voices (#1553 / #1715) ride alongside the sheets: insert a generating
+    // husk, then spawn one child per speaking character that resolves
+    // `usesVoice()` true and has none yet. A failed child is logged (its own
+    // `onFailure` emitted the realtime `failed` event for the card) and the
+    // run goes on — that character's lines just have no designed voice for
+    // dialogue TTS (#1554). If spawn never starts, this parent fails the husk.
     const sequenceId = input.sequenceId;
     const voiceByCharacterId = new Map<string, string>();
     for (const row of createdCharacters) {
@@ -209,17 +210,31 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
           (c) => c.characterId === row.characterId
         );
         if (!character || sequenceId === undefined) return;
-        const childPayload: CharacterVoiceWorkflowInput = {
-          userId: input.userId,
-          teamId: input.teamId,
-          sequenceId,
-          reservationId: input.reservationId,
-          characterDbId: row.id,
-          characterBible: character,
-          voiceDescription: row.voiceDescription ?? '',
-          analysisModelId: input.analysisModelId,
-        };
+        let huskId: string | undefined;
         try {
+          const claim = await step.do(
+            `mark-voice-generating-${row.characterId}`,
+            async () =>
+              await scopedDb.characters.createPendingVoiceClaim(
+                row.id,
+                input.userId
+              )
+          );
+          huskId = claim.version.id;
+          if (!claim.created && claim.version.workflowRunId) {
+            return;
+          }
+          const childPayload: CharacterVoiceWorkflowInput = {
+            userId: input.userId,
+            teamId: input.teamId,
+            sequenceId,
+            reservationId: input.reservationId,
+            characterDbId: row.id,
+            characterBible: character,
+            voiceDescription: row.voiceDescription ?? '',
+            analysisModelId: input.analysisModelId,
+            targetVersionId: claim.version.id,
+          };
           const result = await spawnAndAwaitChild<
             CharacterVoiceWorkflowInput,
             CharacterVoiceWorkflowResult
@@ -233,7 +248,7 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
             awaitStepName: `await-character-voice-${row.characterId}`,
             timeout: '30 minutes',
           });
-          if (result?.voiceId) {
+          if (result.voiceId) {
             voiceByCharacterId.set(row.characterId, result.voiceId);
           }
         } catch (err) {
@@ -241,6 +256,15 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
             `[CharacterBibleWorkflow:cf] Child character-voice failed for ${character.name}:`,
             { err }
           );
+          // Spawn never started → child onFailure will not run. Fail the
+          // husk so the unique live claim does not block Generate.
+          if (huskId) {
+            await scopedDb.characters.markVoiceClaimTerminal(
+              huskId,
+              'failed',
+              err instanceof Error ? err.message : String(err)
+            );
+          }
         }
       });
 

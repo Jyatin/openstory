@@ -34,7 +34,7 @@ import { Switch } from '@/ui/shadcn/switch';
 import { cn } from '@/ui/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import { Library, Loader2, Mic } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 /**
@@ -52,7 +52,6 @@ export const CharacterVoiceSection: React.FC<{
   const setEnabled = useSetCharacterVoiceEnabled();
   const chooseTake = useChooseCharacterVoiceTake();
   const assignVoice = useAssignCharacterVoice();
-  const [isDesigning, setIsDesigning] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const enabled = usesVoice(character, { generateVoices });
   const { data: savedVoice } = useSavedVoiceMeta(
@@ -60,6 +59,29 @@ export const CharacterVoiceSection: React.FC<{
     character.voiceId,
     enabled
   );
+  const { data: versions } = useCharacterVoiceVersions(
+    sequenceId,
+    character.id
+  );
+  const pendingHusk = versions?.find(
+    (version) => version.status === 'generating' || version.status === 'pending'
+  );
+  const hadLiveHusk = useRef(false);
+
+  useEffect(() => {
+    if (pendingHusk) {
+      hadLiveHusk.current = true;
+      return;
+    }
+    if (!hadLiveHusk.current) return;
+    hadLiveHusk.current = false;
+    void queryClient.invalidateQueries({
+      queryKey: sequenceCharacterKeys.list(sequenceId),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: elevenLabsVoiceKeys.saved(character.id),
+    });
+  }, [pendingHusk, character.id, queryClient, sequenceId]);
 
   useRealtime({
     channels: [sequenceId],
@@ -77,7 +99,12 @@ export const CharacterVoiceSection: React.FC<{
         ) {
           return;
         }
-        setIsDesigning(data.status === 'generating');
+        void queryClient.invalidateQueries({
+          queryKey: sequenceCharacterKeys.voiceVersions(
+            sequenceId,
+            character.id
+          ),
+        });
         if (data.status === 'failed') {
           toast.error('Voice design failed', {
             description:
@@ -99,7 +126,8 @@ export const CharacterVoiceSection: React.FC<{
     ),
   });
 
-  const busy = isDesigning || generate.isPending || assignVoice.isPending;
+  const designing = Boolean(pendingHusk) || generate.isPending;
+  const busy = designing || assignVoice.isPending;
   const takes = designedTakesForDisplay(
     character.voicePreviews ?? [],
     character.voiceId,
@@ -176,8 +204,16 @@ export const CharacterVoiceSection: React.FC<{
       </div>
       {enabled && (
         <>
-          {character.voiceId || takes.length > 0 ? (
+          {character.voiceId || takes.length > 0 || designing ? (
             <div className="flex flex-col gap-3">
+              {pendingHusk && (
+                <section className="flex flex-col gap-2" aria-label="Pending">
+                  <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Pending
+                  </p>
+                  <VoiceTakeCard src={null} label="Designing voice" pending />
+                </section>
+              )}
               {(inUseTake || catalogVoice || character.voiceId) && (
                 <section className="flex flex-col gap-2" aria-label="In use">
                   <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -237,9 +273,7 @@ export const CharacterVoiceSection: React.FC<{
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
-              {busy
-                ? 'Designing voice…'
-                : 'No voice yet. Browse the library or generate one.'}
+              No voice yet. Browse the library or generate one.
             </p>
           )}
           <VoiceHistory sequenceId={sequenceId} character={character} />
@@ -260,7 +294,6 @@ export const CharacterVoiceSection: React.FC<{
                   generate.mutate(
                     { sequenceId, characterId: character.id },
                     {
-                      onSuccess: () => setIsDesigning(true),
                       onError: (error) =>
                         toast.error('Failed to design voice', {
                           description: errorMessage(error),
@@ -269,16 +302,15 @@ export const CharacterVoiceSection: React.FC<{
                   )
                 }
               >
-                {isDesigning || generate.isPending ? (
+                {designing ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 ) : (
                   <Mic className="mr-2 h-4 w-4" />
                 )}
-                {isDesigning || generate.isPending
-                  ? 'Designing…'
-                  : character.voiceId
-                    ? 'Regenerate voice'
-                    : 'Generate voice'}
+                {generateVoiceButtonLabel(
+                  designing,
+                  Boolean(character.voiceId || takes.length > 0)
+                )}
               </Button>
               <ActionCost estimate={VOICE_DESIGN_COST} />
             </div>
@@ -297,6 +329,15 @@ export const CharacterVoiceSection: React.FC<{
     </div>
   );
 };
+
+function generateVoiceButtonLabel(
+  designing: boolean,
+  hasVoice: boolean
+): string {
+  if (designing) return 'Designing…';
+  if (hasVoice) return 'Regenerate voice';
+  return 'Generate voice';
+}
 
 /** What put this voice on the character — the history row's own label. */
 const VOICE_SOURCE_LABELS: Record<CharacterVoiceVersionSource, string> = {
@@ -329,14 +370,17 @@ const VoiceHistory: React.FC<{
       </p>
     );
   }
-  if (!versions || versions.length < 2) return null;
+  const completed = versions?.filter(
+    (version) => version.status === 'completed' && version.voiceId
+  );
+  if (!completed || completed.length < 2) return null;
   return (
     <section className="flex flex-col gap-2" aria-label="Voice history">
       <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
         History
       </p>
       <ul className="flex flex-col gap-1">
-        {versions.map((version) => {
+        {completed.map((version) => {
           const current = version.id === character.selectedVoiceVersionId;
           const released = Boolean(version.releasedAt);
           const created = new Date(version.createdAt);
@@ -369,7 +413,7 @@ const VoiceHistory: React.FC<{
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={released || select.isPending}
+                  disabled={released || !version.voiceId || select.isPending}
                   aria-label={`Use the ${VOICE_SOURCE_LABELS[
                     version.source
                   ].toLowerCase()} voice from ${created.toLocaleDateString()}`}
@@ -405,6 +449,7 @@ const VoiceTakeCard: React.FC<{
   label: string;
   inUse?: boolean;
   isPremade?: boolean;
+  pending?: boolean;
   disabled?: boolean;
   choosing?: boolean;
   unusable?: 'saved' | 'expired';
@@ -414,6 +459,7 @@ const VoiceTakeCard: React.FC<{
   label,
   inUse = false,
   isPremade,
+  pending = false,
   disabled,
   choosing,
   unusable,
@@ -425,34 +471,90 @@ const VoiceTakeCard: React.FC<{
       inUse ? 'border-primary ring-2 ring-primary/40' : 'border-border'
     )}
     aria-current={inUse ? 'true' : undefined}
+    aria-busy={pending || undefined}
   >
     <div className="flex items-center justify-between gap-2">
       <p className="truncate text-sm font-medium">{label}</p>
-      {inUse ? (
-        <Badge variant="default">{isPremade ? 'Default' : 'In use'}</Badge>
-      ) : unusable ? (
-        <p className="text-xs text-muted-foreground">
-          {unusable === 'expired' ? 'Expired' : 'Already used'}
-        </p>
-      ) : (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          aria-label={choosing ? `Using ${label}` : `Use ${label}`}
-          onClick={onUse}
-        >
-          {choosing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-          {choosing ? 'Using…' : 'Use this take'}
-        </Button>
-      )}
+      <VoiceTakeCardAction
+        pending={pending}
+        inUse={inUse}
+        isPremade={isPremade}
+        unusable={unusable}
+        disabled={disabled}
+        choosing={choosing}
+        label={label}
+        onUse={onUse}
+      />
     </div>
-    {src ? (
-      // oxlint-disable-next-line jsx-a11y/media-has-caption -- a voice audition has no words to caption
-      <audio controls preload="none" src={src} className="w-full" />
-    ) : (
-      <p className="text-xs text-muted-foreground">No preview</p>
-    )}
+    <VoiceTakeCardPreview pending={pending} src={src} />
   </div>
 );
+
+const VoiceTakeCardAction: React.FC<{
+  pending: boolean;
+  inUse: boolean;
+  isPremade?: boolean;
+  unusable?: 'saved' | 'expired';
+  disabled?: boolean;
+  choosing?: boolean;
+  label: string;
+  onUse?: () => void;
+}> = ({
+  pending,
+  inUse,
+  isPremade,
+  unusable,
+  disabled,
+  choosing,
+  label,
+  onUse,
+}) => {
+  if (pending) return <Badge variant="secondary">Generating…</Badge>;
+  if (inUse) {
+    return <Badge variant="default">{isPremade ? 'Default' : 'In use'}</Badge>;
+  }
+  if (unusable) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        {unusable === 'expired' ? 'Expired' : 'Already used'}
+      </p>
+    );
+  }
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      disabled={disabled}
+      aria-label={choosing ? `Using ${label}` : `Use ${label}`}
+      onClick={onUse}
+    >
+      {choosing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+      {choosing ? 'Using…' : 'Use this take'}
+    </Button>
+  );
+};
+
+const VoiceTakeCardPreview: React.FC<{
+  pending: boolean;
+  src: string | null;
+}> = ({ pending, src }) => {
+  if (pending) {
+    return (
+      <div className="flex min-h-8 items-center gap-2 text-xs text-muted-foreground">
+        <Loader2
+          className="h-4 w-4 animate-spin motion-reduce:animate-none"
+          aria-hidden
+        />
+        Designing…
+      </div>
+    );
+  }
+  if (src) {
+    return (
+      // oxlint-disable-next-line jsx-a11y/media-has-caption -- a voice audition has no words to caption
+      <audio controls preload="none" src={src} className="w-full" />
+    );
+  }
+  return <p className="text-xs text-muted-foreground">No preview</p>;
+};

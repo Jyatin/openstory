@@ -137,9 +137,16 @@ function invalidateAfterVoiceChange(
 
 /** Voice design (#1553): the workflow's realtime events refresh the list. */
 export function useGenerateCharacterVoice() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: { sequenceId: string; characterId: string }) =>
       generateCharacterVoiceFn({ data }),
+    onSuccess: (_result, { sequenceId, characterId }) => {
+      invalidateAfterVoiceChange(queryClient, sequenceId);
+      void queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.voiceVersions(sequenceId, characterId),
+      });
+    },
   });
 }
 
@@ -207,6 +214,19 @@ export function useCharacterVoiceVersions(
     queryKey: sequenceCharacterKeys.voiceVersions(sequenceId, characterId),
     queryFn: () =>
       listCharacterVoiceVersionsFn({ data: { sequenceId, characterId } }),
+    // Realtime can miss the terminal event; poll while a husk is live so
+    // the Pending take does not stick after persist (#1715).
+    refetchInterval: (query) => {
+      const rows = query.state.data;
+      if (
+        !rows?.some(
+          (row) => row.status === 'generating' || row.status === 'pending'
+        )
+      ) {
+        return false;
+      }
+      return 2000;
+    },
   });
 }
 

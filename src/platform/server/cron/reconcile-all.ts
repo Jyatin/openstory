@@ -29,6 +29,8 @@ import {
   sequenceElements,
   sequences,
   shotDialogueClaims,
+  characterVoiceVersions,
+  characters,
   videoVariants,
 } from '@/platform/server/db/schema';
 import {
@@ -86,6 +88,10 @@ export async function reconcileAllStuckJobs(): Promise<ReconcileCounts> {
     // dead motion run leaves a permanent "generating" chip on the Video tab
     // (#1076).
     ['video_variants.status', () => reconcileVideoVariantsPass(db)],
+    [
+      'character_voice_versions.claims',
+      () => reconcileCharacterVoiceClaimsPass(db),
+    ],
     ['shot_variants.status', () => reconcileShotVariantsPass(db, 'primary')],
     [
       'shot_variants.shot_variant',
@@ -204,6 +210,83 @@ async function reconcileFrameVariantsPass(db: Database): Promise<number> {
     updated++;
   }
   return updated;
+}
+
+/**
+ * Sweep zombie Voice Design husks (#1715). A dead run must not leave a
+ * permanent Pending take on the character card. Fail a still-live husk
+ * whose instance is `completed` or `failed` (never copy instance status onto
+ * the husk — that would mint an empty completed take). Verified (has run id)
+ * at 5 min when `resolveRunState` is terminal; insert-then-crash orphans with
+ * no run id blind-fail at 30 min. A stamped in-flight child is skipped at
+ * 5 min, including a bible child that can run up to the 30 min spawn timeout.
+ */
+async function reconcileCharacterVoiceClaimsPass(
+  db: Database
+): Promise<number> {
+  const staleCutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
+  const blindCutoff = new Date(Date.now() - BLIND_FAIL_THRESHOLD_MS);
+  const liveStatuses = ['pending', 'generating'] as const;
+  const clearPointer = async (versionId: string) => {
+    await db
+      .update(characters)
+      .set({ pendingPromoteVoiceVersionId: null })
+      .where(eq(characters.pendingPromoteVoiceVersionId, versionId));
+  };
+
+  const stuck = await db
+    .select({
+      id: characterVoiceVersions.id,
+      runId: characterVoiceVersions.workflowRunId,
+    })
+    .from(characterVoiceVersions)
+    .where(
+      and(
+        inArray(characterVoiceVersions.status, [...liveStatuses]),
+        isNotNull(characterVoiceVersions.workflowRunId),
+        lt(characterVoiceVersions.createdAt, staleCutoff)
+      )
+    )
+    .limit(MAX_ROWS_PER_PASS);
+  let updated = 0;
+  for (const row of stuck) {
+    const next = await resolveRunState(row.runId ?? '');
+    if (next === null || next === 'unknown') continue;
+    const transitioned = await db
+      .update(characterVoiceVersions)
+      .set({
+        status: 'failed',
+        error: 'Generation died before completing',
+      })
+      .where(
+        and(
+          eq(characterVoiceVersions.id, row.id),
+          inArray(characterVoiceVersions.status, [...liveStatuses])
+        )
+      )
+      .returning({ id: characterVoiceVersions.id });
+    if (transitioned.length === 0) continue;
+    await clearPointer(row.id);
+    updated++;
+  }
+
+  const orphaned = await db
+    .update(characterVoiceVersions)
+    .set({
+      status: 'failed',
+      error: 'Generation died before completing',
+    })
+    .where(
+      and(
+        inArray(characterVoiceVersions.status, [...liveStatuses]),
+        isNull(characterVoiceVersions.workflowRunId),
+        lt(characterVoiceVersions.createdAt, blindCutoff)
+      )
+    )
+    .returning({ id: characterVoiceVersions.id });
+  for (const row of orphaned) await clearPointer(row.id);
+
+  return updated + orphaned.length;
 }
 
 /**

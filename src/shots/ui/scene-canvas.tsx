@@ -167,8 +167,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = ({
   );
 
   const playbackScenes = useMemo(
-    () => toPlaybackScenes(scopedShots),
-    [scopedShots]
+    () => toPlaybackScenes(scopedShots, aspectRatio),
+    [scopedShots, aspectRatio]
   );
 
   const setMusicEnabled = useSetSequenceMusic(sequence?.id ?? '');
@@ -255,36 +255,12 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = ({
   }
 
   if (playbackScenes.length === 0) {
-    // No video to play yet — fall back to a still of the selection's first
-    // shot (#1091). ScenePlayer owns the image ladder (final thumbnail → fast
-    // preview) plus the generating/failed overlays, so early scenes show
-    // something the moment their first preview lands.
-    const stillShot =
-      scopedShots.find((s) => s.image?.url || s.previewThumbnailUrl) ??
-      scopedShots[0];
-    if (stillShot) {
-      return (
-        <CanvasMediaStage aspectRatio={aspectRatio}>
-          <ScenePlayer
-            shots={shots}
-            scenes={scenes}
-            selectedShotId={stillShot.id}
-            aspectRatio={aspectRatio}
-            progressMessage={progressMessage}
-            posterUrl={sequence?.posterUrl ?? undefined}
-            sequence={sequence}
-            className="h-full max-h-none w-full"
-            wrapperClassName="h-full w-full"
-          />
-        </CanvasMediaStage>
-      );
-    }
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 py-16">
         <Film className="h-8 w-8 text-muted-foreground" />
         <p className="text-muted-foreground">No scenes ready to play yet</p>
         <p className="max-w-md text-center text-sm text-muted-foreground">
-          Generate motion for your shots to preview playback here.
+          Add shots to preview playback here.
         </p>
       </div>
     );
@@ -309,7 +285,8 @@ export const SceneCanvas: React.FC<SceneCanvasProps> = ({
         autoPlay={autoPlay}
         onAutoPlayConsumed={onAutoPlayConsumed}
         cachedVideoUrl={
-          scope !== 'sequence'
+          scope !== 'sequence' ||
+          playbackScenes.some((scene) => !('videoUrl' in scene))
             ? null
             : sequenceExport.isCacheResolved
               ? sequenceExport.freshExportUrl

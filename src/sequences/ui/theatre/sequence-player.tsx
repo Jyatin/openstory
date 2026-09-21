@@ -99,6 +99,9 @@ export const SequencePlayer: React.FC<SequencePlayerProps> = ({
   const posthog = usePostHog();
   const mounted = useMounted();
   const scenesKey = scenePlaybackKey(scenes);
+  // An exported MP4 cannot represent shots that still have no video.
+  const hasStills = scenes.some((scene) => !('videoUrl' in scene));
+  if (hasStills) cachedVideoUrl = null;
 
   const [meta, setMeta] = useState<SequencePlayerMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -232,8 +235,20 @@ export const SequencePlayer: React.FC<SequencePlayerProps> = ({
           {stitchError}
         </p>
         <p className="text-xs text-muted-foreground text-center max-w-sm">
-          Export your sequence to download an MP4 you can play in any browser.
+          {hasStills
+            ? 'Check your connection and retry playback.'
+            : 'Export your sequence to download an MP4 you can play in any browser.'}
         </p>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setMeta(null);
+            setLoadedScenes(0);
+            setError(null);
+          }}
+        >
+          Retry playback
+        </Button>
       </div>
     );
   }

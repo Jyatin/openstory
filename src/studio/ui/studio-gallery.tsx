@@ -21,6 +21,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
 import { EmptyState } from '@/ui/shadcn/empty-state';
 import { Skeleton } from '@/ui/shadcn/skeleton';
 import { AppImage } from '@/ui/shadcn/app-image';
+import { ElementThumbnail } from '@/cast/ui/element/element-thumbnail';
+import { HighlightedPrompt } from '@/ui/text-editor/mention/highlighted-prompt';
+import type { MentionItem } from '@/shots/ui/prompt-mention/mention-items';
 import {
   useDeleteStudioAsset,
   useStudioPendingCreates,
@@ -37,14 +40,35 @@ import {
   studioShareUrl,
 } from './outputs';
 import {
+  readableStudioPrompt,
+  studioGenerationFacts,
+  studioReuse,
+  studioShownReferences,
+  type StudioReuse,
+  type StudioShownReference,
+} from './prompt-display';
+import {
   CONTENT_REJECTION_USER_TITLE,
   isContentRejectionError,
 } from '@/models/content-rejection';
 import { estimateStudioProgress } from './progress';
 import { copyTextToClipboard } from '@/ui/clipboard';
+import { VideoPlayer } from '@/motion/ui/video-player';
+import type { AspectRatio } from '@/models/aspect-ratios';
 import { cn } from '@/ui/utils';
 import { usePostHog } from '@posthog/react';
-import { Download, Images, Link, Star, Trash2 } from 'lucide-react';
+import {
+  AudioLines,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  Images,
+  Link,
+  RotateCcw,
+  Star,
+  Trash2,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -281,11 +305,27 @@ function StudioShareMenu({
   );
 }
 
+/**
+ * VideoPlayer derives its height from its width, and its own width is
+ * `w-full`. The frame around it has to be a real width — a shrink-to-fit
+ * parent collapses, and the share buttons then float in the empty pane.
+ * Cap that width so the derived height stays inside the dialog.
+ */
+function studioPlayerWidth(aspect: AspectRatio): string {
+  if (aspect === '9:16')
+    return 'max-w-[min(100%,28vh)] md:max-w-[min(100%,42vh)]';
+  if (aspect === '1:1')
+    return 'max-w-[min(100%,46vh)] md:max-w-[min(100%,72vh)]';
+  return 'max-w-[min(100%,82vh)] md:max-w-[min(100%,128vh)]';
+}
+
 /** The opened asset at viewer size: the media fills the dialog, letterboxed. */
 function StudioViewer({ asset }: { asset: GeneratedAsset }) {
   const primary = studioPrimaryOutput(asset);
   const poster = studioPosterOutput(asset);
   const prompt = studioPrompt(asset);
+  const aspect = studioAspectRatio(asset);
+  const video = primary?.contentType.startsWith('video/') ?? false;
   if (asset.status === 'failed') {
     return (
       <p className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-4 text-center text-sm break-words text-destructive select-text">
@@ -297,32 +337,245 @@ function StudioViewer({ asset }: { asset: GeneratedAsset }) {
     return <Skeleton className="min-h-0 flex-1 rounded-lg" />;
   }
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg bg-muted">
-      <div className="group relative max-w-full">
-        {primary.contentType.startsWith('video/') ? (
-          <video
+    <div className="flex min-h-0 w-full min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg bg-muted">
+      <div
+        className={cn(
+          'relative max-w-full',
+          video ? cn('w-full', studioPlayerWidth(aspect)) : 'w-fit'
+        )}
+      >
+        {video ? (
+          <VideoPlayer
             src={primary.url}
-            poster={poster?.url}
-            controls
+            posterSrc={poster?.url}
+            aspectRatio={aspect}
             autoPlay
-            loop
-            playsInline
-            className="block max-h-[calc(94vh-12rem)] max-w-full object-contain"
-          >
-            <track kind="captions" />
-          </video>
+            playSource="modal"
+            className="overflow-hidden rounded-lg"
+          />
         ) : (
           <img
             src={primary.url}
             alt={prompt || 'Generated image'}
-            className="block max-h-[calc(94vh-12rem)] max-w-full object-contain"
+            className="block max-h-full max-w-full object-contain"
           />
         )}
         <StudioShareMenu
           asset={asset}
-          className="absolute top-2 right-2 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          className="absolute top-2 right-14 z-30 md:right-2"
         />
       </div>
+    </div>
+  );
+}
+
+function mentionItems(references: StudioShownReference[]): MentionItem[] {
+  return references.flatMap((reference) =>
+    reference.tag
+      ? [
+          {
+            id: reference.tag,
+            section: 'references' as const,
+            label: reference.label,
+            tag: reference.tag,
+            haystack: reference.tag.toLowerCase(),
+          },
+        ]
+      : []
+  );
+}
+
+function ReferenceTile({ reference }: { reference: StudioShownReference }) {
+  return (
+    <li className="w-16 shrink-0">
+      <figure className="flex flex-col items-center gap-1">
+        <div className="size-16 overflow-hidden rounded-md border bg-muted">
+          {reference.kind === 'audio' ? (
+            <div className="flex size-16 items-center justify-center">
+              <AudioLines
+                className="size-5 text-muted-foreground"
+                aria-hidden="true"
+              />
+            </div>
+          ) : reference.kind === 'video' ? (
+            <ElementThumbnail
+              kind="video"
+              url={reference.url}
+              label={reference.label}
+              fit="cover"
+            />
+          ) : (
+            <AppImage
+              src={reference.url}
+              alt=""
+              width={64}
+              height={64}
+              className="size-16 object-cover"
+            />
+          )}
+        </div>
+        <figcaption className="w-full truncate text-center font-mono text-xs text-muted-foreground">
+          {reference.label}
+        </figcaption>
+      </figure>
+    </li>
+  );
+}
+
+/**
+ * The clip fills the dialog. The recipe sits against it and only grows with
+ * its content: model, settings, the references, the prompt, then the actions.
+ * The prompt is the one flexible row: a short one leaves the card compact, a
+ * long one grows the card to the dialog's height and then scrolls inside it,
+ * so the header and the actions never move.
+ */
+export function GenerationDetail({
+  asset,
+  supportMode,
+  copied,
+  onCopy,
+  onReuse,
+  deletePending,
+  onDelete,
+  onPrev,
+  onNext,
+}: {
+  asset: StudioGalleryAsset;
+  supportMode: boolean;
+  copied: boolean;
+  onCopy: (prompt: string) => void;
+  onReuse?: (reuse: StudioReuse) => void;
+  deletePending: boolean;
+  onDelete: () => void;
+  /** Step to the neighbouring generation in the gallery; absent at the ends. */
+  onPrev?: () => void;
+  onNext?: () => void;
+}) {
+  const prompt = readableStudioPrompt(studioPrompt(asset));
+  const references = studioShownReferences(asset);
+  const reuse = studioReuse(asset);
+  const creator = [asset.creatorName, asset.creatorEmail]
+    .filter(Boolean)
+    .join(' · ');
+  const facts = [
+    ...studioGenerationFacts(asset),
+    supportMode ? creator : '',
+  ].filter(Boolean);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-muted md:flex-row">
+      <div className="relative flex min-h-48 min-w-0 flex-1 p-3 md:p-4">
+        <StudioViewer asset={asset} />
+        {onPrev && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Previous generation"
+            className="absolute top-1/2 left-4 -translate-y-1/2 rounded-full pointer-coarse:size-11"
+            onClick={onPrev}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </Button>
+        )}
+        {onNext && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Next generation"
+            className="absolute top-1/2 right-4 -translate-y-1/2 rounded-full pointer-coarse:size-11"
+            onClick={onNext}
+          >
+            <ChevronRight aria-hidden="true" />
+          </Button>
+        )}
+      </div>
+      <aside className="flex max-h-[40%] w-full shrink-0 flex-col gap-3 overflow-y-auto border-t bg-popover p-4 md:max-h-full md:w-96 md:self-start md:overflow-hidden md:border-t-0 md:border-l md:pr-12">
+        <DialogHeader className="shrink-0">
+          <DialogTitle>{asset.modelName || 'Generation'}</DialogTitle>
+          <DialogDescription>{facts.join(' · ')}</DialogDescription>
+        </DialogHeader>
+        {references.length > 0 && (
+          <ul
+            className="flex shrink-0 gap-2 overflow-x-auto"
+            aria-label="References"
+          >
+            {references.map((reference) => (
+              <ReferenceTile
+                key={`${reference.label}-${reference.url}`}
+                reference={reference}
+              />
+            ))}
+          </ul>
+        )}
+        <div className="max-h-64 overflow-y-auto md:max-h-none md:min-h-0 md:flex-1">
+          {prompt ? (
+            <HighlightedPrompt
+              text={prompt}
+              items={mentionItems(references)}
+              className="text-sm leading-relaxed break-words select-text"
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">No prompt</p>
+          )}
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="pointer-coarse:h-11"
+            disabled={!prompt}
+            aria-label={copied ? 'Copied prompt' : 'Copy prompt'}
+            onClick={() => onCopy(prompt)}
+          >
+            <Copy aria-hidden="true" />
+            {copied ? 'Copied' : 'Copy prompt'}
+          </Button>
+          {onReuse && reuse && (
+            <Button
+              type="button"
+              className="pointer-coarse:h-11"
+              onClick={() => onReuse(reuse)}
+            >
+              <RotateCcw aria-hidden="true" />
+              Use again
+            </Button>
+          )}
+          {!supportMode &&
+            asset.status !== 'queued' &&
+            asset.status !== 'running' && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="destructive"
+                    className="ml-auto pointer-coarse:size-11"
+                    disabled={deletePending}
+                    aria-label="Delete"
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete this generation?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      It is removed from your library for good.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Keep</AlertDialogCancel>
+                    <AlertDialogAction onClick={onDelete}>
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+        </div>
+      </aside>
     </div>
   );
 }
@@ -336,6 +589,7 @@ export function StudioGallery({
   isFetchingNextPage,
   onLoadMore,
   supportMode = false,
+  onReuse,
 }: {
   assets: StudioGalleryAsset[];
   isLoading: boolean;
@@ -345,10 +599,42 @@ export function StudioGallery({
   isFetchingNextPage: boolean;
   onLoadMore: () => void;
   supportMode?: boolean;
+  /** Load this generation's prompt and references into the composer. */
+  onReuse?: (reuse: StudioReuse) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const remove = useDeleteStudioAsset();
-  const openAsset = assets.find((asset) => asset.id === openId);
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+  const openIndex = assets.findIndex((asset) => asset.id === openId);
+  const openAsset = openIndex === -1 ? undefined : assets[openIndex];
+  const prevAsset = openIndex > 0 ? assets[openIndex - 1] : undefined;
+  const nextAsset = openAsset ? assets[openIndex + 1] : undefined;
+  const step = (target: StudioGalleryAsset | undefined) => {
+    if (!target) return;
+    setOpenId(target.id);
+    setCopied(false);
+  };
+  useEffect(() => {
+    if (!openAsset) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || target.closest('input, textarea'))
+      )
+        return;
+      if (event.key === 'ArrowLeft') step(prevAsset);
+      else if (event.key === 'ArrowRight') step(nextAsset);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   const pendingCreates = useStudioPendingCreates(activity);
   const pending = supportMode
     ? []
@@ -434,74 +720,41 @@ export function StudioGallery({
       <Dialog
         open={openAsset != null}
         onOpenChange={(open) => {
-          if (!open) setOpenId(null);
+          if (!open) {
+            setOpenId(null);
+            setCopied(false);
+          }
         }}
       >
-        <DialogContent className="flex h-[94vh] w-[96vw] max-w-none flex-col gap-3 p-4 sm:max-w-none">
+        <DialogContent className="flex h-[94vh] w-[96vw] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
           {openAsset && (
-            <>
-              <DialogHeader className="shrink-0">
-                {/* Scrolls rather than clamps: the prompt is what people
-                    copy to reuse, and a clamp hides most of it. */}
-                <DialogTitle className="max-h-24 overflow-y-auto pr-8 text-base break-words whitespace-pre-wrap select-text">
-                  {studioPrompt(openAsset) || 'Generated asset'}
-                </DialogTitle>
-                <DialogDescription>
-                  {[
-                    openAsset.modelName,
-                    studioAspectRatio(openAsset),
-                    supportMode
-                      ? [openAsset.creatorName, openAsset.creatorEmail]
-                          .filter(Boolean)
-                          .join(' · ')
-                      : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </DialogDescription>
-              </DialogHeader>
-              <StudioViewer asset={openAsset} />
-              <div className="flex shrink-0 items-center justify-end gap-2">
-                {!supportMode &&
-                  openAsset.status !== 'queued' &&
-                  openAsset.status !== 'running' && (
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="destructive"
-                          disabled={remove.isPending}
-                        >
-                          <Trash2 aria-hidden="true" />
-                          Delete
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>
-                            Delete this generation?
-                          </AlertDialogTitle>
-                          <AlertDialogDescription>
-                            It is removed from your library for good.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Keep</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => {
-                              remove.mutate(openAsset.id, {
-                                onSuccess: () => setOpenId(null),
-                              });
-                            }}
-                          >
-                            Delete
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
-                  )}
-              </div>
-            </>
+            <GenerationDetail
+              asset={openAsset}
+              supportMode={supportMode}
+              copied={copied}
+              onCopy={(prompt) => {
+                void copyTextToClipboard(prompt).then((ok) => {
+                  if (ok) setCopied(true);
+                });
+              }}
+              onReuse={
+                onReuse
+                  ? (reuse) => {
+                      setOpenId(null);
+                      setCopied(false);
+                      onReuse(reuse);
+                    }
+                  : undefined
+              }
+              deletePending={remove.isPending}
+              onDelete={() => {
+                remove.mutate(openAsset.id, {
+                  onSuccess: () => setOpenId(null),
+                });
+              }}
+              onPrev={prevAsset ? () => step(prevAsset) : undefined}
+              onNext={nextAsset ? () => step(nextAsset) : undefined}
+            />
           )}
         </DialogContent>
       </Dialog>

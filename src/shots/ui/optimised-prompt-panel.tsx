@@ -35,9 +35,11 @@ export const OptimisedPromptPanel: React.FC<{
 }> = ({ preview, copiedKey, onCopy, footnote, idPrefix, defaultOpen }) => {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const [view, setView] = useState<PreviewView>('prompt');
-  const overLimit = preview
-    ? preview.promptLength > preview.maxPromptLength
-    : false;
+  // Over the model's RECOMMENDATION, not a block (#1754) — the prompt is
+  // sent whole either way, so this is amber-shaped advice, not a failure.
+  const overRecommended =
+    preview?.maxPromptLength !== undefined &&
+    preview.promptLength > preview.maxPromptLength;
   const headingId = `${idPrefix}-heading`;
   const previewId = `${idPrefix}-preview`;
   const copyKey = `${idPrefix}-${view}`;
@@ -74,12 +76,20 @@ export const OptimisedPromptPanel: React.FC<{
                 <span
                   className={cn(
                     'shrink-0 text-xs font-normal tabular-nums',
-                    overLimit
-                      ? 'font-medium text-destructive'
+                    overRecommended
+                      ? 'font-medium text-warning'
                       : 'text-muted-foreground'
                   )}
+                  title={
+                    overRecommended
+                      ? `Over ${preview.modelName}'s recommended ${preview.maxPromptLength} ${preview.promptLengthUnit}. It is still sent in full.`
+                      : undefined
+                  }
                 >
-                  {preview.promptLength}&nbsp;/&nbsp;{preview.maxPromptLength}
+                  {preview.promptLength}
+                  {preview.maxPromptLength !== undefined && (
+                    <>&nbsp;/&nbsp;{preview.maxPromptLength}</>
+                  )}
                 </span>
               )}
             </span>

@@ -8,7 +8,11 @@
  */
 
 import { NATIVE_GROK_VIDEO_MODEL } from '@/models/grok-native';
-import { IMAGE_TO_VIDEO_MODELS, type ImageToVideoModel } from '@/models/models';
+import {
+  IMAGE_TO_VIDEO_MODELS,
+  videoPromptHardLimit,
+  type ImageToVideoModel,
+} from '@/models/models';
 import type { AspectRatio } from '@/models/aspect-ratios';
 import { pickVideoResolution, type Resolution } from '@/models/resolutions';
 import type { GrokVideoProviderOptions } from '@tanstack/ai-grok';
@@ -17,6 +21,7 @@ import {
   buildReferenceVideoPrompt,
   type ReferencePromptBinding,
 } from './build-reference-video-prompt';
+import { assertPromptWithinHardLimit } from '@/models/prompt-length';
 
 /**
  * Imagine 1.5 reference-to-video: up to 7 library refs, tagged `<IMAGE_0>`,
@@ -140,7 +145,14 @@ export function buildGrokVideoRequest(options: {
   input: GrokVideoRequestInput;
 } {
   const modelKey = options.model ?? 'grok_imagine_video_1_5';
-  const maxPromptLength = IMAGE_TO_VIDEO_MODELS[modelKey].maxPromptLength;
+  // xAI answers 400 naming 4096, so this one is a real ceiling (#1754):
+  // refuse rather than cut, and let the motion rescue shorten and save it as
+  // a prompt version the user can see and revert.
+  assertPromptWithinHardLimit(
+    options.prompt,
+    videoPromptHardLimit(modelKey),
+    IMAGE_TO_VIDEO_MODELS[modelKey].name
+  );
   const references = options.referenceImages ?? [];
   const attached = references.filter((ref) => ref.referenceImageUrl);
   const duration = options.duration ?? 5;
@@ -153,16 +165,12 @@ export function buildGrokVideoRequest(options: {
   const startFrameUrl = options.imageUrl;
 
   if (attached.length === 0) {
-    const text =
-      options.prompt.length <= maxPromptLength
-        ? options.prompt
-        : `${options.prompt.slice(0, maxPromptLength - 3)}...`;
     return {
       endpointId: NATIVE_GROK_VIDEO_MODEL,
       input: {
         // Reference-only with nothing matched is text-to-video: no image parts.
         prompt: grokVideoPromptParts(
-          text,
+          options.prompt,
           startFrameUrl ? [{ url: startFrameUrl, role: 'start_frame' }] : []
         ),
         duration,
@@ -178,8 +186,7 @@ export function buildGrokVideoRequest(options: {
     GROK_VIDEO_REFERENCE_CONFIG,
     options.prompt,
     null,
-    references,
-    maxPromptLength
+    references
   );
   // Only image references reach `imageUrls` — xAI has no reference clip slot,
   // and its audio slot takes a preset `voice_id` rather than a file (#1559) —

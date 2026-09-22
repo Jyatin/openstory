@@ -18,7 +18,8 @@ import { MotionModelSelector } from '@/models/ui/pickers/motion-model-selector';
 import type { MentionItem } from '@/shots/ui/prompt-mention/mention-items';
 import { AspectRatioPills } from '@/ui/settings/aspect-ratio-pills';
 import { ResolutionPills } from '@/ui/settings/resolution-pills';
-import { IMAGE_MODELS } from '@/models/models';
+import { IMAGE_MODELS, videoPromptHardLimit } from '@/models/models';
+import { measurePrompt, promptLengthUnit } from '@/models/prompt-length';
 import { imageResolutionTiers } from '@/stills/build-image-request';
 import { motionResolutionTiers } from '@/motion/model-capabilities';
 import {
@@ -355,6 +356,7 @@ export function StudioComposer({
   const { ref: promptEditorRef, voice: promptVoice } = useEditorDictation();
   const [replaceConfirm, setReplaceConfirm] = useState(false);
   const [emptyPrompt, setEmptyPrompt] = useState(false);
+  const [promptTooLongOpen, setPromptTooLongOpen] = useState(false);
 
   // Reference is the default: it is what the tiles, @ list and picker are for.
   const [mode, setMode] = useState<StudioVideoMode>('reference');
@@ -454,6 +456,29 @@ export function StudioComposer({
   const activeModelName = isVideo
     ? IMAGE_TO_VIDEO_MODELS[compatibleVideoModel].name
     : IMAGE_MODELS[imageModel].name;
+  // The prompt is never cut (#1754), so the composer says how long it is and
+  // when it runs past what the model recommends.
+  const promptRecommendation = isVideo
+    ? IMAGE_TO_VIDEO_MODELS[compatibleVideoModel]
+    : IMAGE_MODELS[imageModel];
+  // Seedance's recommendation is in words, as Ark states it; the rest count
+  // characters. Hard limits are always characters (fal's schema field).
+  const promptUnit = promptLengthUnit(promptRecommendation);
+  const promptMeasured = measurePrompt(prompt, promptRecommendation);
+  // No number (native Grok images) means nothing to be over.
+  const promptOverRecommended =
+    promptRecommendation.maxPromptLength !== undefined &&
+    promptMeasured > promptRecommendation.maxPromptLength;
+  // Where the via enforces a ceiling, studio REFUSES rather than shortens.
+  // Sequences can shorten because the rewrite lands as a prompt version the
+  // user can read and revert; studio has no version history, so the same
+  // rewrite would be an invisible edit — exactly what #1754 removed. The red
+  // counter stands, and `submit` toasts the numbers on the click.
+  const promptHardLimit = isVideo
+    ? videoPromptHardLimit(compatibleVideoModel)
+    : undefined;
+  const promptTooLong =
+    promptHardLimit !== undefined && prompt.length > promptHardLimit;
   const resolutionTiers = isVideo
     ? motionResolutionTiers(compatibleVideoModel)
     : imageResolutionTiers(imageModel, aspectRatio);
@@ -1059,6 +1084,14 @@ export function StudioComposer({
 
   const submit = () => {
     if (!canSubmit || create.isPending) return;
+    if (promptTooLong) {
+      // The red counter is the standing signal; the click is where we say why
+      // nothing happened. A dialog, not a toast: the toast covered the button
+      // it was explaining. Studio refuses rather than shortening — it has no
+      // prompt versions, so a rewrite would be invisible (#1754).
+      setPromptTooLongOpen(true);
+      return;
+    }
     if (trimmed.length === 0) {
       posthog.capture('empty_prompt_generate_clicked', {
         surface: 'studio',
@@ -1549,6 +1582,36 @@ export function StudioComposer({
           </PopoverContent>
         </Popover>
 
+        {prompt.length > 0 && (
+          <output
+            className={cn(
+              'text-xs tabular-nums',
+              promptTooLong
+                ? 'font-medium text-destructive'
+                : promptOverRecommended
+                  ? 'text-warning'
+                  : 'text-muted-foreground'
+            )}
+            title={
+              promptTooLong
+                ? `${activeModelName} maxes out at ${promptHardLimit} characters.`
+                : promptOverRecommended
+                  ? `Over ${activeModelName}'s recommended ${promptRecommendation.maxPromptLength} ${promptUnit}. It is still sent in full.`
+                  : promptRecommendation.maxPromptLength !== undefined
+                    ? `${activeModelName} recommends up to ${promptRecommendation.maxPromptLength} ${promptUnit}.`
+                    : `${activeModelName} sets no prompt length.`
+            }
+          >
+            {promptMeasured}
+            {(promptHardLimit ?? promptRecommendation.maxPromptLength) !==
+              undefined && (
+              <>
+                &nbsp;/&nbsp;
+                {promptHardLimit ?? promptRecommendation.maxPromptLength}
+              </>
+            )}
+          </output>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -1644,6 +1707,21 @@ export function StudioComposer({
           if (picker) void uploadFiles(files, picker);
         }}
       />
+
+      <AlertDialog open={promptTooLongOpen} onOpenChange={setPromptTooLongOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Prompt too long</AlertDialogTitle>
+            <AlertDialogDescription>
+              {activeModelName} maxes out at {promptHardLimit} characters. Yours
+              is {prompt.length}.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction>Got it</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={emptyPrompt} onOpenChange={setEmptyPrompt}>
         <AlertDialogContent>

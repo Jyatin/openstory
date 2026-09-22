@@ -46,7 +46,11 @@ export const IMAGE_TO_VIDEO_MODELS = {
     vendor: 'SpaceXAI',
     license: 'proprietary' as const,
     qualityRank: 1,
-    maxPromptLength: 2500,
+    // xAI answers 400 "Prompt length exceeds the maximum allowed length of
+    // 4096" past this, so it is a real ceiling (#1754). The 2500 we first
+    // wrote here was wrong — the live API's number is 4096.
+    maxPromptLength: 4096,
+    enforcesPromptLimit: true,
     supportsAudio: false,
     // One take per clip — packing would invent in-clip cuts Grok cannot follow.
     supportsInClipMultiShot: false,
@@ -65,7 +69,9 @@ export const IMAGE_TO_VIDEO_MODELS = {
     supportsAudio: false,
     // Defaults to multi-shot; a 1-shot segment pins "single unbroken scene".
     supportsInClipMultiShot: true,
+    // fal's schema declares 20000 and rejects past it (#1754).
     maxPromptLength: 20000,
+    enforcesPromptLimit: true,
     performance: { estimatedGenerationTime: 20, quality: 'best' as const },
   },
   kling_v3_pro: {
@@ -74,7 +80,9 @@ export const IMAGE_TO_VIDEO_MODELS = {
     vendor: 'Kling',
     license: 'proprietary' as const,
     qualityRank: 4,
+    // fal's schema declares 2500 and rejects past it (#1754).
     maxPromptLength: 2500,
+    enforcesPromptLimit: true,
     supportsAudio: true,
     // Packed via `multi_prompt[]` (1–15s per shot) + `shot_type: customize`.
     supportsInClipMultiShot: true,
@@ -92,7 +100,10 @@ export const IMAGE_TO_VIDEO_MODELS = {
     supportsAudio: true,
     // Timed shot list in the prompt.
     supportsInClipMultiShot: true,
-    maxPromptLength: 2500,
+    // fal's schema declares 50000 and rejects past it; our old 2500 was
+    // invented and quietly cut four fifths of a long prompt (#1754).
+    maxPromptLength: 50000,
+    enforcesPromptLimit: true,
     // PostHog p50 9.7s (n=74, 30d ending 2026-09-01).
     performance: { estimatedGenerationTime: 10, quality: 'best' as const },
   },
@@ -102,7 +113,13 @@ export const IMAGE_TO_VIDEO_MODELS = {
     vendor: 'ByteDance',
     license: 'proprietary' as const,
     qualityRank: 2,
-    maxPromptLength: 4096,
+    // Ark documents NO limit for Seedance — only a recommendation of "no more
+    // than 500 Chinese characters or 1,000 English words", and fal's Seedance
+    // schemas declare no `maxLength` on `prompt`. Counted in words, as Ark
+    // states it. Nothing enforces it — the old 4096 was ours and was silently
+    // cutting prompts (#1754).
+    maxPromptLength: 1000,
+    promptLengthUnit: 'words' as const,
     supportsAudio: true,
     // Shot 1/2/3 prose + `cut to`.
     supportsInClipMultiShot: true,
@@ -118,7 +135,13 @@ export const IMAGE_TO_VIDEO_MODELS = {
     vendor: 'ByteDance',
     license: 'proprietary' as const,
     qualityRank: 1,
-    maxPromptLength: 4096,
+    // Ark documents NO limit for Seedance — only a recommendation of "no more
+    // than 500 Chinese characters or 1,000 English words", and fal's Seedance
+    // schemas declare no `maxLength` on `prompt`. Counted in words, as Ark
+    // states it. Nothing enforces it — the old 4096 was ours and was silently
+    // cutting prompts (#1754).
+    maxPromptLength: 1000,
+    promptLengthUnit: 'words' as const,
     supportsAudio: true,
     // Shot N (0-Ns) paragraphs; 2.5 timestamps, no `cut to`.
     supportsInClipMultiShot: true,
@@ -141,7 +164,13 @@ export const IMAGE_TO_VIDEO_MODELS = {
     vendor: 'ByteDance',
     license: 'proprietary' as const,
     qualityRank: 6,
-    maxPromptLength: 4096,
+    // Ark documents NO limit for Seedance — only a recommendation of "no more
+    // than 500 Chinese characters or 1,000 English words", and fal's Seedance
+    // schemas declare no `maxLength` on `prompt`. Counted in words, as Ark
+    // states it. Nothing enforces it — the old 4096 was ours and was silently
+    // cutting prompts (#1754).
+    maxPromptLength: 1000,
+    promptLengthUnit: 'words' as const,
     supportsAudio: true,
     // Same in-clip syntax as Seedance 2.0.
     supportsInClipMultiShot: true,
@@ -153,6 +182,18 @@ export const IMAGE_TO_VIDEO_MODELS = {
     byteplusId: 'dreamina-seedance-2-0-mini-260615' as const,
   },
 } as const;
+
+/**
+ * The prompt ceiling the via actually enforces, or undefined where none is
+ * documented (#1754). Only this number refuses a prompt; `maxPromptLength` is
+ * a recommendation that earns a warning and is still sent whole.
+ */
+export function videoPromptHardLimit(
+  model: ImageToVideoModel
+): number | undefined {
+  const config = IMAGE_TO_VIDEO_MODELS[model];
+  return 'enforcesPromptLimit' in config ? config.maxPromptLength : undefined;
+}
 
 /**
  * Available models for image generation with rich metadata
@@ -204,7 +245,11 @@ export const IMAGE_MODELS = {
     qualityRank: 3,
     description:
       'Newest Imagine image model — 1K/2K, quality medium, edit up to 3 refs',
-    maxPromptLength: 4000,
+    // No number: Grok images always route natively and xAI documents no cap
+    // (fal's 8000 is fal's, not xAI's). The 4000 we carried was
+    // @tanstack/ai-grok's stale grok-2-image constant, which threw
+    // client-side — patched out under patches/ until upstream drops it (#1754).
+    maxPromptLength: undefined,
   },
   grok_imagine_image_quality: {
     id: 'xai/grok-imagine-image/quality/text-to-image' as const,
@@ -214,7 +259,8 @@ export const IMAGE_MODELS = {
     qualityRank: 3,
     description:
       'Quality Mode — higher fidelity and stronger text rendering, edit up to 3 refs',
-    maxPromptLength: 4000,
+    // As grok_imagine_image: native xAI, no documented cap, no number.
+    maxPromptLength: undefined,
   },
   flux_2_max: {
     id: 'fal-ai/flux-2-max' as const,
@@ -310,7 +356,8 @@ export const IMAGE_MODELS = {
     license: 'open-weight' as const,
     qualityRank: 99,
     description: 'Ultra-fast storyboard generation',
-    maxPromptLength: 2000,
+    // fal's schema declares 5000 (#1754).
+    maxPromptLength: 5000,
     hidden: true,
   },
 } as const;

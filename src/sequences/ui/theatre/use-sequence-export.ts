@@ -15,6 +15,7 @@ import { useShotsBySequence } from '@/shots/ui/use-shots';
 import {
   collapseConsecutiveUrls,
   scenePlaybackKey,
+  shouldFetchTheatrePlaylist,
   toPlaybackScenes,
 } from './playback-scenes';
 import {
@@ -23,6 +24,8 @@ import {
   sequenceExportInputsKey,
 } from './source-shots-hash';
 import { exportSequenceOnServer } from './server-export-client';
+import { captureVideoPlayFailed } from './player-events';
+import { theatrePlaylistFromHttp } from './theatre-playlist-from-http';
 import type { Sequence } from '@/platform/server/db/schema';
 import { copyTextToClipboard } from '@/ui/clipboard';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -223,10 +226,10 @@ export function useSequenceExport(
   const canExport = clipsTotal > 0 && clipsReady === clipsTotal;
 
   // The clip list is the cache key: a changed cut is a new URL, so neither the
-  // query nor the browser can serve the old list. The fetch is the warm-up —
-  // it makes any missing fragmented copies — and its success is what says the
-  // URL is safe to hand to the player.
-  const playlistKey = shots ? scenePlaybackKey(toPlaybackScenes(shots)) : '';
+  // query nor the browser can serve the old list. Success means every clip
+  // already has a fragmented copy from ingest, so the URL is safe to play.
+  const playbackScenes = shots ? toPlaybackScenes(shots) : [];
+  const playlistKey = shots ? scenePlaybackKey(playbackScenes) : '';
   const playback = useQuery({
     queryKey: ['theatre-playlist', sequenceId, playlistKey],
     queryFn: async ({ signal }) => {
@@ -238,15 +241,38 @@ export function useSequenceExport(
         b.toString(16).padStart(2, '0')
       ).join('');
       const url = `/api/sequences/${sequenceId}/theatre.m3u8?v=${version}`;
-      const response = await fetch(url, {
-        credentials: 'same-origin',
-        signal,
-      });
-      return response.ok ? url : null;
+      try {
+        const response = await fetch(url, {
+          credentials: 'same-origin',
+          signal,
+        });
+        if (!response.ok) {
+          captureVideoPlayFailed(posthog, {
+            source: 'theatre',
+            reason: `playlist_http_${response.status}`,
+            sequence_id: sequenceId,
+          });
+        }
+        return theatrePlaylistFromHttp(response.status, url);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (
+          error instanceof Error &&
+          error.message.startsWith('theatre playlist HTTP ')
+        ) {
+          throw error;
+        }
+        captureVideoPlayFailed(posthog, {
+          source: 'theatre',
+          reason: 'playlist_fetch_failed',
+          sequence_id: sequenceId,
+        });
+        throw error;
+      }
     },
-    enabled: Boolean(sequence) && playlistKey !== '',
+    enabled: Boolean(sequence) && shouldFetchTheatrePlaylist(playbackScenes),
     staleTime: Infinity,
-    retry: false,
+    retry: 2,
   });
   const playbackUrl = playback.isError ? null : playback.data;
 

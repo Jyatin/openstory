@@ -17,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/ui/shadcn/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/shadcn/tooltip';
 import { EmptyState } from '@/ui/shadcn/empty-state';
 import { Skeleton } from '@/ui/shadcn/skeleton';
 import { AppImage } from '@/ui/shadcn/app-image';
@@ -28,18 +29,24 @@ import {
 import type { GeneratedAsset } from '@/platform/server/db/schema';
 import {
   studioAspectRatio,
+  studioDownloadFilename,
+  studioDownloadHref,
   studioPosterOutput,
   studioPrimaryOutput,
   studioPrompt,
+  studioShareUrl,
 } from './outputs';
 import {
   CONTENT_REJECTION_USER_TITLE,
   isContentRejectionError,
 } from '@/models/content-rejection';
 import { estimateStudioProgress } from './progress';
+import { copyTextToClipboard } from '@/ui/clipboard';
 import { cn } from '@/ui/utils';
-import { Download, Images, Star, Trash2 } from 'lucide-react';
+import { usePostHog } from '@posthog/react';
+import { Download, Images, Link, Star, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
 
 /** Wall clock ticking once a second while `active`; null otherwise. */
 function useNow(active: boolean) {
@@ -133,8 +140,8 @@ function StudioCard({
           </div>
         )}
       </button>
-      {!supportMode && (
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-end p-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-end gap-1 p-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 group-has-[[data-state=open]]:opacity-100">
+        {!supportMode && (
           <Button
             type="button"
             size="icon"
@@ -154,8 +161,9 @@ function StudioCard({
               aria-hidden="true"
             />
           </Button>
-        </div>
-      )}
+        )}
+        <StudioShareMenu asset={asset} className="pointer-events-auto" />
+      </div>
       {supportMode && (asset.creatorName || asset.creatorEmail) && (
         <p className="pointer-events-none absolute inset-x-0 top-0 truncate bg-background/80 px-2 py-1 text-xs text-muted-foreground">
           <span>
@@ -196,6 +204,83 @@ function PendingCard({ aspectRatio }: { aspectRatio: string }) {
   );
 }
 
+/**
+ * Share and download pinned to the media. Share link copies the URL on click.
+ */
+function StudioShareMenu({
+  asset,
+  className,
+}: {
+  asset: GeneratedAsset;
+  className?: string;
+}) {
+  const posthog = usePostHog();
+  const primary = studioPrimaryOutput(asset);
+  if (!primary || asset.status !== 'completed') return null;
+
+  const video = primary.contentType.startsWith('video/');
+  const surface = video ? 'studio_video' : 'studio_image';
+
+  const copyLink = async () => {
+    posthog.capture('share_clicked', {
+      surface,
+      asset_id: asset.id,
+    });
+    const shareable = studioShareUrl(primary.url, window.location.origin);
+    if (!(await copyTextToClipboard(shareable))) {
+      toast.error('Failed to copy URL');
+      return;
+    }
+    toast.success('Copied');
+  };
+
+  const download = () => {
+    posthog.capture('export_clicked', {
+      surface,
+      asset_id: asset.id,
+    });
+    const a = document.createElement('a');
+    a.href = studioDownloadHref(primary.url);
+    a.download = studioDownloadFilename(asset.id, primary.contentType);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  return (
+    <div className={cn('flex gap-1', className)}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Download"
+            onClick={download}
+          >
+            <Download aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Download</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            aria-label="Share link"
+            onClick={() => void copyLink()}
+          >
+            <Link aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Share link</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
 /** The opened asset at viewer size: the media fills the dialog, letterboxed. */
 function StudioViewer({ asset }: { asset: GeneratedAsset }) {
   const primary = studioPrimaryOutput(asset);
@@ -213,25 +298,31 @@ function StudioViewer({ asset }: { asset: GeneratedAsset }) {
   }
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg bg-muted">
-      {primary.contentType.startsWith('video/') ? (
-        <video
-          src={primary.url}
-          poster={poster?.url}
-          controls
-          autoPlay
-          loop
-          playsInline
-          className="max-h-full max-w-full object-contain"
-        >
-          <track kind="captions" />
-        </video>
-      ) : (
-        <img
-          src={primary.url}
-          alt={prompt || 'Generated image'}
-          className="max-h-full max-w-full object-contain"
+      <div className="group relative max-w-full">
+        {primary.contentType.startsWith('video/') ? (
+          <video
+            src={primary.url}
+            poster={poster?.url}
+            controls
+            autoPlay
+            loop
+            playsInline
+            className="block max-h-[calc(94vh-12rem)] max-w-full object-contain"
+          >
+            <track kind="captions" />
+          </video>
+        ) : (
+          <img
+            src={primary.url}
+            alt={prompt || 'Generated image'}
+            className="block max-h-[calc(94vh-12rem)] max-w-full object-contain"
+          />
+        )}
+        <StudioShareMenu
+          asset={asset}
+          className="absolute top-2 right-2 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
         />
-      )}
+      </div>
     </div>
   );
 }
@@ -371,22 +462,6 @@ export function StudioGallery({
               </DialogHeader>
               <StudioViewer asset={openAsset} />
               <div className="flex shrink-0 items-center justify-end gap-2">
-                {(() => {
-                  const primary = studioPrimaryOutput(openAsset);
-                  if (!primary) return null;
-                  const ext = primary.contentType.split('/')[1] ?? 'bin';
-                  return (
-                    <Button asChild variant="outline">
-                      <a
-                        href={primary.url}
-                        download={`openstory-${openAsset.id}.${ext}`}
-                      >
-                        <Download aria-hidden="true" />
-                        Download
-                      </a>
-                    </Button>
-                  );
-                })()}
                 {!supportMode &&
                   openAsset.status !== 'queued' &&
                   openAsset.status !== 'running' && (

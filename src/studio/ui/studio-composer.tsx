@@ -104,7 +104,10 @@ import { pickShufflePrompt, studioShufflePrompts } from './prompt-shuffle';
 import { parseStudioPaste } from './paste-import';
 import type { StudioCreateInput, StudioReferenceKind } from '@/studio/schema';
 import {
+  dropStudioAlias,
   renumberStudioReferences,
+  unresolvedStudioReferences,
+  resolveStudioAliases,
   snapStudioVideoDuration,
   studioAudioLimit,
   studioCombinedRefCap,
@@ -168,14 +171,17 @@ function referenceMentionItem(
   index: number,
   kind: StudioReferenceToken = 'Image'
 ): MentionItem {
-  const tag = `${kind}${index + 1}`;
+  const slot = `${kind}${index + 1}`;
+  // A named reference (talent, location, element) keeps its name in the
+  // prompt (#1748); everything else is spelled by its slot.
+  const tag = reference.alias ?? slot;
   return {
     id: `ref:${kind}:${index}`,
     section: 'references',
     label: reference.label,
-    sublabel: `@${tag}`,
+    sublabel: `@${slot}`,
     tag,
-    haystack: `${tag} ${reference.label}`.toLowerCase(),
+    haystack: `${slot} ${reference.label}`.toLowerCase(),
     thumbnailUrl:
       kind === 'Image'
         ? reference.url
@@ -434,10 +440,25 @@ export function StudioComposer({
     (effectiveMode === 'frames' && startFrame !== null);
 
   const buildInput = (): StudioCreateInput => {
+    // Names are a composer affordance; the model only knows slots (#1748).
+    const modelPrompt = resolveStudioAliases(trimmed, [
+      ...references.map((r, i) => ({
+        alias: r.alias ?? '',
+        token: `Image${i + 1}`,
+      })),
+      ...videoRefs.map((r, i) => ({
+        alias: r.alias ?? '',
+        token: `Video${i + 1}`,
+      })),
+      ...audioRefs.map((r, i) => ({
+        alias: r.alias ?? '',
+        token: `Audio${i + 1}`,
+      })),
+    ]);
     if (activity === 'video') {
       return {
         activity: 'video',
-        prompt: trimmed,
+        prompt: modelPrompt,
         videoModel: compatibleVideoModel,
         aspectRatio,
         resolution,
@@ -457,7 +478,7 @@ export function StudioComposer({
     }
     return {
       activity: 'image',
-      prompt: trimmed,
+      prompt: modelPrompt,
       imageModel,
       aspectRatio,
       resolution,
@@ -547,6 +568,11 @@ export function StudioComposer({
     video: videoRefs.length,
     audio: audioRefs.length,
   };
+  const listFor: Record<StudioReferenceKind, StudioReference[]> = {
+    image: references,
+    video: videoRefs,
+    audio: audioRefs,
+  };
   const setListFor = {
     image: setReferences,
     video: setVideoRefs,
@@ -601,10 +627,12 @@ export function StudioComposer({
   };
 
   const removeReference = (kind: StudioReferenceKind, index: number) => {
+    const alias = listFor[kind][index]?.alias;
     setListFor[kind]((prev) => prev.filter((_, i) => i !== index));
-    setPrompt((prev) =>
-      renumberStudioReferences(prev, index, REFERENCE_TOKENS[kind])
-    );
+    setPrompt((prev) => {
+      const dropped = alias ? dropStudioAlias(prev, alias) : prev;
+      return renumberStudioReferences(dropped, index, REFERENCE_TOKENS[kind]);
+    });
   };
 
   const placeReference = (reference: StudioReference, target: PickerTarget) => {
@@ -724,16 +752,41 @@ export function StudioComposer({
     videoRefs,
   ]);
 
+  /**
+   * `@Image5` with two stills attached: nothing pills it and nothing stops it,
+   * so the model would be handed a slot the request never carries (#1748).
+   * Warn rather than block — the prompt is the user's to write.
+   */
+  const unresolvedRefs = unresolvedStudioReferences(
+    trimmed,
+    counts,
+    [...references, ...videoRefs, ...audioRefs].flatMap((r) =>
+      r.alias ? [r.alias] : []
+    )
+  );
+  // A slot can be attached; a name we don't hold cannot, so the two want
+  // different words (#1748).
+  const unresolvedSlots = unresolvedRefs.filter((token) =>
+    /^@(Image|Video|Audio)\d+$/.test(token)
+  );
+  const unresolvedNames = unresolvedRefs.filter(
+    (token) => !unresolvedSlots.includes(token)
+  );
+
   const onMentionSelect = (item: MentionItem): MentionItem => {
     if (item.section === 'references') return item;
     const [, kind = 'image', ...rest] = item.id.split(':');
     const url = rest.join(':');
+    const source = [...library.cast, ...library.locations].find(
+      (r) => r.url === url
+    );
     const reference: StudioReference = {
       url,
       label: item.label,
       kind: kind === 'video' ? 'video' : 'image',
       posterUrl:
         kind === 'video' ? (item.thumbnailUrl ?? undefined) : undefined,
+      ...(source?.alias ? { alias: source.alias } : {}),
     };
     const index = addReference(reference);
     if (index < 0) return item;
@@ -1109,6 +1162,28 @@ export function StudioComposer({
           }}
         />
       </div>
+
+      {(unresolvedSlots.length > 0 || unresolvedNames.length > 0) && (
+        <div
+          className="flex shrink-0 flex-col gap-1 text-xs text-destructive"
+          aria-live="polite"
+        >
+          {unresolvedSlots.length > 0 && (
+            <p>
+              {unresolvedSlots.join(', ')}{' '}
+              {unresolvedSlots.length === 1 ? "isn't" : "aren't"} attached.
+            </p>
+          )}
+          {unresolvedNames.length > 0 && (
+            <p>
+              {unresolvedNames.join(', ')}{' '}
+              {unresolvedNames.length === 1 ? "isn't" : "aren't"} in your
+              library. {unresolvedNames.length === 1 ? 'It' : 'They'} will be
+              sent as words.
+            </p>
+          )}
+        </div>
+      )}
 
       {isAuthenticated &&
         checks.length > 0 && (

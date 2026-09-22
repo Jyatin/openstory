@@ -39,6 +39,7 @@ import {
 import { MentionEditPopover } from '@/ui/text-editor/mention/mention-edit-popover';
 import { createMentionSuggestion } from '@/ui/text-editor/mention/mention-suggestion';
 import { tagifyMarkdown } from '@/ui/text-editor/mention/tagify';
+import { splitMentions } from '@/ui/text-editor/mention/mention-match';
 
 /** The mention pill the edit popover is anchored to. */
 type MentionTarget = {
@@ -161,6 +162,45 @@ const insertTextWithNewlines = (view: EditorView, text: string): boolean => {
   if (view.state.selection.empty && domSelectionCoversEditor(view)) {
     tr.setSelection(new AllSelection(tr.doc));
   }
+  if (!tr.selection.empty) tr.deleteSelection();
+  view.dispatch(tr.insert(tr.selection.from, nodes).scrollIntoView());
+  return true;
+};
+
+/**
+ * Paste with the mention matcher applied, so a pasted `@Image1` or character
+ * name lands as a pill rather than plain text (#1748). Tagify only runs on an
+ * external value change, and a paste is the editor changing its own value —
+ * the guard in that effect sees them as equal and skips.
+ *
+ * Only the pasted fragment is built, so the caret stays where the paste ends;
+ * re-tagifying the whole document would rebuild it and move the caret.
+ * Returns false when nothing in the text matches, leaving ProseMirror's own
+ * paste (and its markdown parsing) untouched.
+ */
+const insertPastedWithMentions = (
+  view: EditorView,
+  text: string,
+  items: MentionItem[]
+): boolean => {
+  const { schema } = view.state;
+  const mention = schema.nodes.mention;
+  if (!mention) return false;
+  const segments = splitMentions(text, items);
+  if (!segments.some((segment) => segment.type === 'mention')) return false;
+  const nodes = segments.flatMap((segment) =>
+    segment.type === 'mention'
+      ? [
+          mention.create({
+            id: segment.item.tag,
+            section: segment.item.section,
+            label: segment.item.label,
+          }),
+        ]
+      : screenplayNodes(schema, segment.value)
+  );
+  if (nodes.length === 0) return false;
+  const { tr } = view.state;
   if (!tr.selection.empty) tr.deleteSelection();
   view.dispatch(tr.insert(tr.selection.from, nodes).scrollIntoView());
   return true;
@@ -340,7 +380,11 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     editable: !disabled,
     autofocus: autoFocus,
     extensions: [
-      StarterKit.configure({ hardBreak: false }),
+      // No links: these editors hold prompts and scripts, never prose with
+      // hyperlinks. Left on, StarterKit's Link plus markdown-it's linkify turn
+      // a pasted image URL into `[url](url)`, and that markdown ships to the
+      // model verbatim (#1748).
+      StarterKit.configure({ hardBreak: false, link: false }),
       HardBreakAsNewline,
       Markdown.configure({
         // `html: true` is required for inline mention spans (produced by
@@ -349,7 +393,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         // extensions (StarterKit's block/inline set plus `mention`) survive the
         // parse, so unrelated/raw HTML can't leak in.
         html: hasMentions,
-        linkify: true,
+        linkify: false,
         breaks: true,
         // Off: tiptap-markdown's clipboard parser uses `{ inline: true }`,
         // which drops multi-line paste. Default ProseMirror paste is enough.
@@ -437,6 +481,12 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         },
       },
       transformPastedText: (text) => normalizeScreenplayNewlines(text),
+      handlePaste: (view, event) => {
+        if (!hasMentions) return false;
+        const text = event.clipboardData?.getData('text/plain');
+        if (!text) return false;
+        return insertPastedWithMentions(view, text, mentionItemsRef.current);
+      },
     },
     onUpdate: ({ editor: e }) => {
       onValueChange(e.storage.markdown.getMarkdown());

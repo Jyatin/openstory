@@ -5,7 +5,10 @@ import {
 } from '@/models/models';
 import {
   buildStudioVideoInput,
+  dropStudioAlias,
   renumberStudioReferences,
+  resolveStudioAliases,
+  unresolvedStudioReferences,
   snapStudioVideoDuration,
   studioCombinedRefCap,
   studioSupportsEndFrame,
@@ -198,6 +201,89 @@ describe('reference tags', () => {
         'minimax_h3_max'
       )
     ).toBe('Image 1 walks with Video 1 under Audio 1');
+  });
+
+  it('resolves a token the user typed or pasted, any case, with or without @', () => {
+    expect(tagStudioReferences('@image1 meets image2')).toBe(
+      '@Image1 meets @Image2'
+    );
+    expect(
+      tagStudioReferences('@image1 meets @Image2', 'grok_imagine_video_1_5')
+    ).toBe('<IMAGE_0> meets <IMAGE_1>');
+    expect(tagStudioReferences('@Image1 under @audio1', 'minimax_h3_max')).toBe(
+      'Image 1 under Audio 1'
+    );
+  });
+
+  it('swaps a named reference for its slot on the way to the model', () => {
+    const aliases = [
+      { alias: 'Sienna Blake', token: 'Image1' },
+      { alias: 'Sienna Blake Jr', token: 'Image2' },
+      { alias: 'Bondi Beach', token: 'Image3' },
+    ];
+    expect(
+      resolveStudioAliases(
+        '@Sienna Blake Jr waves at sienna blake on @Bondi Beach',
+        aliases
+      )
+    ).toBe('Image2 waves at Image1 on Image3');
+    // An unattached name is prose, not a slot.
+    expect(resolveStudioAliases('Sienna Blakeley waves', aliases)).toBe(
+      'Sienna Blakeley waves'
+    );
+    expect(resolveStudioAliases('nobody named here', [])).toBe(
+      'nobody named here'
+    );
+  });
+
+  it('drops a named reference when its tile goes away', () => {
+    expect(dropStudioAlias('@Sienna Blake waves', 'Sienna Blake')).toBe(
+      ' waves'
+    );
+    expect(dropStudioAlias('Sienna Blakeley waves', 'Sienna Blake')).toBe(
+      'Sienna Blakeley waves'
+    );
+  });
+
+  it('names slots with nothing attached', () => {
+    const attached = { image: 2, video: 0, audio: 1 };
+    expect(
+      unresolvedStudioReferences(
+        'Image1 meets @image5 while Video1 plays under Audio1',
+        attached
+      )
+    ).toEqual(['@Image5', '@Video1']);
+    expect(
+      unresolvedStudioReferences('Image1 and Image2 only', attached)
+    ).toEqual([]);
+    // Each token is named once however often it appears.
+    expect(unresolvedStudioReferences('Image9 then Image9', attached)).toEqual([
+      '@Image9',
+    ]);
+  });
+
+  it('names an @name that was never attached', () => {
+    const attached = { image: 1, video: 0, audio: 0 };
+    const aliases = ['Sienna Blake'];
+    expect(
+      unresolvedStudioReferences(
+        '@bluesamurai bows to @Sienna Blake',
+        attached,
+        aliases
+      )
+    ).toEqual(['@bluesamurai']);
+    // The bare form the pill stores is not an @name at all.
+    expect(
+      unresolvedStudioReferences('Sienna Blake bows', attached, aliases)
+    ).toEqual([]);
+    // `@` inside a word is an address, not a reference.
+    expect(
+      unresolvedStudioReferences('mail tom@example.com', attached, aliases)
+    ).toEqual([]);
+    // Order follows the prompt, across both shapes.
+    expect(
+      unresolvedStudioReferences('@ghost then Image4', attached, aliases)
+    ).toEqual(['@ghost', '@Image4']);
   });
 
   it('drops the removed token and shifts later ones down', () => {

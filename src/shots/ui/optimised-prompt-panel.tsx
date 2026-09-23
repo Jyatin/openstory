@@ -80,11 +80,6 @@ export const OptimisedPromptPanel: React.FC<{
                       ? 'font-medium text-warning'
                       : 'text-muted-foreground'
                   )}
-                  title={
-                    overRecommended
-                      ? `Over ${preview.modelName}'s recommended ${preview.maxPromptLength} ${preview.promptLengthUnit}. It is still sent in full.`
-                      : undefined
-                  }
                 >
                   {preview.promptLength}
                   {preview.maxPromptLength !== undefined && (

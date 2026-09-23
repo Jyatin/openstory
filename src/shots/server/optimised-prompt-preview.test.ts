@@ -204,6 +204,8 @@ describe('buildShotPromptPreview', () => {
     expect(result.motion?.json).not.toContain('https://cdn.example/shot-2.jpg');
     expect(result.assembledMotionPrompt).toContain('No BGM');
     expect(result.assembledMotionPrompt?.split('No BGM').length).toBe(2);
+    expect(result.motion?.maxPromptLength).toBe(5500);
+    expect(result.motion?.promptLengthUnit).toBe('characters');
   });
 
   it('warns when prompt length kept later shots out of the packed clip', () => {

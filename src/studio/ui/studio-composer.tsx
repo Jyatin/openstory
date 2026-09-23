@@ -19,7 +19,7 @@ import type { MentionItem } from '@/shots/ui/prompt-mention/mention-items';
 import { AspectRatioPills } from '@/ui/settings/aspect-ratio-pills';
 import { ResolutionPills } from '@/ui/settings/resolution-pills';
 import { IMAGE_MODELS, videoPromptHardLimit } from '@/models/models';
-import { measurePrompt, promptLengthUnit } from '@/models/prompt-length';
+import { measurePrompt } from '@/models/prompt-length';
 import { imageResolutionTiers } from '@/stills/build-image-request';
 import { motionResolutionTiers } from '@/motion/model-capabilities';
 import {
@@ -457,13 +457,11 @@ export function StudioComposer({
     ? IMAGE_TO_VIDEO_MODELS[compatibleVideoModel].name
     : IMAGE_MODELS[imageModel].name;
   // The prompt is never cut (#1754), so the composer says how long it is and
-  // when it runs past what the model recommends.
+  // turns the count amber past what the model recommends. Every model,
+  // Seedance included, counts characters (#1763).
   const promptRecommendation = isVideo
     ? IMAGE_TO_VIDEO_MODELS[compatibleVideoModel]
     : IMAGE_MODELS[imageModel];
-  // Seedance's recommendation is in words, as Ark states it; the rest count
-  // characters. Hard limits are always characters (fal's schema field).
-  const promptUnit = promptLengthUnit(promptRecommendation);
   const promptMeasured = measurePrompt(prompt, promptRecommendation);
   // No number (native Grok images) means nothing to be over.
   const promptOverRecommended =
@@ -1592,15 +1590,6 @@ export function StudioComposer({
                   ? 'text-warning'
                   : 'text-muted-foreground'
             )}
-            title={
-              promptTooLong
-                ? `${activeModelName} maxes out at ${promptHardLimit} characters.`
-                : promptOverRecommended
-                  ? `Over ${activeModelName}'s recommended ${promptRecommendation.maxPromptLength} ${promptUnit}. It is still sent in full.`
-                  : promptRecommendation.maxPromptLength !== undefined
-                    ? `${activeModelName} recommends up to ${promptRecommendation.maxPromptLength} ${promptUnit}.`
-                    : `${activeModelName} sets no prompt length.`
-            }
           >
             {promptMeasured}
             {(promptHardLimit ?? promptRecommendation.maxPromptLength) !==

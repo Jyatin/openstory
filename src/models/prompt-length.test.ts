@@ -19,12 +19,14 @@ describe('hard limits vs recommendations (#1754)', () => {
     expect(videoPromptHardLimit('grok_imagine_video_1_5')).toBe(4096);
   });
 
-  it('measures Seedance in words, as Ark states its recommendation', () => {
+  it('warns on Seedance above 5500 characters', () => {
     const seedance = IMAGE_TO_VIDEO_MODELS.seedance_v2_5;
-    expect(seedance.maxPromptLength).toBe(1000);
-    expect(promptLengthUnit(seedance)).toBe('words');
-    expect(measurePrompt('one two  three\nfour ', seedance)).toBe(4);
-    // Everyone else counts characters, and never gets a unit by accident.
+    expect(seedance.maxPromptLength).toBe(5500);
+    expect(IMAGE_TO_VIDEO_MODELS.seedance_v2.maxPromptLength).toBe(5500);
+    expect(IMAGE_TO_VIDEO_MODELS.seedance_v2_mini.maxPromptLength).toBe(5500);
+    expect(promptLengthUnit(seedance)).toBe('characters');
+    // Whitespace is characters too — the old word count of this string was 4.
+    expect(measurePrompt('one two  three\nfour ', seedance)).toBe(20);
     const kling = IMAGE_TO_VIDEO_MODELS.kling_v3_pro;
     expect(promptLengthUnit(kling)).toBe('characters');
     expect(measurePrompt('one two', kling)).toBe(7);

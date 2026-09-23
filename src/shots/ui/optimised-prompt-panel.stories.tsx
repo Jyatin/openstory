@@ -79,7 +79,7 @@ export const BoundImages: Story = {
         2
       ),
       promptLength: 64,
-      maxPromptLength: 4096,
+      maxPromptLength: 5500,
       promptLengthUnit: 'characters',
       images: [
         {
@@ -104,7 +104,7 @@ export const AssembledTextOnly: Story = {
         'Slow push in as Sarah types.\n\nDialogue: SARAH: "This deadline is going to kill me."',
       json: null,
       promptLength: 92,
-      maxPromptLength: 4096,
+      maxPromptLength: 5500,
       promptLengthUnit: 'characters',
     },
   },

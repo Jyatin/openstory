@@ -5,20 +5,21 @@
  * `model_pricing` — ElevenLabs exposes no machine-readable rates we ingest,
  * so this is a hand-maintained card merged into the effective pricing map at
  * read time. Merging in code rather than seeding rows keeps a fresh deploy
- * correct immediately: there is no window where TTS / Voice Design bill $0
- * because a seed step has not run (#1069's failure mode).
+ * correct immediately: there is no window where TTS / Voice Design / Music
+ * bill $0 because a seed step has not run (#1069's failure mode).
  *
  * The card is keyed by our own ids (`elevenlabs-tts`,
- * `elevenlabs-voice-design`) and reuses the fal pricing shape, so every
- * downstream consumer — pre-flight estimation, the exact charge, the
- * /pricing page, ActionCost labels — works unchanged. The ids cannot collide
- * with fal endpoint ids (`fal-ai/elevenlabs/music` is a different product).
+ * `elevenlabs-voice-design`, `elevenlabs-music`) and reuses the fal pricing
+ * shape, so every downstream consumer — pre-flight estimation, the exact
+ * charge, the /pricing page, ActionCost labels — works unchanged. The ids
+ * cannot collide with leftover fal endpoint ids
+ * (`fal-ai/elevenlabs/music` is the retired proxy, not this card).
  *
  * Native spend is unaudited by the #1069 fal reconcile (`recordFalUsage`
  * skips these ids), same as xAI / Google / Ark.
  *
  * RATES ARE ADVERTISED, NOT BILL-VERIFIED, and were read off
- * https://elevenlabs.io/pricing/api on **2026-09-11**. Confirm each rate
+ * https://elevenlabs.io/pricing/api on **2026-09-15**. Confirm each rate
  * against a real ElevenLabs invoice before leaning on it, and re-date this
  * line when bumping.
  */
@@ -31,6 +32,22 @@ export const ELEVENLABS_TTS_ENDPOINT = 'elevenlabs-tts';
 
 /** Billing id for Voice Design (`POST /v1/text-to-voice/design`). */
 export const ELEVENLABS_VOICE_DESIGN_ENDPOINT = 'elevenlabs-voice-design';
+
+/**
+ * Billing id for native ElevenLabs Music (`music_v2_5` via `elevenlabsAudio`).
+ * Distinct from the retired fal proxy `fal-ai/elevenlabs/music`.
+ */
+export const ELEVENLABS_MUSIC_ENDPOINT = 'elevenlabs-music';
+
+/**
+ * Adapter model id — the newest Eleven Music model (`ELEVENLABS_AUDIO_MODELS`
+ * leads with it). v2.5 bills at the same $0.15/minute as v1 and takes the
+ * same request; it enforces section durations strictly, where v1 let
+ * `respect_sections_durations` relax them (we never send that flag, so the
+ * only visible change is the model id — which IS part of the e2e fixture
+ * match, so bumping it needs a re-record).
+ */
+export const ELEVENLABS_MUSIC_MODEL = 'music_v2_5' as const;
 
 /**
  * Per-product ElevenLabs rates.
@@ -65,6 +82,11 @@ export const ELEVENLABS_RATE_CARD: Record<string, EffectiveFalPricing> = {
     unitPrice: VOICE_DESIGN_COST,
     unit: 'generations',
     typicalUnitsPerCall: 1,
+  },
+  // Eleven Music — $0.15 per minute, rounded up. Advertised 2026-09-15.
+  [ELEVENLABS_MUSIC_ENDPOINT]: {
+    unitPrice: micros(150_000),
+    unit: 'minutes',
   },
 };
 
@@ -105,3 +127,18 @@ export function estimateTtsCost(characterCount: number): Microdollars {
  * in-run reservation uses the real count.
  */
 export const TYPICAL_DIALOGUE_CHARS_PER_SHOT = 200;
+
+/**
+ * Pre-flight / exact music cost from a duration. ElevenLabs bills per
+ * minute rounded up (a 61s track is two minutes), same as fal's old
+ * proxy — the gate and the charge have to agree.
+ */
+export function estimateMusicCost(durationSeconds: number): Microdollars {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return micros(0);
+  }
+  const units = Math.ceil(durationSeconds / 60);
+  const price = ELEVENLABS_RATE_CARD[ELEVENLABS_MUSIC_ENDPOINT]?.unitPrice;
+  if (price == null) return micros(0);
+  return multiplyMicros(price, units);
+}

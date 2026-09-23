@@ -1,5 +1,5 @@
 /**
- * ElevenLabs env — native TTS and Voice Design (#1552).
+ * ElevenLabs env — native TTS, Voice Design, and Music (#1552 / #1640).
  *
  * Platform key only: `API_KEY_PROVIDERS` has no `'elevenlabs'`. Designed
  * voices live in the account that created them, so a team key would not see
@@ -45,8 +45,8 @@ export function isElevenLabsConfigured(): boolean {
 
 /**
  * Shared adapter / SDK config. `timeoutInSeconds` is the SDK's stall
- * deadline so a hung TTS call fails the workflow step instead of hanging
- * it (the same guarantee `createDeadlineFetch` gives the fal path).
+ * deadline so a hung TTS / music call fails the workflow step instead of
+ * hanging it (the same guarantee `createDeadlineFetch` gives the fal path).
  */
 export function elevenLabsAdapterConfig(
   apiKey: string,
@@ -71,9 +71,33 @@ export async function loadElevenLabsSpeech() {
 }
 
 /**
- * Official SDK client for Voice Design / create-voice — endpoints
- * `elevenlabsSpeech` does not wrap. `fetch` is the workerd-safe global so
- * a method-extracted `this.fetch` cannot throw Illegal invocation.
+ * Lazy-load the music / SFX adapter. Same startup-CPU reason as speech:
+ * a static import of `@tanstack/ai-elevenlabs` from a workflow graph in
+ * `src/server.ts` would pull the SDK into every Worker isolate boot.
+ */
+export async function loadElevenLabsAudio() {
+  const { createElevenLabsAudio } = await import('@tanstack/ai-elevenlabs');
+  return createElevenLabsAudio;
+}
+
+/**
+ * Lazy-load the Voice Design adapter (`@tanstack/ai-elevenlabs` >=0.6, #1640).
+ * Same startup-CPU reason as speech/audio. Covers preview generation
+ * (`textToVoice.design`) only — it has no standalone "save this preview" or
+ * voice-management surface, so `createElevenLabsSdk` below still backs
+ * `saveDesignedVoice` / `deleteElevenLabsVoice` / list / share.
+ */
+export async function loadElevenLabsVoiceDesign() {
+  const { createElevenLabsVoiceDesign } =
+    await import('@tanstack/ai-elevenlabs');
+  return createElevenLabsVoiceDesign;
+}
+
+/**
+ * Official SDK client for voice management — save / delete / get / list /
+ * share, none of which the `@tanstack/ai-elevenlabs` adapters expose.
+ * `fetch` is the workerd-safe global so a method-extracted `this.fetch`
+ * cannot throw Illegal invocation.
  */
 export async function createElevenLabsSdk(
   apiKey: string,

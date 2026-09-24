@@ -9,6 +9,7 @@ import type {
   ImageToVideoModel,
   TextToImageModel,
 } from '@/models/models';
+import type { VoiceProvider } from '@/cast/seed-voice';
 import type { AnalysisModelId } from '@/models/models.config';
 import type { VoicedDialogueLine } from '@/motion/dialogue-tts';
 import type { SceneVoicedLine } from '@/shots/shot-dialogue';
@@ -1014,10 +1015,11 @@ export interface CharacterBibleWorkflowInput extends SequenceWorkflowContext {
 }
 
 /**
- * One character's ElevenLabs voice (#1553): LLM-draft the description when
- * missing, Voice Design → previews in R2, save the top preview as a voice.
- * Spawned per speaking character by the bible workflow and triggered
- * directly by "Generate voice" on the character card.
+ * One character's voice (#1553, #1765): LLM-draft the description when
+ * missing, then Voice Design (previews in R2, the top one saved as a voice)
+ * or Seed range reads (each take a voice). Spawned per speaking character by
+ * the bible workflow and triggered directly by "Generate voice" on the
+ * character card.
  */
 export interface CharacterVoiceWorkflowInput extends SequenceWorkflowContext {
   sequenceId: string;
@@ -1026,6 +1028,14 @@ export interface CharacterVoiceWorkflowInput extends SequenceWorkflowContext {
   /** The stored description; empty = draft one from the bible first. */
   voiceDescription: string;
   analysisModelId: AnalysisModelId;
+  /**
+   * Which provider makes the voice, chosen when the run is triggered
+   * (#1765). The workflow checks `=== 'seed'`, so a run already in flight
+   * from before this field existed designs on ElevenLabs.
+   */
+  voiceProvider: VoiceProvider;
+  /** Seed takes to record, 1–`SEED_VOICE_MAX_TAKES`. ElevenLabs ignores it. */
+  takes: number;
   /**
    * Generating husk this run completes in place (#1715). Absent on in-flight
    * pre-husk payloads; persist then writes via `updateVoice` and does not

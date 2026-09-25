@@ -8,6 +8,14 @@ import {
   type ReactNode,
 } from 'react';
 import type { realtimeSchema } from '@/platform/realtime';
+import {
+  combineRealtimeStatus,
+  jitterReconnectDelay,
+  nextClientReconnectDelay,
+  partitionRealtimeChannels,
+  REALTIME_HARD_FAIL_ATTEMPTS,
+  REALTIME_STABLE_OPEN_MS,
+} from '@/platform/realtime/sse-session';
 import type {
   ConnectionStatus,
   EventPaths,
@@ -16,21 +24,9 @@ import type {
 } from '@/platform/server/realtime/shared-types';
 
 /**
- * In-repo realtime client (#802), replacing the removed Upstash-hosted realtime client.
- *
- * Exactly **one** `EventSource` is open at a time, carrying the union of every
- * channel the mounted hooks have registered: `/api/realtime?channels=a,b,c`
- * fans out to one `RealtimeChannel` Durable Object per channel server-side and
- * merges them back into that single stream. The DO holds each sub-stream open.
- * EventSource reconnects the merged `/api/realtime` response if it dies; the
- * worker also re-subscribes to a channel's DO if that sub-stream ends (#1332).
- *
- * One connection per channel is NOT a valid alternative: browsers cap
- * concurrent HTTP/1.1 connections per origin at 6, and an SSE stream holds its
- * connection open for life. A library page rendering ~5 cards (one channel
- * each) plus the billing pill exhausted that budget and wedged the entire
- * origin — every later navigation, server function and image request queued
- * behind the streams forever (#827).
+ * At most two EventSources: `billing:*`, then every other channel.
+ * One stream per channel deadlocks the origin (browsers allow six).
+ * A dropped stream is closed and reopened with jittered backoff.
  */
 
 type Subscriber = (msg: RealtimeUserEvent) => void;
@@ -42,6 +38,17 @@ type RealtimeContextValue = {
 };
 
 export const RealtimeContext = createContext<RealtimeContextValue | null>(null);
+
+type StreamGroup = 'billing' | 'heavy';
+
+type LiveStream = {
+  source: EventSource | null;
+  key: string;
+  attempt: number;
+  retry: ReturnType<typeof setTimeout> | null;
+  /** Clears the failure count only after the socket has stayed up. */
+  stable: ReturnType<typeof setTimeout> | null;
+};
 
 /** Parse one SSE `data:` payload; `null` when it isn't a user event we deliver. */
 function parseUserEvent(raw: string): RealtimeUserEvent | null {
@@ -74,49 +81,90 @@ export const RealtimeProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const subscriptionsRef = useRef<
     Map<string, { channels: string[]; cb: Subscriber }>
   >(new Map());
-  const sourceRef = useRef<EventSource | null>(null);
-  /** Channel set the open stream was built for; empty when nothing is open. */
-  const openKeyRef = useRef('');
+  const streamsRef = useRef<Record<StreamGroup, LiveStream>>({
+    billing: { source: null, key: '', attempt: 0, retry: null, stable: null },
+    heavy: { source: null, key: '', attempt: 0, retry: null, stable: null },
+  });
+  const groupStatusRef = useRef<Record<StreamGroup, ConnectionStatus | null>>({
+    billing: null,
+    heavy: null,
+  });
   const syncHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
 
-  const closeSource = (): void => {
-    sourceRef.current?.close();
-    sourceRef.current = null;
-    openKeyRef.current = '';
+  const publishStatus = (): void => {
+    setStatus(
+      combineRealtimeStatus(
+        groupStatusRef.current.billing,
+        groupStatusRef.current.heavy
+      )
+    );
   };
 
-  const syncSource = (): void => {
-    const channels = [
-      ...new Set(
-        [...subscriptionsRef.current.values()].flatMap((s) => s.channels)
-      ),
-    ].sort();
-    const key = channels.join(',');
-    if (key === openKeyRef.current) return;
+  const stopGroup = (group: StreamGroup): void => {
+    const live = streamsRef.current[group];
+    if (live.retry !== null) clearTimeout(live.retry);
+    live.retry = null;
+    if (live.stable !== null) clearTimeout(live.stable);
+    live.stable = null;
+    live.source?.close();
+    live.source = null;
+    live.key = '';
+    live.attempt = 0;
+    groupStatusRef.current[group] = null;
+  };
 
-    closeSource();
-    if (channels.length === 0) {
-      setStatus('disconnected');
-      return;
-    }
-
+  const connectGroup = (group: StreamGroup): void => {
+    const live = streamsRef.current[group];
+    const key = live.key;
+    if (!key) return;
     const source = new EventSource(
       `/api/realtime?channels=${encodeURIComponent(key)}`
     );
-    sourceRef.current = source;
-    openKeyRef.current = key;
-    setStatus('connecting');
+    live.source = source;
+    groupStatusRef.current[group] = 'connecting';
+    publishStatus();
 
-    source.onopen = () => setStatus('connected');
+    source.onopen = () => {
+      if (streamsRef.current[group].source !== source) return;
+      groupStatusRef.current[group] = 'connected';
+      publishStatus();
+      if (live.stable !== null) clearTimeout(live.stable);
+      // An isolate can accept the socket and then die. Keep the failure
+      // count until the stream has stayed up for a ping interval.
+      live.stable = setTimeout(() => {
+        live.stable = null;
+        if (streamsRef.current[group].source !== source) return;
+        live.attempt = 0;
+      }, REALTIME_STABLE_OPEN_MS);
+    };
     source.onerror = () => {
-      // EventSource reconnects automatically; surface the transient error so
-      // status-driven UI (toasts) can react, but don't tear the stream down.
-      setStatus(
-        source.readyState === EventSource.CLOSED ? 'error' : 'connecting'
+      if (streamsRef.current[group].source !== source) return;
+      // Read readyState before close(). CLOSED means the server refused the
+      // stream (non-200); CONNECTING is a drop after the socket was up.
+      const refused = source.readyState === EventSource.CLOSED;
+      if (live.stable !== null) clearTimeout(live.stable);
+      live.stable = null;
+      live.source = null;
+      source.close();
+      const delay = jitterReconnectDelay(
+        nextClientReconnectDelay(live.attempt),
+        Math.random()
       );
+      live.attempt += 1;
+      groupStatusRef.current[group] =
+        refused || live.attempt >= REALTIME_HARD_FAIL_ATTEMPTS
+          ? 'error'
+          : 'connecting';
+      publishStatus();
+      live.retry = setTimeout(() => {
+        live.retry = null;
+        if (streamsRef.current[group].key !== key) return;
+        connectGroup(group);
+      }, delay);
     };
     source.onmessage = (event) => {
+      if (streamsRef.current[group].source !== source) return;
       const msg = parseUserEvent(event.data);
       if (!msg) return;
       for (const {
@@ -126,6 +174,32 @@ export const RealtimeProvider: FC<{ children: ReactNode }> = ({ children }) => {
         if (subscribed.includes(msg.channel)) cb(msg);
       }
     };
+  };
+
+  const syncGroup = (group: StreamGroup, channels: string[]): void => {
+    const key = [...channels].sort().join(',');
+    const live = streamsRef.current[group];
+    if (live.key === key && (live.source !== null || live.retry !== null))
+      return;
+    stopGroup(group);
+    if (key.length === 0) {
+      publishStatus();
+      return;
+    }
+    live.key = key;
+    live.attempt = 0;
+    connectGroup(group);
+  };
+
+  const syncSource = (): void => {
+    const channels = [
+      ...new Set(
+        [...subscriptionsRef.current.values()].flatMap((s) => s.channels)
+      ),
+    ];
+    const groups = partitionRealtimeChannels(channels);
+    syncGroup('billing', groups.billing);
+    syncGroup('heavy', groups.heavy);
   };
 
   // Hooks register one at a time as they mount; coalescing to the end of the
@@ -150,9 +224,19 @@ export const RealtimeProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
   useEffect(() => {
     const subscriptions = subscriptionsRef.current;
+    const streams = streamsRef.current;
     return () => {
       if (syncHandleRef.current !== null) clearTimeout(syncHandleRef.current);
-      closeSource();
+      for (const group of ['billing', 'heavy'] as const) {
+        const live = streams[group];
+        if (live.retry !== null) clearTimeout(live.retry);
+        live.retry = null;
+        if (live.stable !== null) clearTimeout(live.stable);
+        live.stable = null;
+        live.source?.close();
+        live.source = null;
+        live.key = '';
+      }
       subscriptions.clear();
     };
   }, []);

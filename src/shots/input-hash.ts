@@ -796,22 +796,24 @@ const PROMPT_INPUT_HASH_VERSION_V4 = 4;
  * and the pre-#1785, pre-#1784 and pre-#1783 shapes.
  * Tracking: https://github.com/openstory-so/openstory/issues/1371
  */
+// Milestone 24 (#1783–#1787, #1827) added fallbacks under this date; they
+// need ~a month after that stack deploys, or everything stamped before it flips stale.
 export const LEGACY_HASH_UNTIL = '2026-12-31';
 
 /**
  * Older prompt shapes. Verify accepts these until {@link LEGACY_HASH_UNTIL}.
- * They still contain voice-only characters. The shape from just before
- * #1785 is not among them: it matched `current` except for that filter, so
- * accepting it hid a voice-only toggle.
+ * `v5-voiced` is the current shape before #1785 took voice-only characters
+ * out of the visual body and #1787 marked them in the motion body; the older
+ * legacy shapes predate that too.
  */
-type PromptHashKind = 'current' | 'v5-titled' | 'v5-named' | 'v4';
+type PromptHashKind = 'current' | 'v5-voiced' | 'v5-titled' | 'v5-named' | 'v4';
 
 function promptHashFlags(kind: PromptHashKind) {
   return {
     hashVersion:
       kind === 'v4' ? PROMPT_INPUT_HASH_VERSION_V4 : PROMPT_INPUT_HASH_VERSION,
     named: kind === 'v4' || kind === 'v5-named',
-    includeTitle: kind !== 'current',
+    includeTitle: kind !== 'current' && kind !== 'v5-voiced',
     includeSceneNumber: kind === 'v4',
     keepVoiceOnly: kind !== 'current',
   };
@@ -913,7 +915,11 @@ function sortedBibles(input: PromptSceneContextHashInput) {
 
 function promptBibleProjection(
   input: PromptSceneContextHashInput,
-  { named, performance }: { named: boolean; performance: boolean }
+  {
+    named,
+    performance,
+    markVoiceOnly = false,
+  }: { named: boolean; performance: boolean; markVoiceOnly?: boolean }
 ) {
   const bibles = sortedBibles(input);
   const character = named
@@ -926,6 +932,7 @@ function promptBibleProjection(
     characterBible: bibles.characterBible.map((c) => ({
       ...character(c),
       ...(performance ? projectCharacterPerformance(c) : {}),
+      ...(markVoiceOnly && c.voiceOnly ? { voiceOnly: true } : {}),
     })),
     locationBible: bibles.locationBible.map(location),
     elementBible: bibles.elementBible
@@ -967,9 +974,13 @@ function motionPromptHashBody(
   kind: PromptHashKind
 ): unknown {
   const flags = promptHashFlags(kind);
+  // The motion LLM is sent `voiceOnly` (a heard, unframed character), so
+  // the hash reads it (#1787). Only when set, so no stored digest moves for
+  // a cast with no voice-only character; older shapes never read it.
   const bibles = promptBibleProjection(input, {
     named: flags.named,
     performance: true,
+    markVoiceOnly: !flags.keepVoiceOnly,
   });
   return {
     artifact: 'shot:motion-prompt',
@@ -1002,19 +1013,63 @@ export async function computeVisualPromptInputHashV4(
 }
 
 /**
+ * True if any character's voice-only flag changed after `at` (#1787).
+ * `versions` are the sequence's character bible versions, oldest first. A
+ * character's first version (a backfill, a new character) is not a change.
+ */
+export function voiceOnlyMovedSince(
+  versions: readonly {
+    characterId: string;
+    voiceOnly: boolean;
+    createdAt: Date;
+  }[],
+  at: Date
+): boolean {
+  const last = new Map<string, boolean>();
+  for (const v of versions) {
+    const prev = last.get(v.characterId);
+    if (
+      prev !== undefined &&
+      prev !== v.voiceOnly &&
+      v.createdAt.getTime() > at.getTime()
+    ) {
+      return true;
+    }
+    last.set(v.characterId, v.voiceOnly);
+  }
+  return false;
+}
+
+/**
+ * Every shape before the current one ignores the voice-only flag, so a
+ * legacy digest is trusted only while no flag moved since the stamp —
+ * otherwise it would equal the stamp and hide the change (#1787).
+ */
+function acceptedKinds<K extends PromptHashKind>(
+  legacy: readonly K[],
+  voiceOnlyMoved: boolean
+): readonly ('current' | K)[] {
+  return voiceOnlyMoved ? ['current'] : ['current', ...legacy];
+}
+
+/**
  * True if `stored` matches the current digest or a legacy v4 / v5-named
  * digest of the same inputs. Remove after {@link LEGACY_HASH_UNTIL}.
+ * `voiceOnlyMoved`: {@link voiceOnlyMovedSince} the stamp.
  */
 export async function visualPromptInputHashMatches(
   stored: string | null,
-  raw: VisualPromptHashInput | MotionPromptHashInput
+  raw: VisualPromptHashInput | MotionPromptHashInput,
+  { voiceOnlyMoved }: { voiceOnlyMoved: boolean }
 ): Promise<boolean> {
   if (!stored) return false;
   const input = toVisualBodyInput(assembleVisualPromptHashInput(raw));
+  const kinds = acceptedKinds(
+    ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
+    voiceOnlyMoved
+  );
   const digests = await Promise.all(
-    (['current', 'v5-titled', 'v5-named', 'v4'] as const).map((kind) =>
-      sha256Hex(visualPromptHashBody(input, kind))
-    )
+    kinds.map((kind) => sha256Hex(visualPromptHashBody(input, kind)))
   );
   return digests.includes(stored);
 }
@@ -1039,7 +1094,7 @@ export async function computeMotionPromptInputHashV4(
 /**
  * True if `stored` matches the current digest or a legacy v5-titled /
  * v5-named / v4 digest of the same inputs. Remove after
- * {@link LEGACY_HASH_UNTIL}.
+ * {@link LEGACY_HASH_UNTIL}. `voiceOnlyMoved`: as for the visual verify.
  *
  * `legacyScriptDialogue` (#1784): before #1784 every motion digest hashed the
  * script's lines, not the shot's. Pass true only when the shot has no row on
@@ -1050,18 +1105,23 @@ export async function computeMotionPromptInputHashV4(
 export async function motionPromptInputHashMatches(
   stored: string | null,
   raw: MotionPromptHashInput,
-  { legacyScriptDialogue }: { legacyScriptDialogue: boolean }
+  {
+    legacyScriptDialogue,
+    voiceOnlyMoved,
+  }: { legacyScriptDialogue: boolean; voiceOnlyMoved: boolean }
 ): Promise<boolean> {
   if (!stored) return false;
   const assembled = assembleMotionPromptHashInput(raw);
   const inputs = legacyScriptDialogue
     ? [toMotionBodyInput(assembled), toMotionBodyInput(assembled, true)]
     : [toMotionBodyInput(assembled)];
+  const kinds = acceptedKinds(
+    ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
+    voiceOnlyMoved
+  );
   const digests = await Promise.all(
     inputs.flatMap((input) =>
-      (['current', 'v5-titled', 'v5-named', 'v4'] as const).map((kind) =>
-        sha256Hex(motionPromptHashBody(input, kind))
-      )
+      kinds.map((kind) => sha256Hex(motionPromptHashBody(input, kind)))
     )
   );
   return digests.includes(stored);

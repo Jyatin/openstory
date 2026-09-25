@@ -16,6 +16,7 @@
  */
 
 import { z } from 'zod';
+import { tokensRegex } from '@/cast/cascade-rename';
 
 /**
  * Recursively rebuild a value with object keys sorted. Arrays are preserved in
@@ -142,6 +143,39 @@ const trim = (s: string | null | undefined): string => (s ?? '').trim();
 /** Sort an unordered set of strings so the hash is order-insensitive. */
 const sortedRefs = (refs: readonly string[]): string[] => [...refs].sort();
 
+/**
+ * An element's token is a label (#1827): renaming it must not stale the
+ * stills and prompts whose text names it. Every hash reads text through
+ * {@link elementTokensToKeys}, which swaps each token for the element's
+ * identity — its id on a still, its description in a prompt, whose element
+ * bible has no id (the analysis LLM writes it). The text SENT to a model is
+ * never touched; only what is hashed.
+ */
+type HashElement = { token: string; key: string };
+
+function elementTokensToKeys(
+  text: string,
+  elements: readonly HashElement[]
+): string {
+  const keyByToken = new Map(
+    elements.filter((e) => e.token).map((e) => [e.token.toUpperCase(), e.key])
+  );
+  if (!text || keyByToken.size === 0) return text;
+  // One pass, so a key's own words are never read as a token.
+  return text.replace(
+    tokensRegex([...keyByToken.keys()]),
+    (_match, boundary: string, token: string) =>
+      `${boundary}\u27E6element:${keyByToken.get(token.toUpperCase())}\u27E7`
+  );
+}
+
+/** A still's elements as its hash sees them: the token and its row id. */
+export type ElementToken = { token: string; id: string };
+
+export const elementTokensOf = (
+  elements: readonly ElementToken[]
+): ElementToken[] => elements.map(({ token, id }) => ({ token, id }));
+
 type ShotImageHashFields = {
   visualPrompt: string;
   imageModel: string;
@@ -153,6 +187,8 @@ type ShotImageHashFields = {
   characterSheetHashes: readonly string[];
   locationSheetHashes: readonly string[];
   elementReferenceHashes: readonly string[];
+  /** The elements whose tokens the prompt may name (#1827). */
+  elementTokens: readonly ElementToken[];
 };
 
 type ShotImageHashKind = 'thumbnail' | 'variant-image';
@@ -171,15 +207,26 @@ const shotImageHashInputSchema = z.object({
   characterSheetHashes: z.array(z.string()),
   locationSheetHashes: z.array(z.string()),
   elementReferenceHashes: z.array(z.string()),
+  // Defaulted, not required, only for a payload made before #1827 deployed:
+  // no elements hashes the raw text, the legacy digest verify still accepts.
+  elementTokens: z
+    .array(z.object({ token: z.string(), id: z.string() }))
+    .default([]),
 });
 
-export function computeShotImageInputHash(
-  raw: ShotImageHashInput
-): Promise<ShotImageInputHash> {
-  const input = shotImageHashInputSchema.parse(raw);
-  return sha256Hex({
+function shotImageHashBody(
+  input: z.infer<typeof shotImageHashInputSchema>,
+  tokenFree: boolean
+): unknown {
+  const visualPrompt = trim(input.visualPrompt);
+  return {
     artifact: `shot:${input.kind}`,
-    visualPrompt: trim(input.visualPrompt),
+    visualPrompt: tokenFree
+      ? elementTokensToKeys(
+          visualPrompt,
+          input.elementTokens.map(({ token, id }) => ({ token, key: id }))
+        )
+      : visualPrompt,
     imageModel: input.imageModel,
     aspectRatio: input.aspectRatio,
     size: input.size,
@@ -187,7 +234,32 @@ export function computeShotImageInputHash(
     characterSheetHashes: sortedRefs(input.characterSheetHashes),
     locationSheetHashes: sortedRefs(input.locationSheetHashes),
     elementReferenceHashes: sortedRefs(input.elementReferenceHashes),
-  }).then(shotImageInputHash);
+  };
+}
+
+export function computeShotImageInputHash(
+  raw: ShotImageHashInput
+): Promise<ShotImageInputHash> {
+  const input = shotImageHashInputSchema.parse(raw);
+  return sha256Hex(shotImageHashBody(input, true)).then(shotImageInputHash);
+}
+
+/**
+ * Verify: the current digest, or the pre-#1827 one that hashed the prompt's
+ * tokens raw. Delete the fallback after {@link LEGACY_HASH_UNTIL}.
+ */
+export async function shotImageInputHashMatches(
+  stored: string | null,
+  raw: ShotImageHashInput
+): Promise<boolean> {
+  if (!stored) return false;
+  const input = shotImageHashInputSchema.parse(raw);
+  const digests = await Promise.all(
+    [true, false].map((tokenFree) =>
+      sha256Hex(shotImageHashBody(input, tokenFree))
+    )
+  );
+  return digests.includes(stored);
 }
 
 /**
@@ -917,30 +989,72 @@ export const LEGACY_HASH_UNTIL = '2026-12-31';
 
 /**
  * Older prompt shapes. Verify accepts these until {@link LEGACY_HASH_UNTIL}.
- * They still contain voice-only characters. The shape from just before
- * #1785 is not among them: it matched `current` except for that filter, so
- * accepting it hid a voice-only toggle.
+ * `v5-tokened` is the current shape before #1827 read element tokens as
+ * labels. The rest still contain voice-only characters. The shape from just
+ * before #1785 is not among them: it matched `current` except for that
+ * filter, so accepting it hid a voice-only toggle.
  */
-type PromptHashKind = 'current' | 'v5-titled' | 'v5-named' | 'v4';
+type PromptHashKind =
+  | 'current'
+  | 'v5-tokened'
+  | 'v5-titled'
+  | 'v5-named'
+  | 'v4';
 
 function promptHashFlags(kind: PromptHashKind) {
   return {
     hashVersion:
       kind === 'v4' ? PROMPT_INPUT_HASH_VERSION_V4 : PROMPT_INPUT_HASH_VERSION,
     named: kind === 'v4' || kind === 'v5-named',
-    includeTitle: kind !== 'current',
+    includeTitle: kind !== 'current' && kind !== 'v5-tokened',
     includeSceneNumber: kind === 'v4',
-    keepVoiceOnly: kind !== 'current',
+    keepVoiceOnly: kind !== 'current' && kind !== 'v5-tokened',
+    tokenFree: kind === 'current',
   };
 }
 
-function sceneInputContext(scene: Scene, kind: PromptHashKind) {
+/** Every string in `value` with element tokens swapped for identities. */
+function withElementKeys<T>(value: T, elements: readonly HashElement[]): T {
+  if (typeof value === 'string') {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- string in, string out
+    return elementTokensToKeys(value, elements) as T;
+  }
+  if (Array.isArray(value)) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- same shape
+    return value.map((v: unknown) => withElementKeys(v, elements)) as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- same shape
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, withElementKeys(v, elements)])
+    ) as T;
+  }
+  return value;
+}
+
+/** A prompt's element bible has no id; an element is its description. */
+const promptHashElements = (
+  input: PromptSceneContextHashInput
+): HashElement[] =>
+  (input.elementBible ?? []).map((e) => ({
+    token: e.token,
+    key: trim(e.description),
+  }));
+
+function sceneInputContext(
+  input: PromptSceneContextHashInput,
+  kind: PromptHashKind
+) {
+  const { scene } = input;
   const flags = promptHashFlags(kind);
-  return {
+  const context = {
     ...(flags.includeSceneNumber ? { sceneNumber: scene.sceneNumber } : {}),
     originalScript: scene.originalScript,
     metadata: sceneMetadata(scene, flags.includeTitle),
   };
+  return flags.tokenFree
+    ? withElementKeys(context, promptHashElements(input))
+    : context;
 }
 
 /**
@@ -1000,9 +1114,9 @@ function projectLocationForPromptV4(l: LocationBibleEntry) {
   return { name: trim(l.name), ...projectLocationForPrompt(l) };
 }
 
-function projectElementForPrompt(e: ElementBibleEntry) {
+function projectElementForPrompt(e: ElementBibleEntry, tokenFree: boolean) {
   return {
-    token: trim(e.token),
+    ...(tokenFree ? {} : { token: trim(e.token) }),
     description: trim(e.description),
   };
 }
@@ -1012,7 +1126,7 @@ function projectElementForPrompt(e: ElementBibleEntry) {
  * not produce a different hash. Sorting by the analysis identity field makes
  * the hash order-insensitive while keeping each row's structure intact.
  */
-function sortedBibles(input: PromptSceneContextHashInput) {
+function sortedBibles(input: PromptSceneContextHashInput, tokenFree: boolean) {
   const byKey = <T>(arr: readonly T[], key: (t: T) => string): T[] =>
     [...arr].sort((a, b) => {
       const ka = key(a);
@@ -1023,16 +1137,22 @@ function sortedBibles(input: PromptSceneContextHashInput) {
     characterBible: byKey(input.characterBible, (c) => c.characterId),
     locationBible: byKey(input.locationBible, (l) => l.locationId),
     elementBible: input.elementBible
-      ? byKey(input.elementBible, (e) => e.token)
+      ? byKey(input.elementBible, (e) =>
+          tokenFree ? trim(e.description) : e.token
+        )
       : null,
   };
 }
 
 function promptBibleProjection(
   input: PromptSceneContextHashInput,
-  { named, performance }: { named: boolean; performance: boolean }
+  {
+    named,
+    performance,
+    tokenFree,
+  }: { named: boolean; performance: boolean; tokenFree: boolean }
 ) {
-  const bibles = sortedBibles(input);
+  const bibles = sortedBibles(input, tokenFree);
   const character = named
     ? projectCharacterForPromptV4
     : projectCharacterForPrompt;
@@ -1046,7 +1166,7 @@ function promptBibleProjection(
     })),
     locationBible: bibles.locationBible.map(location),
     elementBible: bibles.elementBible
-      ? bibles.elementBible.map(projectElementForPrompt)
+      ? bibles.elementBible.map((e) => projectElementForPrompt(e, tokenFree))
       : null,
   };
 }
@@ -1066,12 +1186,12 @@ function visualPromptHashBody(
           ...input,
           characterBible: input.characterBible.filter((c) => !c.voiceOnly),
         },
-    { named: flags.named, performance: false }
+    { named: flags.named, performance: false, tokenFree: flags.tokenFree }
   );
   return {
     artifact: 'shot:visual-prompt',
     hashVersion: flags.hashVersion,
-    scene: sceneInputContext(input.scene, kind),
+    scene: sceneInputContext(input, kind),
     styleConfig: styleConfigHashBody(input.styleConfig),
     ...bibles,
     aspectRatio: trim(input.aspectRatio),
@@ -1087,11 +1207,12 @@ function motionPromptHashBody(
   const bibles = promptBibleProjection(input, {
     named: flags.named,
     performance: true,
+    tokenFree: flags.tokenFree,
   });
   return {
     artifact: 'shot:motion-prompt',
     hashVersion: flags.hashVersion,
-    scene: sceneInputContext(input.scene, kind),
+    scene: sceneInputContext(input, kind),
     styleConfig: styleConfigHashBody(input.styleConfig),
     ...bibles,
     aspectRatio: trim(input.aspectRatio),
@@ -1129,8 +1250,8 @@ export async function visualPromptInputHashMatches(
   if (!stored) return false;
   const input = toVisualBodyInput(assembleVisualPromptHashInput(raw));
   const digests = await Promise.all(
-    (['current', 'v5-titled', 'v5-named', 'v4'] as const).map((kind) =>
-      sha256Hex(visualPromptHashBody(input, kind))
+    (['current', 'v5-tokened', 'v5-titled', 'v5-named', 'v4'] as const).map(
+      (kind) => sha256Hex(visualPromptHashBody(input, kind))
     )
   );
   return digests.includes(stored);
@@ -1176,8 +1297,8 @@ export async function motionPromptInputHashMatches(
     : [toMotionBodyInput(assembled)];
   const digests = await Promise.all(
     inputs.flatMap((input) =>
-      (['current', 'v5-titled', 'v5-named', 'v4'] as const).map((kind) =>
-        sha256Hex(motionPromptHashBody(input, kind))
+      (['current', 'v5-tokened', 'v5-titled', 'v5-named', 'v4'] as const).map(
+        (kind) => sha256Hex(motionPromptHashBody(input, kind))
       )
     )
   );

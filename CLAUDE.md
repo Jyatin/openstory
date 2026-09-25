@@ -125,6 +125,8 @@ bun setup --prod                   # Production config + deploy (--deploy, --pr-
 
 **Branch + commit conventions:** Branches must be named `<issue-number>-feature-name` (e.g. `393-improve-readme`). Lefthook extracts the issue number and tags commits with `#<issue>` automatically. See `CONTRIBUTING.md`. Lefthook also runs quality checks pre-commit.
 
+**Push completed work proactively.** When the user has authorized pushing or finishing an existing PR, commit and push validated follow-up fixes to that PR branch without asking again. Do not leave completed fixes local or stop to offer to push. Keep normal hooks and checks enabled; force pushes still require explicit authorization.
+
 ---
 
 ## Server Handler Pattern
@@ -318,6 +320,7 @@ Read the via's doc before touching it, and update it in the same PR:
 - **Native Grok (xAI)** — `docs/architecture/media-vias.md`. xAI speaks the Responses API; `resolveNativeGrokModel` keeps `llm-client` and the adapter on the same route.
 - **Native Google (Gemini)** — `docs/architecture/media-vias.md`. Omni Flash submit must request `response_format.delivery: "uri"` and must NOT pass top-level `duration`/`size`; stills go inline as base64 (`toVisionImageSource(..., { inline: true })`), never as a fetched URI.
 - **LLMTR gateway** — `docs/architecture/media-vias.md`. Team BYOK only. A registry id absent from `LLMTR_TEXT_MODELS` is not routable — never guess a neighbour slug, never send the LLMTR key to OpenRouter, and send native wire names, not OpenRouter plugins.
+- **LLMTR must not block model upgrades.** Missing support, an unreachable catalog, or unverified LLMTR pricing is not a reason to delay an upgrade or keep its PR in draft. Put unsupported or unverified ids in `LLMTR_UNMAPPED_MODEL_IDS` so existing OpenRouter/fal resolution handles them; add LLMTR mappings and rates only after verification. Keep LLMTR last in Settings → API Keys, below OpenRouter.
 - **fal** — `docs/architecture/media-vias.md`. Check `https://fal.ai/models/{model-path}/llms.txt` before updating a model; new motion models go through `bun motion:codegen`, never inline schemas. Pricing is DB-only (`model_pricing`, empty locally until `bun scripts/refresh-fal-pricing.ts` runs) and fal's bill, not its pricing API, is the ground truth.
 
 **Cron jobs need wiring in three places** (like Workflows): `wrangler.jsonc` `triggers.crons` in the **default** block, the same in **`[env.production]`** (non-inheritable), and the constant `scheduled()` string-matches on (e.g. `FAL_PRICING_CRON`). Drift is silent — an unmatched expression falls through to the 5-minute reconcile sweep, which _succeeds_, so the job just never runs. `src/billing/server/refresh-fal-pricing.test.ts` enforces it.

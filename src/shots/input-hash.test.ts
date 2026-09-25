@@ -19,7 +19,6 @@ import {
   hashMotionPromptInput,
   computeMotionPromptInputHashV4,
   computeMusicPromptInputHash,
-  computeMusicPromptInputHashV4,
   LEGACY_1785_HASH_UNTIL,
   LEGACY_HASH_UNTIL,
   libraryLocationReferenceInputHashMatches,
@@ -30,7 +29,6 @@ import {
   hashVisualPromptInput,
   computeVisualPromptInputHashV4,
   motionPromptInputHashMatches,
-  musicPromptInputHashMatches,
   sha256Hex,
   talentSheetInputHashMatches,
   visualPromptInputHashMatches,
@@ -1211,7 +1209,6 @@ describe('prompt input hashes', () => {
     durationSeconds: 10,
     location: 'INT. STUDIO - NIGHT',
     timeOfDay: 'night',
-    visualSummary: 'Wide shot, low key lighting',
   };
 
   it('music prompt hash is stable for equivalent inputs and changes with sceneSummaries', async () => {
@@ -1243,20 +1240,16 @@ describe('prompt input hashes', () => {
     expect(a).toBe(b);
   });
 
-  it('dual-hash verify accepts a titled music digest of the same summaries', async () => {
-    const input = { sceneSummaries: [baseSummary], analysisModel: 'm' };
-    const current = await computeMusicPromptInputHash(input);
-    const v4 = await computeMusicPromptInputHashV4(input);
-    expect(v4).not.toBe(current);
-    expect(await musicPromptInputHashMatches(current, input)).toBe(true);
-    expect(await musicPromptInputHashMatches(v4, input)).toBe(true);
-    expect(await musicPromptInputHashMatches('deadbeef', input)).toBe(false);
-    expect(
-      await musicPromptInputHashMatches(v4, {
-        sceneSummaries: [{ ...baseSummary, storyBeat: 'Twist reveal' }],
-        analysisModel: 'm',
-      })
-    ).toBe(false);
+  it('the scene id is not part of the music prompt stamp (#1783)', async () => {
+    const a = await computeMusicPromptInputHash({
+      sceneSummaries: [baseSummary],
+      analysisModel: 'm',
+    });
+    const b = await computeMusicPromptInputHash({
+      sceneSummaries: [{ ...baseSummary, sceneId: 'row-id' }],
+      analysisModel: 'm',
+    });
+    expect(a).toBe(b);
   });
 
   it('hash excludes LLM output: same upstream context with different continuity hashes the same', async () => {

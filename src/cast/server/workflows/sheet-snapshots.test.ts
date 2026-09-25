@@ -6,8 +6,6 @@
  * over-regeneration, billing amplification) or never fire (silent stale
  * writes). The cases below pin the highest-risk invariants:
  *
- *   - FromDto/Current parity for each helper pair
- *   - Sort-asymmetry between FromDto and Current paths
  *   - Style-config null/undefined collapse
  *   - imageModel default-substitution agreement
  */
@@ -19,46 +17,15 @@ import type {
   LibraryTalentSheetWorkflowInput,
   LocationSheetWorkflowInput,
 } from '@/platform/server/workflow/types';
-import type { ScopedDb } from '@/platform/server/db/scoped';
+import type { SheetPayload } from './sheet-snapshots';
 import { DEFAULT_IMAGE_MODEL } from '@/models/models';
-import { sha256Hex } from '@/shots/input-hash';
 import {
-  computeCharacterSheetHashCurrent,
   computeCharacterSheetHashFromDto,
-  computeLibraryLocationSheetHashCurrent,
   computeLibraryLocationSheetHashFromDto,
-  computeLibraryTalentSheetHashCurrent,
   computeLibraryTalentSheetHashFromDto,
-  computeLocationSheetHashCurrent,
   computeLocationSheetHashFromDto,
   computeStyleConfigHash,
 } from './sheet-snapshots';
-
-// Shape-matching stubs: each helper only needs the methods it actually calls.
-// We type as `unknown as ScopedDb` so a future helper that reaches deeper
-// fails loudly rather than reading `undefined`.
-type CharacterStub = {
-  characters: { getById: (id: string) => Promise<unknown> };
-  talent: { getWithRelations: (id: string) => Promise<unknown> };
-};
-
-type LocationStub = {
-  sequenceLocations: { getById: (id: string) => Promise<unknown> };
-  locations: { getById: (id: string) => Promise<unknown> };
-};
-
-type TalentStub = {
-  talent: { getWithRelations: (id: string) => Promise<unknown> };
-};
-
-type LibraryLocationStub = {
-  locations: { getById: (id: string) => Promise<unknown> };
-};
-
-function asScopedDb<T>(stub: T): ScopedDb {
-  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- test stub
-  return stub as unknown as ScopedDb;
-}
 
 describe('computeStyleConfigHash', () => {
   it('collapses null and undefined to the same sentinel', async () => {
@@ -70,7 +37,7 @@ describe('computeStyleConfigHash', () => {
 });
 
 describe('character-sheet hash', () => {
-  const baseInput: CharacterSheetWorkflowInput = {
+  const baseInput: SheetPayload<CharacterSheetWorkflowInput> = {
     userId: 'u1',
     teamId: 't1',
     sequenceId: 's1',
@@ -97,158 +64,12 @@ describe('character-sheet hash', () => {
     castTalentDescription: null,
   };
 
-  it('FromDto and Current produce identical hashes when DB matches DTO', async () => {
-    const dtoHash = await computeCharacterSheetHashFromDto(baseInput);
-
-    const stub: CharacterStub = {
-      characters: {
-        getById: async () => ({ id: 'c1', talentId: 'tal1' }),
-      },
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          sheets: [{ isDefault: true, inputHash: 'talent-v1' }],
-        }),
-      },
-    };
-    const currentHash = await computeCharacterSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub),
-      null
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('detects divergence when upstream talent-sheet hash changes', async () => {
-    const dtoHash = await computeCharacterSheetHashFromDto(baseInput);
-    const stub: CharacterStub = {
-      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          sheets: [{ isDefault: true, inputHash: 'talent-v2' }],
-        }),
-      },
-    };
-    const currentHash = await computeCharacterSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub),
-      null
-    );
-    expect(dtoHash).not.toBe(currentHash);
-  });
-
-  it('detects divergence when the cast talent is edited or its sheet swapped (#1785)', async () => {
-    const castInput: CharacterSheetWorkflowInput = {
-      ...baseInput,
-      referenceImageUrl: '/r2/talent/sheet-1.png',
-      castTalentDescription: 'Freckles',
-    };
-    const talentRow = (description: string, imageUrl: string) => ({
-      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          description,
-          sheets: [{ isDefault: true, inputHash: 'talent-v1', imageUrl }],
-        }),
-      },
-    });
-    const dtoHash = await computeCharacterSheetHashFromDto(castInput);
-    const current = (stub: CharacterStub) =>
-      computeCharacterSheetHashCurrent(castInput, asScopedDb(stub), null);
-    expect(await current(talentRow('Freckles', '/r2/talent/sheet-1.png'))).toBe(
-      dtoHash
-    );
-    expect(
-      await current(talentRow('Grey hair', '/r2/talent/sheet-1.png'))
-    ).not.toBe(dtoHash);
-    expect(
-      await current(talentRow('Freckles', '/r2/talent/sheet-2.png'))
-    ).not.toBe(dtoHash);
-  });
-
-  it('keeps a pre-#1785 cast snapshot convergent when the live talent matches', async () => {
-    const castInput: CharacterSheetWorkflowInput = {
-      ...baseInput,
-      referenceImageUrl: '/r2/talent/sheet-1.png',
-      castTalentDescription: 'Freckles',
-    };
-    const stub: CharacterStub = {
-      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          description: 'Freckles',
-          sheets: [
-            {
-              isDefault: true,
-              inputHash: 'talent-v1',
-              imageUrl: '/r2/talent/sheet-1.png',
-            },
-          ],
-        }),
-      },
-    };
-    // The pre-#1785 body is the current body with the talent channel omitted.
-    const pre1785 = await computeCharacterSheetHashFromDto({
-      ...castInput,
-      referenceImageUrl: undefined,
-      talentMetadata: undefined,
-      castTalentDescription: null,
-    });
-    const db = asScopedDb(stub);
-    expect(
-      await computeCharacterSheetHashCurrent(castInput, db, null)
-    ).not.toBe(pre1785);
-    expect(await computeCharacterSheetHashCurrent(castInput, db, pre1785)).toBe(
-      pre1785
-    );
-  });
-
-  it('still diverges a pre-#1785 cast snapshot when the talent sheet hash changes', async () => {
-    const castInput: CharacterSheetWorkflowInput = {
-      ...baseInput,
-      referenceImageUrl: '/r2/talent/sheet-1.png',
-      castTalentDescription: 'Freckles',
-    };
-    const pre1785 = await computeCharacterSheetHashFromDto({
-      ...castInput,
-      referenceImageUrl: undefined,
-      talentMetadata: undefined,
-      castTalentDescription: null,
-    });
-    const stub: CharacterStub = {
-      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          description: 'Freckles',
-          sheets: [
-            {
-              isDefault: true,
-              inputHash: 'talent-v2',
-              imageUrl: '/r2/talent/sheet-1.png',
-            },
-          ],
-        }),
-      },
-    };
-    expect(
-      await computeCharacterSheetHashCurrent(
-        castInput,
-        asScopedDb(stub),
-        pre1785
-      )
-    ).not.toBe(pre1785);
-  });
-
   it('treats missing imageModel as DEFAULT_IMAGE_MODEL on both paths', async () => {
-    const omittedInput: CharacterSheetWorkflowInput = {
+    const omittedInput: SheetPayload<CharacterSheetWorkflowInput> = {
       ...baseInput,
       imageModel: undefined,
     };
-    const explicitInput: CharacterSheetWorkflowInput = {
+    const explicitInput: SheetPayload<CharacterSheetWorkflowInput> = {
       ...baseInput,
       imageModel: DEFAULT_IMAGE_MODEL,
     };
@@ -259,7 +80,7 @@ describe('character-sheet hash', () => {
 });
 
 describe('location-sheet hash', () => {
-  const baseInput: LocationSheetWorkflowInput = {
+  const baseInput: SheetPayload<LocationSheetWorkflowInput> = {
     userId: 'u1',
     teamId: 't1',
     sequenceId: 's1',
@@ -283,95 +104,26 @@ describe('location-sheet hash', () => {
     libraryLocationReferenceHash: 'lib-v1',
   };
 
-  it('FromDto and Current match when DB matches DTO', async () => {
-    const dtoHash = await computeLocationSheetHashFromDto(baseInput);
-    const stub: LocationStub = {
-      sequenceLocations: {
-        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
+  it('moves with every bible field the prompt reads and the library link (#1785)', async () => {
+    const base = await computeLocationSheetHashFromDto(baseInput);
+    const relit = await computeLocationSheetHashFromDto({
+      ...baseInput,
+      locationMetadata: {
+        ...baseInput.locationMetadata,
+        lightingSetup: 'neon',
       },
-      locations: {
-        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v1' }),
-      },
-    };
-    const currentHash = await computeLocationSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub),
-      null
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('diverges when library-location reference hash changes', async () => {
-    const dtoHash = await computeLocationSheetHashFromDto(baseInput);
-    const stub: LocationStub = {
-      sequenceLocations: {
-        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
-      },
-      locations: {
-        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v2' }),
-      },
-    };
-    const currentHash = await computeLocationSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub),
-      null
-    );
-    expect(dtoHash).not.toBe(currentHash);
-  });
-
-  it('keeps a description-only snapshot convergent when the library reference matches', async () => {
-    const pre1785 = await sha256Hex({
-      artifact: 'location:sheet',
-      locationBible: { description: 'Foggy waterfront' },
-      libraryLocationReferenceHash: 'lib-v1',
-      styleConfigHash: 'no-style',
-      imageModel: 'nano_banana_2',
     });
-    const stub: LocationStub = {
-      sequenceLocations: {
-        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
-      },
-      locations: {
-        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v1' }),
-      },
-    };
-    const db = asScopedDb(stub);
-    expect(await computeLocationSheetHashCurrent(baseInput, db, null)).not.toBe(
-      pre1785
-    );
-    expect(await computeLocationSheetHashCurrent(baseInput, db, pre1785)).toBe(
-      pre1785
-    );
-  });
-
-  it('still diverges a description-only snapshot when the library reference changes', async () => {
-    const pre1785 = await sha256Hex({
-      artifact: 'location:sheet',
-      locationBible: { description: 'Foggy waterfront' },
-      libraryLocationReferenceHash: 'lib-v1',
-      styleConfigHash: 'no-style',
-      imageModel: 'nano_banana_2',
+    const relinked = await computeLocationSheetHashFromDto({
+      ...baseInput,
+      libraryLocationReferenceHash: 'lib-v2',
     });
-    const stub: LocationStub = {
-      sequenceLocations: {
-        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
-      },
-      locations: {
-        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v2' }),
-      },
-    };
-    expect(
-      await computeLocationSheetHashCurrent(
-        baseInput,
-        asScopedDb(stub),
-        pre1785
-      )
-    ).not.toBe(pre1785);
+    expect(relit).not.toBe(base);
+    expect(relinked).not.toBe(base);
   });
 });
 
 describe('library-talent-sheet hash', () => {
-  const baseInput: LibraryTalentSheetWorkflowInput = {
+  const baseInput: SheetPayload<LibraryTalentSheetWorkflowInput> = {
     userId: 'u1',
     teamId: 't1',
     talentId: 'tal1',
@@ -381,28 +133,6 @@ describe('library-talent-sheet hash', () => {
     imageModel: 'nano_banana_2',
   };
 
-  it('FromDto matches Current when DB media matches the inlined URL set', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: 'Lead actress',
-          media: [
-            { type: 'image', url: 'https://r2/b.png' },
-            { type: 'image', url: 'https://r2/a.png' },
-          ],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
   it('hashes are insensitive to inlined URL order (FromDto sorts)', async () => {
     const inputA = { ...baseInput, referenceImageUrls: ['x', 'y', 'z'] };
     const inputB = { ...baseInput, referenceImageUrls: ['z', 'x', 'y'] };
@@ -410,151 +140,10 @@ describe('library-talent-sheet hash', () => {
     const b = await computeLibraryTalentSheetHashFromDto(inputB);
     expect(a).toBe(b);
   });
-
-  it('stays convergent when live media is a superset of the snapshot URLs', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: 'Lead actress',
-          media: [
-            { type: 'image', url: 'https://r2/a.png' },
-            { type: 'image', url: 'https://r2/b.png' },
-            { type: 'image', url: 'https://r2/c.png' },
-          ],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('stays convergent when a name-only snapshot gains photos mid-run', async () => {
-    const nameOnly = { ...baseInput, referenceImageUrls: [] };
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(nameOnly);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: 'Lead actress',
-          media: [{ type: 'image', url: 'https://r2/a.png' }],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      nameOnly,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('diverges when a snapshot reference URL is missing from live media', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: 'Lead actress',
-          media: [{ type: 'image', url: 'https://r2/a.png' }],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).not.toBe(currentHash);
-  });
-
-  it('non-image media is excluded from the live hash', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: 'Lead actress',
-          media: [
-            { type: 'image', url: 'https://r2/a.png' },
-            { type: 'image', url: 'https://r2/b.png' },
-            { type: 'video', url: 'https://r2/movie.mp4' },
-          ],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('stays convergent when the talent was renamed mid-run', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alicia',
-          description: 'Lead actress',
-          media: [
-            { type: 'image', url: 'https://r2/a.png' },
-            { type: 'image', url: 'https://r2/b.png' },
-          ],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('diverges when the talent description was cleared mid-run', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: {
-        getWithRelations: async () => ({
-          id: 'tal1',
-          name: 'Alice',
-          description: null,
-          media: [
-            { type: 'image', url: 'https://r2/a.png' },
-            { type: 'image', url: 'https://r2/b.png' },
-          ],
-        }),
-      },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).not.toBe(currentHash);
-  });
-
-  it('falls back to the payload identity when the talent row vanished', async () => {
-    const dtoHash = await computeLibraryTalentSheetHashFromDto(baseInput);
-    const stub: TalentStub = {
-      talent: { getWithRelations: async () => null },
-    };
-    const currentHash = await computeLibraryTalentSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
 });
 
 describe('library-location-sheet hash', () => {
-  const baseInput: LibraryLocationSheetWorkflowInput = {
+  const baseInput: SheetPayload<LibraryLocationSheetWorkflowInput> = {
     userId: 'u1',
     teamId: 't1',
     sequenceId: 'library',
@@ -564,24 +153,6 @@ describe('library-location-sheet hash', () => {
     referenceImageUrls: ['https://r2/a.png', 'https://r2/b.png'],
     imageModel: 'nano_banana_2',
   };
-
-  it('FromDto matches Current when the live row still matches the payload', async () => {
-    const dtoHash = await computeLibraryLocationSheetHashFromDto(baseInput);
-    const stub: LibraryLocationStub = {
-      locations: {
-        getById: async () => ({
-          id: 'loc1',
-          name: 'Rooftop Bar',
-          description: 'Neon-lit, overlooking the harbour',
-        }),
-      },
-    };
-    const currentHash = await computeLibraryLocationSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
 
   it('is insensitive to inlined URL order', async () => {
     const a = await computeLibraryLocationSheetHashFromDto({
@@ -593,42 +164,6 @@ describe('library-location-sheet hash', () => {
       referenceImageUrls: ['z', 'y', 'x'],
     });
     expect(a).toBe(b);
-  });
-
-  it('stays convergent when the location was renamed mid-run', async () => {
-    const dtoHash = await computeLibraryLocationSheetHashFromDto(baseInput);
-    const stub: LibraryLocationStub = {
-      locations: {
-        getById: async () => ({
-          id: 'loc1',
-          name: 'Harbour Rooftop',
-          description: 'Neon-lit, overlooking the harbour',
-        }),
-      },
-    };
-    const currentHash = await computeLibraryLocationSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).toBe(currentHash);
-  });
-
-  it('diverges when the description was cleared mid-run', async () => {
-    const dtoHash = await computeLibraryLocationSheetHashFromDto(baseInput);
-    const stub: LibraryLocationStub = {
-      locations: {
-        getById: async () => ({
-          id: 'loc1',
-          name: 'Rooftop Bar',
-          description: null,
-        }),
-      },
-    };
-    const currentHash = await computeLibraryLocationSheetHashCurrent(
-      baseInput,
-      asScopedDb(stub)
-    );
-    expect(dtoHash).not.toBe(currentHash);
   });
 
   it('treats a missing imageModel as DEFAULT_IMAGE_MODEL', async () => {

@@ -29,7 +29,7 @@ import { playerPosterSrc } from './player-poster';
 import { createPackedPlayback } from './packed-playback';
 import { usePostHog } from '@posthog/react';
 import { Download, Link, Loader2, Share2, VideoIcon } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   generatePackedShotChaptersVTT,
   packedClipWindows,
@@ -174,7 +174,11 @@ export const ScenePlayer: React.FC<ScenePlayerProps> = ({
     packedWindows.length > 1
       ? generatePackedShotChaptersVTT(packedGroup)
       : null;
-  const chaptersUrl = usePackedChaptersUrl(packedChaptersVtt);
+  // A data: URL, not a blob URL: it is a plain string, so SSR renders the same
+  // track as the client (workerd's URL.createObjectURL throws).
+  const chaptersUrl = packedChaptersVtt
+    ? `data:text/vtt;charset=utf-8,${encodeURIComponent(packedChaptersVtt)}`
+    : undefined;
   const showsStillImage =
     selectedTab === 'image-prompt' || selectedTab === 'scene-variants';
   const playbackVideoUrl = showsStillImage
@@ -647,22 +651,3 @@ export const ScenePlayer: React.FC<ScenePlayerProps> = ({
     </div>
   );
 };
-
-function usePackedChaptersUrl(vtt: string | null): string | undefined {
-  const url = useMemo(() => {
-    if (
-      !vtt ||
-      typeof Blob === 'undefined' ||
-      typeof URL === 'undefined' ||
-      typeof URL.createObjectURL !== 'function'
-    ) {
-      return undefined;
-    }
-    return URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
-  }, [vtt]);
-  useEffect(() => {
-    if (!url) return;
-    return () => URL.revokeObjectURL(url);
-  }, [url]);
-  return url;
-}

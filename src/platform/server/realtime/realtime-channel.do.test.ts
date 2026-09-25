@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getLogger } from '@/platform/logger';
 import {
   HISTORY_MAX_ROWS,
+  HISTORY_REPLAY_MAX_BYTES,
   PRUNE_BATCH_ROWS,
   PRUNE_CATCHUP_MS,
   RealtimeChannel,
@@ -481,6 +482,80 @@ describe('RealtimeChannel history cap (#1332)', () => {
     await triggerAlarm(harness);
     expect(eventCount(harness.db)).toBeGreaterThan(HISTORY_MAX_ROWS);
     expect(harness.getAlarm()).toBe(t0 + PRUNE_CATCHUP_MS);
+  });
+});
+
+describe('RealtimeChannel history replay bounds (#1811)', () => {
+  it('returns only the newest rows that fit the byte budget, oldest-first', async () => {
+    const { channel } = createHarness();
+    // 0.4 of the budget per row: rows 6, 5, 4 start at 0, 0.4 and 0.8 of it
+    // and are admitted; row 3 starts at 1.2 and is cut. The margin keeps the
+    // JSON envelope around each row from deciding the result.
+    const chunk = 'x'.repeat(HISTORY_REPLAY_MAX_BYTES * 0.4);
+    for (let n = 1; n <= 6; n++) await emit(channel, { n, chunk });
+
+    const messages = await history(channel);
+    expect(messages.map((m) => JSON.parse(m.data).n)).toEqual([4, 5, 6]);
+  });
+
+  it('budgets multi-byte data by UTF-8 bytes, not characters', async () => {
+    const { channel } = createHarness();
+    await emit(channel, { n: 1 });
+    // 'é' is one character and two bytes: half the budget in characters is the
+    // whole budget in bytes, so row 1 must be cut.
+    await emit(channel, {
+      n: 2,
+      chunk: 'é'.repeat(HISTORY_REPLAY_MAX_BYTES / 2),
+    });
+    await emit(channel, { n: 3 });
+
+    const messages = await history(channel);
+    expect(messages.map((m) => JSON.parse(m.data).n)).toEqual([2, 3]);
+  });
+
+  it('always returns the newest row even when it alone exceeds the budget', async () => {
+    const { channel } = createHarness();
+    await emit(channel, { n: 1 });
+    await emit(channel, {
+      n: 2,
+      chunk: 'y'.repeat(HISTORY_REPLAY_MAX_BYTES + 1),
+    });
+
+    const messages = await history(channel);
+    expect(messages.map((m) => JSON.parse(m.data).n)).toEqual([2]);
+  });
+
+  it('broadcasts a transient emit to subscribers without storing it', async () => {
+    const { channel, db } = createHarness();
+    const ac = new AbortController();
+    abortControllers.push(ac);
+    const response = await channel.fetch(
+      new Request(`https://realtime.do/subscribe?channel=${CHANNEL}`, {
+        signal: ac.signal,
+      })
+    );
+    const collected = collectWhile(requireBody(response.body), ac.signal);
+
+    await channel.fetch(
+      new Request(`https://realtime.do/emit?channel=${CHANNEL}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          event: 'shotPrompt.streaming',
+          data: { delta: 'a' },
+          transient: true,
+        }),
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    ac.abort();
+
+    const delivered = (await collected)
+      .filter(isUserEvent)
+      .map((frame) => frame.data);
+    expect(delivered).toContainEqual({ delta: 'a' });
+    expect(eventCount(db)).toBe(0);
+    expect(await history(channel)).toEqual([]);
   });
 });
 

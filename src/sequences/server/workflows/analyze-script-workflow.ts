@@ -1092,7 +1092,6 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
             characterSheetHashes: refs.characterSheetHashes,
             locationSheetHashes: refs.locationSheetHashes,
             elementReferenceHashes: refs.elementReferenceHashes,
-            elementTokens: refs.elementTokens,
           };
         }
       );

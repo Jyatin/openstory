@@ -80,7 +80,6 @@ function makeEvent(): Readonly<WorkflowEvent<RegenerateShotsWorkflowInput>> {
           characterSheetHashes: [],
           locationSheetHashes: [],
           elementReferenceHashes: [],
-          elementTokens: [],
           characterRefs: [],
           locationRefs: [],
           snapshotInputHash: shotImageInputHash('hash-1'),

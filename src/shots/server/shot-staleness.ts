@@ -40,7 +40,6 @@ import {
 import type { SequenceStatus } from '@/platform/server/db/schema/sequences';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { buildRegenerateShotSnapshot } from '@/shots/server/workflows/regenerate-shots-snapshot';
-import { shotImageSceneHashMatches } from '@/cast/server/workflows/sheet-snapshots';
 import { matchElementsToShotImage } from '@/shots/scene-matching';
 import { getLogger } from '@/platform/logger';
 import { loadSceneContextBySequence, type SceneContext } from './scene-script';
@@ -412,10 +411,6 @@ export async function computeShotStaleness(args: {
           }
         }
 
-        const imageModel = safeTextToImageModel(
-          selectedImage.model,
-          DEFAULT_IMAGE_MODEL
-        );
         const snapshot = await buildRegenerateShotSnapshot({
           shot,
           scene,
@@ -424,21 +419,18 @@ export async function computeShotStaleness(args: {
           characters,
           locations,
           elements,
-          imageModel,
+          imageModel: safeTextToImageModel(
+            selectedImage.model,
+            DEFAULT_IMAGE_MODEL
+          ),
           aspectRatio: sequence.aspectRatio,
         });
         liveHashes.thumbnail = snapshot.snapshotInputHash;
         if (selectedImage.inputHash != null) {
           thumbnail =
-            snapshot.snapshotInputHash === selectedImage.inputHash ||
-            (await shotImageSceneHashMatches(
-              selectedImage.inputHash,
-              { ...snapshot, visualPrompt: snapshot.imagePrompt },
-              imageModel,
-              sequence.aspectRatio
-            ))
-              ? 'fresh'
-              : 'stale';
+            snapshot.snapshotInputHash !== selectedImage.inputHash
+              ? 'stale'
+              : 'fresh';
         }
       } catch (error) {
         // Fail-open as 'fresh' would lie. Don't clobber a timestamp-stale

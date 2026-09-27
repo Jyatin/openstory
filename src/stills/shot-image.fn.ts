@@ -343,7 +343,6 @@ export const generateShotVariantsFn = createServerFn({ method: 'POST' })
             characterSheetHashes: refs.characterSheetHashes,
             locationSheetHashes: refs.locationSheetHashes,
             elementReferenceHashes: refs.elementReferenceHashes,
-            elementTokens: refs.elementTokens,
           }
         : null,
     };

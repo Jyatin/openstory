@@ -28,7 +28,6 @@ const baseScene: ShotImageSceneSnapshot = {
   characterSheetHashes: ['jack-hash-v1'],
   locationSheetHashes: ['docks-hash-v1'],
   elementReferenceHashes: [],
-  elementTokens: [],
 };
 
 const baseInput: ImageWorkflowInput = {

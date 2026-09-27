@@ -190,7 +190,7 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     summary:
       'A prop, effect, sound or clip referenced by @token. Detected in the script at the Script stage or added by hand, then yours to edit.',
     counts: [
-      'Token and description (prompts)',
+      'Token and description (prompts). The token reaches the model, so a rename re-stales every prompt, still and clip that names it',
       'Image (still)',
       'Audio or video clip: sent as a reference when the video model takes one',
       'Its media URL, stamped on every clip it was sent to (referenceKeys)',
@@ -861,7 +861,7 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     from: 'motionPrompt',
     to: 'clip',
     tracking: 'pointer',
-    note: 'the manifest records the prompt version',
+    note: 'the manifest records the prompt version; a token rename writes a new version, so it re-stales the clip',
   },
   {
     from: 'still',

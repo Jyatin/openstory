@@ -302,12 +302,6 @@ export async function persistMotionCompletion(opts: {
   return { status: 'completed', videoUrl: upload.url };
 }
 
-/**
- * The prompt swap a content rescue or length shorten made for `shotId`: the
- * motion-prompt version the opened clip pinned, and the rewrite the rescue
- * repointed the manifest at. Null when the run rendered the prompt it started
- * from.
- */
 type PinnedPrompts =
   | ReadonlyArray<
       Pick<VideoManifest[number], 'shotId' | 'motionPromptVersionId'>
@@ -315,6 +309,12 @@ type PinnedPrompts =
   | null
   | undefined;
 
+/**
+ * The prompt swap a content rescue or length shorten made for `shotId`: the
+ * motion-prompt version the opened clip pinned, and the rewrite the rescue
+ * repointed the manifest at. Null when the run rendered the prompt it started
+ * from.
+ */
 export function rescuedMotionPromptOf(
   shotId: string,
   opened: PinnedPrompts,

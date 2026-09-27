@@ -192,11 +192,6 @@ export class ImageWorkflow extends OpenStoryWorkflowEntrypoint<ImageWorkflowInpu
           return null;
         }
 
-        // The version this run's prompt text came from (#1070), pinned at the
-        // trigger — a user edit is written there, at the click (#1786) —
-        // including an explicit null ("this prompt came from no version").
-        // Only un-migrated triggers, which omit the field entirely, fall back
-        // to a live read.
         // A run queued before #1786 still carries the edit for the run to
         // write (see PreClickEditPayload); nothing else holds the typed text.
         const preClickEdit = input.userEditProvenance
@@ -209,6 +204,11 @@ export class ImageWorkflow extends OpenStoryWorkflowEntrypoint<ImageWorkflowInpu
               createdBy: input.userId,
             })
           : null;
+        // The version this run's prompt text came from (#1070), pinned at the
+        // trigger — a user edit is written there, at the click (#1786) —
+        // including an explicit null ("this prompt came from no version").
+        // Only un-migrated triggers, which omit the field entirely, fall back
+        // to a live read.
         const promptVersionId =
           preClickEdit?.id ??
           (input.promptVersionId !== undefined

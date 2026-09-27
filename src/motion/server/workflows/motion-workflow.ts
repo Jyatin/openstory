@@ -800,7 +800,8 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
      * mid-run would clobber an edit the user made meanwhile and demote a
      * regeneration they queued. A primary clip that wins its promote claim
      * carries it into the selection at completion (`rescuedMotionPrompt`),
-     * and only if the shot still points at the prompt the run started from.
+     * and only if the shot still points at the prompt the run started from
+     * and no regeneration is queued.
      *
      * A single-shot soften passes the rewritten prose and the version's
      * `audio` (#1773), so a later render still assembles dialogue and trailer

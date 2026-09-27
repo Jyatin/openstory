@@ -32,6 +32,7 @@ import {
   and,
   desc,
   eq,
+  exists,
   inArray,
   isNotNull,
   lte,
@@ -729,9 +730,10 @@ export function createShotPromptVersionsMethods(db: Database) {
      * while it still points at `expectedVersionId`. A content-checker rescue
      * appends its rewrite unselected mid-run; when the rescued clip wins its
      * promote claim, this carries the rewrite with it — unless the user moved
-     * the prompt meanwhile, in which case their choice stands. No claim
-     * demotion: a regeneration the user queued after the render started is
-     * newer intent and keeps its mirror right. Returns whether it moved.
+     * the prompt meanwhile, in which case their choice stands. A live
+     * regeneration claim also wins: the user asked for a new prompt, so the
+     * rewrite stays in history rather than cancel it. Returns whether it
+     * moved.
      */
     selectIfSelectionIs: async (
       shotId: string,
@@ -748,7 +750,35 @@ export function createShotPromptVersionsMethods(db: Database) {
         .where(
           and(
             eq(shots.id, shotId),
-            eq(shots.selectedMotionPromptVersionId, expectedVersionId)
+            eq(shots.selectedMotionPromptVersionId, expectedVersionId),
+            exists(
+              db
+                .select({ id: shotPromptVersions.id })
+                .from(shotPromptVersions)
+                .where(
+                  and(
+                    eq(shotPromptVersions.id, versionId),
+                    eq(shotPromptVersions.shotId, shotId),
+                    eq(shotPromptVersions.promptType, 'motion'),
+                    eq(shotPromptVersions.status, 'completed')
+                  )
+                )
+            ),
+            notExists(
+              db
+                .select({ id: shotPromptVersions.id })
+                .from(shotPromptVersions)
+                .where(
+                  and(
+                    eq(shotPromptVersions.shotId, shotId),
+                    eq(shotPromptVersions.promptType, 'motion'),
+                    inArray(shotPromptVersions.status, [
+                      ...LIVE_PENDING_STATUSES,
+                    ]),
+                    isNotNull(shotPromptVersions.pendingInputHash)
+                  )
+                )
+            )
           )
         )
         .returning({ sequenceId: shots.sequenceId });

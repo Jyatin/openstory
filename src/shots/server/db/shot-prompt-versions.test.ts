@@ -922,6 +922,32 @@ describe('shotPromptVersions rescue rewrites (#1786)', () => {
     });
     expect((await selectedMotionVersion())?.text).toBe('Regenerated');
   });
+
+  it('a regeneration queued before the rewrite keeps its right when the clip wins', async () => {
+    const m = createShotPromptVersionsMethods(db);
+    const original = await writeMotion(m, 'Original', 'ai-generated', true);
+    const claim = await m.createPending({
+      usesStartFrame: true,
+      shotId,
+      pendingInputHash: 'live-hash',
+    });
+    await m.markGenerating(claim.id, 'run-1');
+    const softened = await writeMotion(m, 'Softened', 'softened', false);
+
+    expect(
+      await m.selectIfSelectionIs(shotId, softened.id, original.id, {
+        actorId: null,
+      })
+    ).toBe(false);
+    await m.completePendingAiVersion({
+      usesStartFrame: true,
+      versionId: claim.id,
+      shotId,
+      text: 'Regenerated',
+      analysisModel: HAIKU,
+    });
+    expect((await selectedMotionVersion())?.text).toBe('Regenerated');
+  });
 });
 
 describe('shotPromptVersions.completePendingAiVersion', () => {

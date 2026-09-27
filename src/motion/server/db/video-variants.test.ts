@@ -432,6 +432,19 @@ describe('selectIfPendingPromoteIs (#1786)', () => {
     expect(events).toHaveLength(1);
   });
 
+  it('a retried promote that already landed reads as won', async () => {
+    const v = await methods.appendVersion(versionInput());
+    await claim(v.id);
+    await methods.selectIfPendingPromoteIs(shotId, v.id, { actorId: ACTOR });
+
+    const retried = await methods.selectIfPendingPromoteIs(shotId, v.id, {
+      actorId: ACTOR,
+    });
+
+    expect(retried?.id).toBe(v.id);
+    expect((await segmentRow())?.selectedVideoVersionId).toBe(v.id);
+  });
+
   it('a newer kickoff wins: the late completion stays in history', async () => {
     const late = await methods.appendVersion(versionInput());
     const newer = await methods.appendVersion(

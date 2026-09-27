@@ -67,10 +67,12 @@ export function buildFrameImageSelection(
   frameId: string,
   version: PromotableFrameVariant,
   /**
-   * The pointer already moved in a claim-consuming UPDATE (#1786): mirror
-   * only while the frame still points at this version.
+   * A claim-consuming promote (#1786): the same UPDATE consumes the frame's
+   * promote claim and restores the still's prompt, and lands only while the
+   * claim still names this version. One statement, so a retried step never
+   * finds the pointer moved and the mirror missing.
    */
-  onlyIfSelected: boolean
+  claim: { restorePromptVersionId: string | null } | null
 ) {
   return db
     .update(frames)
@@ -78,13 +80,17 @@ export function buildFrameImageSelection(
       selectedImageVersionId: version.id,
       imageStatus: version.status,
       imageError: version.error,
+      ...(claim && { pendingPromoteVersionId: null }),
+      ...(claim?.restorePromptVersionId && {
+        selectedImagePromptVersionId: claim.restorePromptVersionId,
+      }),
       updatedAt: new Date(),
     })
     .where(
-      onlyIfSelected
+      claim
         ? and(
             eq(frames.id, frameId),
-            eq(frames.selectedImageVersionId, version.id)
+            eq(frames.pendingPromoteVersionId, version.id)
           )
         : eq(frames.id, frameId)
     );

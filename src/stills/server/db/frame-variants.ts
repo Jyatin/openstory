@@ -52,6 +52,8 @@ import {
   sql,
   ne,
   or,
+  exists,
+  type SQL,
 } from 'drizzle-orm';
 import { LIVE_PENDING_STATUSES } from '@/shots/server/db/frame-prompt-versions';
 import {
@@ -222,9 +224,10 @@ export async function getLatestPreviewByFrameIds(
 
 export function createFrameVariantsMethods(db: Database) {
   /**
-   * `select`'s body. With `consumeClaim`, the pointer move is gated on the
-   * frame's promote claim still naming `versionId` and consumes it in the
-   * same UPDATE (#1786); returns null when the claim had moved.
+   * `select`'s body. With `consumeClaim`, the pointer move, mirror and prompt
+   * restore are one UPDATE gated on the frame's promote claim still naming
+   * `versionId`, which it consumes (#1786); returns null when the claim had
+   * moved.
    */
   const selectFrameVariant = async (
     frameId: string,
@@ -271,12 +274,6 @@ export function createFrameVariantsMethods(db: Database) {
       kind,
       status: 'completed',
     };
-    const mirrorUpdate = buildFrameImageSelection(
-      db,
-      frameId,
-      promotableVersion,
-      consumeClaim
-    );
 
     const [frame] = await db
       .select({
@@ -350,43 +347,81 @@ export function createFrameVariantsMethods(db: Database) {
     // Repointing the prompt is an explicit user choice (#1085): revoke the
     // mirror rights of any in-flight prompt claims on this frame so a
     // completing regeneration lands in history without clobbering it.
-    const demotePromptClaims = () =>
+    const demotePromptClaims = (guard?: SQL) =>
       db
         .update(framePromptVersions)
         .set({ pendingInputHash: null })
         .where(
           and(
             eq(framePromptVersions.frameId, frameId),
-            inArray(framePromptVersions.status, [...LIVE_PENDING_STATUSES])
+            inArray(framePromptVersions.status, [...LIVE_PENDING_STATUSES]),
+            guard
           )
         );
 
+    const promptSelectedEvent = (promptVersionId: string) =>
+      buildEventInsert(db, {
+        sequenceId: frame.sequenceId,
+        actorId: opts.actorId,
+        kind: 'prompt.selected',
+        targetType: 'frame',
+        targetId: frameId,
+        summary: 'Restored image prompt with selected still',
+        data: {
+          versionId: promptVersionId,
+          prevVersionId: frame.prevPromptVersionId ?? null,
+          fromImageVersionId: versionId,
+        },
+      });
+
     if (consumeClaim) {
-      const claimed = await db
-        .update(frames)
-        .set({
-          selectedImageVersionId: versionId,
-          pendingPromoteVersionId: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(frames.id, frameId),
-            eq(frames.pendingPromoteVersionId, versionId)
+      const holdsClaim = exists(
+        db
+          .select({ id: frames.id })
+          .from(frames)
+          .where(
+            and(
+              eq(frames.id, frameId),
+              eq(frames.pendingPromoteVersionId, versionId)
+            )
           )
-        )
-        .returning({ id: frames.id });
-      if (claimed.length === 0) return null;
+      );
+      const promote = buildFrameImageSelection(db, frameId, promotableVersion, {
+        restorePromptVersionId: linkedPrompt?.id ?? null,
+      }).returning({ id: frames.id });
+      // The demotion runs first, while the claim it checks is still held.
+      const claimed = linkedPrompt
+        ? (await db.batch([demotePromptClaims(holdsClaim), promote]))[1]
+        : await promote;
+      if (claimed.length === 0) {
+        // A retry of a step whose promote already landed finds the claim
+        // consumed and the frame on this still: that is a win, not a loss.
+        const [current] = await db
+          .select({
+            selected: frames.selectedImageVersionId,
+            pending: frames.pendingPromoteVersionId,
+          })
+          .from(frames)
+          .where(eq(frames.id, frameId));
+        return current?.selected === versionId && current.pending === null
+          ? version
+          : null;
+      }
+      // Events only once the promote won. A crash here loses the history
+      // line, never the selection.
+      await db.batch([
+        imageSelectedEvent,
+        ...(linkedPrompt ? [promptSelectedEvent(linkedPrompt.id)] : []),
+      ]);
+      return version;
     }
-    // After a claim-consuming promote, the rest of the frame writes land
-    // only while the frame still shows this still — a manual pick made in
-    // between keeps its own prompt.
-    const frameWhere = consumeClaim
-      ? and(
-          eq(frames.id, frameId),
-          eq(frames.selectedImageVersionId, versionId)
-        )
-      : eq(frames.id, frameId);
+
+    const mirrorUpdate = buildFrameImageSelection(
+      db,
+      frameId,
+      promotableVersion,
+      null
+    );
 
     if (linkedPrompt && shouldClearPending) {
       await db.batch([
@@ -400,20 +435,8 @@ export function createFrameVariantsMethods(db: Database) {
             pendingPromoteVersionId: null,
             updatedAt: new Date(),
           })
-          .where(frameWhere),
-        buildEventInsert(db, {
-          sequenceId: frame.sequenceId,
-          actorId: opts.actorId,
-          kind: 'prompt.selected',
-          targetType: 'frame',
-          targetId: frameId,
-          summary: 'Restored image prompt with selected still',
-          data: {
-            versionId: linkedPrompt.id,
-            prevVersionId: frame.prevPromptVersionId ?? null,
-            fromImageVersionId: versionId,
-          },
-        }),
+          .where(eq(frames.id, frameId)),
+        promptSelectedEvent(linkedPrompt.id),
       ]);
     } else if (linkedPrompt) {
       await db.batch([
@@ -426,20 +449,8 @@ export function createFrameVariantsMethods(db: Database) {
             selectedImagePromptVersionId: linkedPrompt.id,
             updatedAt: new Date(),
           })
-          .where(frameWhere),
-        buildEventInsert(db, {
-          sequenceId: frame.sequenceId,
-          actorId: opts.actorId,
-          kind: 'prompt.selected',
-          targetType: 'frame',
-          targetId: frameId,
-          summary: 'Restored image prompt with selected still',
-          data: {
-            versionId: linkedPrompt.id,
-            prevVersionId: frame.prevPromptVersionId ?? null,
-            fromImageVersionId: versionId,
-          },
-        }),
+          .where(eq(frames.id, frameId)),
+        promptSelectedEvent(linkedPrompt.id),
       ]);
     } else if (shouldClearPending) {
       await db.batch([
@@ -451,7 +462,7 @@ export function createFrameVariantsMethods(db: Database) {
             pendingPromoteVersionId: null,
             updatedAt: new Date(),
           })
-          .where(frameWhere),
+          .where(eq(frames.id, frameId)),
       ]);
     } else {
       await db.batch([mirrorUpdate, imageSelectedEvent]);

@@ -734,8 +734,8 @@ export function createVideoVariantsMethods(db: Database) {
      * claim still points at it (#1070, #1786). The pointer move and the claim
      * consumption are ONE guarded UPDATE, so a newer kickoff or a manual select
      * that moved the claim — at any moment before this statement — wins, with
-     * no read-then-decide gap. Returns null when the claim had moved; the
-     * caller leaves the version in history.
+     * no read-then-decide gap. Returns null when the claim had moved or the
+     * shot left this segment; the caller leaves the version in history.
      */
     selectIfPendingPromoteIs: async (
       shotId: string,
@@ -760,7 +760,21 @@ export function createVideoVariantsMethods(db: Database) {
           )
         )
         .returning({ id: renderSegments.id });
-      if (claimed.length === 0) return null;
+      if (claimed.length === 0) {
+        // A retry of a step whose promote already landed finds the claim
+        // consumed and the segment on this clip: that is a win, not a loss.
+        // Its event may be missing; the selection is not.
+        const [current] = await db
+          .select({
+            selected: renderSegments.selectedVideoVersionId,
+            pending: renderSegments.pendingPromoteVersionId,
+          })
+          .from(renderSegments)
+          .where(eq(renderSegments.id, version.renderSegmentId));
+        return current?.selected === versionId && current.pending === null
+          ? version
+          : null;
+      }
       await selectedEvent(
         shotId,
         sequenceId,

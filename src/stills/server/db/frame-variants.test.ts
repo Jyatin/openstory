@@ -578,6 +578,65 @@ describe('frameVariants.selectIfPendingPromoteIs (#1070)', () => {
     expect(frame?.pendingPromoteVersionId).toBeNull();
   });
 
+  it('a retried promote that already landed reads as won, with one event (#1786)', async () => {
+    const m = createFrameVariantsMethods(db);
+    const v = await m.appendVersion(variantInput());
+    await db
+      .update(frames)
+      .set({ pendingPromoteVersionId: v.id })
+      .where(eq(frames.id, frameId));
+
+    await m.selectIfPendingPromoteIs(frameId, v.id, { actorId: null });
+    const retried = await m.selectIfPendingPromoteIs(frameId, v.id, {
+      actorId: null,
+    });
+
+    expect(retried?.id).toBe(v.id);
+    const events = await db
+      .select()
+      .from(sequenceEvents)
+      .where(eq(sequenceEvents.kind, 'image.selected'));
+    expect(events).toHaveLength(1);
+  });
+
+  it('a lost promote writes no event and keeps a queued prompt regeneration (#1786)', async () => {
+    const m = createFrameVariantsMethods(db);
+    const [prompt] = await db
+      .insert(framePromptVersions)
+      .values({ frameId, text: 'Pinned prompt', source: 'ai-generated' })
+      .returning();
+    if (!prompt) throw new Error('test setup: prompt insert failed');
+    const late = await m.appendVersion(
+      variantInput({ promptVersionId: prompt.id })
+    );
+    const newer = await m.appendVersion(variantInput());
+    const [queued] = await db
+      .insert(framePromptVersions)
+      .values({
+        frameId,
+        text: '',
+        source: 'ai-generated',
+        status: 'generating',
+        pendingInputHash: 'regen-hash',
+      })
+      .returning();
+    if (!queued) throw new Error('test setup: regeneration insert failed');
+    await db
+      .update(frames)
+      .set({ pendingPromoteVersionId: newer.id })
+      .where(eq(frames.id, frameId));
+
+    expect(
+      await m.selectIfPendingPromoteIs(frameId, late.id, { actorId: null })
+    ).toBeNull();
+    expect(await db.select().from(sequenceEvents)).toHaveLength(0);
+    const [regen] = await db
+      .select()
+      .from(framePromptVersions)
+      .where(eq(framePromptVersions.id, queued.id));
+    expect(regen?.pendingInputHash).toBe('regen-hash');
+  });
+
   it('does not select when no promote claim is held at all', async () => {
     const m = createFrameVariantsMethods(db);
     const v = await m.appendVersion(variantInput());

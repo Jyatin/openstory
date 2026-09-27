@@ -358,17 +358,22 @@ export type CharacterBibleHashFields = {
  * sheet the prompt copies — a promoted variant keeps its sheet's `inputHash`
  * but changes the image.
  */
-export type CharacterSheetTalentHashFields = {
-  description: string | null;
-  sheetImageUrl: string | null;
+const characterSheetTalentHashFieldsSchema = z.object({
+  description: z.string().nullable(),
+  sheetImageUrl: z.string().nullable(),
   /** Required; `null` is "the talent sheet has no look metadata". */
-  sheetLook: {
-    age: string | null;
-    gender: string | null;
-    ethnicity: string | null;
-    physicalDescription: string | null;
-  } | null;
-};
+  sheetLook: z
+    .object({
+      age: z.string().nullable(),
+      gender: z.string().nullable(),
+      ethnicity: z.string().nullable(),
+      physicalDescription: z.string().nullable(),
+    })
+    .nullable(),
+});
+export type CharacterSheetTalentHashFields = z.infer<
+  typeof characterSheetTalentHashFieldsSchema
+>;
 
 export type CharacterSheetHashInput = {
   characterBible: CharacterBibleHashFields;
@@ -383,8 +388,8 @@ export type CharacterSheetHashInput = {
 /**
  * Sheet digest shapes. `current` hashes the cast talent (#1785) and drops the
  * name; `pre-1785` is the nameless digest without the talent channel;
- * `named` is the pre-#1108 digest. Verify accepts `named` until
- * {@link LEGACY_HASH_UNTIL} and `pre-1785` until {@link LEGACY_1785_HASH_UNTIL}.
+ * `named` is the pre-#1108 digest. Verify accepts the legacy two until
+ * {@link LEGACY_HASH_UNTIL}.
  */
 type SheetHashKind = 'current' | 'pre-1785' | 'named';
 
@@ -445,20 +450,7 @@ const characterBibleHashFieldsSchema = z.object({
 const characterSheetHashInputSchema = z.object({
   characterBible: characterBibleHashFieldsSchema,
   talentSheetHash: z.string().nullable(),
-  talent: z
-    .object({
-      description: z.string().nullable(),
-      sheetImageUrl: z.string().nullable(),
-      sheetLook: z
-        .object({
-          age: z.string().nullable(),
-          gender: z.string().nullable(),
-          ethnicity: z.string().nullable(),
-          physicalDescription: z.string().nullable(),
-        })
-        .nullable(),
-    })
-    .nullable(),
+  talent: characterSheetTalentHashFieldsSchema.nullable(),
   styleConfigHash: z.string(),
   imageModel: z.string(),
 });
@@ -495,26 +487,30 @@ export async function characterSheetInputHashMatches(
   return digests.includes(stored);
 }
 
-type LocationBibleHashFields = {
-  name: string;
-  description: string | null;
-};
+const locationBibleHashFieldsSchema = z.object({
+  name: z.string(),
+  description: z.string().nullable(),
+});
+type LocationBibleHashFields = z.infer<typeof locationBibleHashFieldsSchema>;
 
 /**
  * Every bible field the location-sheet prompt reads (#1785). `name` is a
  * label, hashed only by the pre-#1108 digest.
  */
-export type LocationSheetBibleHashFields = LocationBibleHashFields &
-  Pick<
-    LocationBibleEntry,
-    | 'type'
-    | 'timeOfDay'
-    | 'architecturalStyle'
-    | 'keyFeatures'
-    | 'colorPalette'
-    | 'lightingSetup'
-    | 'ambiance'
-  >;
+const locationSheetBibleHashFieldsSchema = locationBibleHashFieldsSchema.extend(
+  {
+    type: z.enum(['interior', 'exterior', 'both']),
+    timeOfDay: z.string(),
+    architecturalStyle: z.string(),
+    keyFeatures: z.string(),
+    colorPalette: z.string(),
+    lightingSetup: z.string(),
+    ambiance: z.string(),
+  }
+);
+export type LocationSheetBibleHashFields = z.infer<
+  typeof locationSheetBibleHashFieldsSchema
+>;
 
 export type LocationSheetHashInput = {
   locationBible: LocationSheetBibleHashFields;
@@ -544,21 +540,8 @@ function locationSheetHashBody(
   };
 }
 
-const locationBibleHashFieldsSchema = z.object({
-  name: z.string(),
-  description: z.string().nullable(),
-});
-
 const locationSheetHashInputSchema = z.object({
-  locationBible: locationBibleHashFieldsSchema.extend({
-    type: z.enum(['interior', 'exterior', 'both']),
-    timeOfDay: z.string(),
-    architecturalStyle: z.string(),
-    keyFeatures: z.string(),
-    colorPalette: z.string(),
-    lightingSetup: z.string(),
-    ambiance: z.string(),
-  }),
+  locationBible: locationSheetBibleHashFieldsSchema,
   libraryLocationReferenceHash: z.string().nullable(),
   styleConfigHash: z.string(),
   imageModel: z.string(),
@@ -926,17 +909,11 @@ const PROMPT_INPUT_HASH_VERSION = 5;
 const PROMPT_INPUT_HASH_VERSION_V4 = 4;
 
 /**
- * Delete the v4 / named / titled verify fallbacks after this date.
+ * Delete every legacy verify fallback after this date: v4 / named / titled,
+ * and the pre-#1785, pre-#1784 and pre-#1783 shapes.
  * Tracking: https://github.com/openstory-so/openstory/issues/1371
  */
-export const LEGACY_HASH_UNTIL = '2026-09-28';
-
-/**
- * Delete the `pre-1785` sheet verify fallback after this date — not
- * {@link LEGACY_HASH_UNTIL}: every location sheet and every cast character
- * sheet still carries one, and dropping it re-stales them all at once.
- */
-export const LEGACY_1785_HASH_UNTIL = '2026-12-31';
+export const LEGACY_HASH_UNTIL = '2026-12-31';
 
 /**
  * Older prompt shapes. Verify accepts these until {@link LEGACY_HASH_UNTIL}.
@@ -1208,39 +1185,65 @@ export async function motionPromptInputHashMatches(
 }
 
 export type MusicPromptInputHashInput = {
-  /** Compact scene summaries fed to the music LLM — the actual upstream input. */
+  /**
+   * One summary per scene, exactly what the music LLM reads — built by
+   * `music-scene-summaries.ts` for the stamp and the verify alike (#1783).
+   */
   sceneSummaries: readonly MusicSceneSummary[];
   analysisModel: string;
 };
 
-type MusicHashKind = 'current' | 'v5-titled' | 'v4';
+/**
+ * The pre-#1783 verify shape: one row per SHOT, the DB scene id, and an
+ * always-empty `visualSummary`. Verify only — delete with the legacy kinds
+ * after {@link LEGACY_HASH_UNTIL}.
+ */
+export type LegacyMusicShotSummary = MusicSceneSummary & {
+  visualSummary: string;
+};
 
-function projectMusicSceneSummary(
-  summary: MusicSceneSummary,
-  includeTitle: boolean
-) {
-  if (includeTitle) return summary;
+/**
+ * #1783: per scene, content only. The scene id is left out (order is the
+ * key, and the pipeline's analysis id is not the row id) and so is the title
+ * (a display label), as for the prompt hashes.
+ */
+function musicPromptHashBody(input: MusicPromptInputHashInput): unknown {
   return {
-    sceneId: summary.sceneId,
-    storyBeat: summary.storyBeat,
-    durationSeconds: summary.durationSeconds,
-    location: summary.location,
-    timeOfDay: summary.timeOfDay,
-    visualSummary: summary.visualSummary,
+    artifact: 'sequence:music-prompt',
+    hashVersion: 6,
+    sceneSummaries: input.sceneSummaries.map((summary) => ({
+      storyBeat: summary.storyBeat,
+      durationSeconds: summary.durationSeconds,
+      location: summary.location,
+      timeOfDay: summary.timeOfDay,
+    })),
+    analysisModel: trim(input.analysisModel),
   };
 }
 
-function musicPromptHashBody(
-  input: MusicPromptInputHashInput,
-  kind: MusicHashKind
+type LegacyMusicHashKind = 'v5' | 'v5-titled' | 'v4';
+
+function legacyMusicPromptHashBody(
+  shotSummaries: readonly LegacyMusicShotSummary[],
+  analysisModel: string,
+  kind: LegacyMusicHashKind
 ): unknown {
   return {
     artifact: 'sequence:music-prompt',
     hashVersion: kind === 'v4' ? 4 : PROMPT_INPUT_HASH_VERSION,
-    sceneSummaries: input.sceneSummaries.map((summary) =>
-      projectMusicSceneSummary(summary, kind !== 'current')
+    sceneSummaries: shotSummaries.map((summary) =>
+      kind === 'v5'
+        ? {
+            sceneId: summary.sceneId,
+            storyBeat: summary.storyBeat,
+            durationSeconds: summary.durationSeconds,
+            location: summary.location,
+            timeOfDay: summary.timeOfDay,
+            visualSummary: summary.visualSummary,
+          }
+        : summary
     ),
-    analysisModel: trim(input.analysisModel),
+    analysisModel: trim(analysisModel),
   };
 }
 
@@ -1253,31 +1256,43 @@ export function computeMusicPromptInputHash(
   raw: MusicPromptInputHashInput
 ): Promise<MusicPromptInputHash> {
   musicPromptInputHashInputSchema.parse(raw);
-  return sha256Hex(musicPromptHashBody(raw, 'current')).then(
-    musicPromptInputHash
+  return sha256Hex(musicPromptHashBody(raw)).then(musicPromptInputHash);
+}
+
+/** Pre-#1783 digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
+export function computeLegacyMusicPromptInputHash(
+  shotSummaries: readonly LegacyMusicShotSummary[],
+  analysisModel: string,
+  kind: LegacyMusicHashKind
+): Promise<string> {
+  return sha256Hex(
+    legacyMusicPromptHashBody(shotSummaries, analysisModel, kind)
   );
 }
 
-/** v4 digest. Verify/tests only — delete after {@link LEGACY_HASH_UNTIL}. */
-export function computeMusicPromptInputHashV4(
-  raw: MusicPromptInputHashInput
-): Promise<string> {
-  musicPromptInputHashInputSchema.parse(raw);
-  return sha256Hex(musicPromptHashBody(raw, 'v4'));
-}
-
+/**
+ * `legacyShotSummaries` is the same sequence in the pre-#1783 per-shot shape,
+ * so a prompt stamped by a regenerate before deploy still reads fresh. The
+ * pipeline's own pre-#1783 stamps never matched any verify and stay stale.
+ */
 export async function musicPromptInputHashMatches(
   stored: string | null,
-  raw: MusicPromptInputHashInput
+  raw: MusicPromptInputHashInput,
+  legacyShotSummaries: readonly LegacyMusicShotSummary[]
 ): Promise<boolean> {
   if (!stored) return false;
   musicPromptInputHashInputSchema.parse(raw);
-  const [current, v5titled, v4] = await Promise.all([
-    sha256Hex(musicPromptHashBody(raw, 'current')),
-    sha256Hex(musicPromptHashBody(raw, 'v5-titled')),
-    sha256Hex(musicPromptHashBody(raw, 'v4')),
+  const digests = await Promise.all([
+    sha256Hex(musicPromptHashBody(raw)),
+    ...(['v5', 'v5-titled', 'v4'] as const).map((kind) =>
+      computeLegacyMusicPromptInputHash(
+        legacyShotSummaries,
+        raw.analysisModel,
+        kind
+      )
+    ),
   ]);
-  return stored === current || stored === v5titled || stored === v4;
+  return digests.includes(stored);
 }
 
 export type SequenceMusicHashInput = {

@@ -207,9 +207,12 @@ Before writing a generation result, compare hashes:
 // illustrative — character-sheet-workflow reconcile step
 const snapshotInputHash = input.snapshotInputHash ?? null;
 const currentHash = snapshotInputHash
-  ? await computeCharacterSheetHashCurrent(input, scopedDb)
+  ? await computeCharacterSheetHashCurrent(input, scopedDb, snapshotInputHash)
   : null;
 const decision = decideSheetDivergence(snapshotInputHash, currentHash);
+// `computeCharacterSheetHashCurrent` returns the snapshot when it is a
+// legacy digest of that same live input, so a run queued before the hash
+// grew a channel stays convergent.
 
 if (decision.kind === 'divergent') {
   // Parks in character_sheet_variants and emits generation.stale:detected

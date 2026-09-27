@@ -542,7 +542,7 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
     );
   });
 
-  it('a pre-#1785 visual digest that hashed a voice-only character still verifies', async () => {
+  it('marking a character voice-only re-stales the visual prompt (#1785)', async () => {
     const input: VisualPromptHashInput = {
       scene: SCENE,
       styleConfig: STYLE,
@@ -552,13 +552,13 @@ describe('staleness matrix — cast/location bible mutations (§4.2, Phase 2)', 
       aspectRatio: '16:9',
       analysisModel: 'anthropic/claude-haiku-4.5',
     };
-    // The old current shape equals today's digest with the flag cleared.
+    // The pre-#1785 stamp is today's digest with the flag cleared.
     const preFix = await hashVisualPromptInput({
       ...input,
       characterBible: [ALICE],
     });
     expect(await hashVisualPromptInput(input)).not.toBe(preFix);
-    expect(await visualPromptInputHashMatches(preFix, input)).toBe(true);
+    expect(await visualPromptInputHashMatches(preFix, input)).toBe(false);
   });
 
   it('a rename does not re-stale the character sheet (name is not hashed)', async () => {

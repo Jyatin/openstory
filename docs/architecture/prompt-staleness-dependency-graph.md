@@ -851,9 +851,8 @@ Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
 - **A voice-only character's look** (visual prompt only). The visual LLM
   never sees a voice-only character (#1585), so the visual hash drops it too
   (#1785); the toggle itself still moves the digest because the entry leaves
-  the bible. The motion hash keeps it (delivery). Pre-#1785 digests that
-  hashed the character (`v5-voiced`) still verify until
-  `LEGACY_1785_HASH_UNTIL` (2026-12-31).
+  the bible. The motion hash keeps it (delivery). A stored visual digest
+  that still includes that character does not verify.
 - **Model switches.** See §3: verify pins each artifact to its own model.
 
 ---

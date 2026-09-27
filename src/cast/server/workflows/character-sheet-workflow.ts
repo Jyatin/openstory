@@ -105,7 +105,11 @@ async function persistReusedTalentSheet(params: {
       { kind: 'convergent'; versionId: string | null } | { kind: 'divergent' }
     > => {
       const currentHash = snapshotInputHash
-        ? await computeCharacterSheetHashCurrent(input, scopedDb.liveRead)
+        ? await computeCharacterSheetHashCurrent(
+            input,
+            scopedDb.liveRead,
+            snapshotInputHash
+          )
         : null;
       const decision = decideSheetDivergence(snapshotInputHash, currentHash);
       if (decision.kind === 'divergent') {
@@ -384,7 +388,11 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
         );
 
         const currentHash = snapshotInputHash
-          ? await computeCharacterSheetHashCurrent(input, scopedDb.liveRead)
+          ? await computeCharacterSheetHashCurrent(
+              input,
+              scopedDb.liveRead,
+              snapshotInputHash
+            )
           : null;
 
         const decision = decideSheetDivergence(snapshotInputHash, currentHash);

@@ -932,26 +932,26 @@ const PROMPT_INPUT_HASH_VERSION_V4 = 4;
 export const LEGACY_HASH_UNTIL = '2026-09-28';
 
 /**
- * Delete the `pre-1785` sheet and `v5-voiced` prompt verify fallbacks after
- * this date — not {@link LEGACY_HASH_UNTIL}: every location sheet, every cast
- * character sheet and every visual prompt with a voice-only character still
- * carries one, and dropping it re-stales them all at once.
+ * Delete the `pre-1785` sheet verify fallback after this date — not
+ * {@link LEGACY_HASH_UNTIL}: every location sheet and every cast character
+ * sheet still carries one, and dropping it re-stales them all at once.
  */
 export const LEGACY_1785_HASH_UNTIL = '2026-12-31';
 
 /**
- * `v5-voiced` is the current shape before #1785 took voice-only characters
- * out of the visual body (verified until {@link LEGACY_1785_HASH_UNTIL}); the
- * older legacy shapes predate that too.
+ * Older prompt shapes. Verify accepts these until {@link LEGACY_HASH_UNTIL}.
+ * They still contain voice-only characters. The shape from just before
+ * #1785 is not among them: it matched `current` except for that filter, so
+ * accepting it hid a voice-only toggle.
  */
-type PromptHashKind = 'current' | 'v5-voiced' | 'v5-titled' | 'v5-named' | 'v4';
+type PromptHashKind = 'current' | 'v5-titled' | 'v5-named' | 'v4';
 
 function promptHashFlags(kind: PromptHashKind) {
   return {
     hashVersion:
       kind === 'v4' ? PROMPT_INPUT_HASH_VERSION_V4 : PROMPT_INPUT_HASH_VERSION,
     named: kind === 'v4' || kind === 'v5-named',
-    includeTitle: kind !== 'current' && kind !== 'v5-voiced',
+    includeTitle: kind !== 'current',
     includeSceneNumber: kind === 'v4',
     keepVoiceOnly: kind !== 'current',
   };
@@ -1152,8 +1152,8 @@ export async function visualPromptInputHashMatches(
   if (!stored) return false;
   const input = toVisualBodyInput(assembleVisualPromptHashInput(raw));
   const digests = await Promise.all(
-    (['current', 'v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const).map(
-      (kind) => sha256Hex(visualPromptHashBody(input, kind))
+    (['current', 'v5-titled', 'v5-named', 'v4'] as const).map((kind) =>
+      sha256Hex(visualPromptHashBody(input, kind))
     )
   );
   return digests.includes(stored);

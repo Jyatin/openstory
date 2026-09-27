@@ -24,7 +24,10 @@ import {
 } from './bible-field';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
-import type { RecastCharacterWorkflowInput } from '@/platform/server/workflow/types';
+import type {
+  CharacterSheetWorkflowInput,
+  RecastCharacterWorkflowInput,
+} from '@/platform/server/workflow/types';
 import { buildRecastRegenerateSnapshots } from '@/cast/server/workflows/recast-snapshot';
 import { characterToBible } from '@/cast/server/bibles-from-scoped';
 import { enqueueCharacterVoiceDesign } from '@/cast/server/voice/enqueue-character-voice';
@@ -47,8 +50,8 @@ import {
 } from '@/cast/server/voice/elevenlabs-voice';
 import { voiceProviderOf, SEED_VOICE_MAX_TAKES } from '@/cast/seed-voice';
 import { buildRegenerateCharacterSheetPayload } from '@/cast/server/sheets/character-sheet-trigger';
+import { readReferenceStaleness } from '@/cast/server/production-staleness';
 import type { SheetStaleness } from '@/cast/server/sheets/sheet-staleness';
-import { characterSheetHashMatchesStored } from '@/cast/server/workflows/sheet-snapshots';
 
 import { NotFoundError, ValidationError } from '@/platform/errors';
 import { getLogger } from '@/platform/logger';
@@ -143,15 +146,18 @@ export const createSequenceCharacterFn = createServerFn({ method: 'POST' })
       taken.add(characterId);
       characterId = nextIdentityToken(base, taken);
     }
-    const character = await context.scopedDb.characters.create({
-      sequenceId,
-      characterId,
-      name,
-      ...bible,
-      consistencyTag:
-        bible.consistencyTag ?? `${characterId}: ${slugifyTag(name)}`,
-      sheetStatus: 'pending',
-    });
+    const character = await context.scopedDb.characters.create(
+      {
+        sequenceId,
+        characterId,
+        name,
+        ...bible,
+        consistencyTag:
+          bible.consistencyTag ?? `${characterId}: ${slugifyTag(name)}`,
+        sheetStatus: 'pending',
+      },
+      { source: 'edit', createdBy: context.user.id }
+    );
     await context.scopedDb.sequenceEvents.record({
       sequenceId,
       actorId: context.user.id,
@@ -189,6 +195,7 @@ export const updateSequenceCharacterFn = createServerFn({ method: 'POST' })
     const update: CharacterBibleUpdate = fields;
     return await context.scopedDb.characters.updateBible(characterId, update, {
       actorId: context.user.id,
+      source: 'edit',
     });
   });
 
@@ -568,9 +575,11 @@ export const regenerateCharacterSheetFn = createServerFn({ method: 'POST' })
       imageModel: data.imageModel,
     });
 
-    await context.scopedDb.characters.updateSheetStatus(
+    // The claim (#1113): last kickoff wins, and any edit to the character's
+    // sheet inputs before this run lands revokes it.
+    const sheetVersionId = await context.scopedDb.characters.claimSheet(
       character.id,
-      'generating'
+      { markGenerating: true }
     );
     try {
       await getGenerationChannel(character.sequenceId).emit(
@@ -583,7 +592,11 @@ export const regenerateCharacterSheetFn = createServerFn({ method: 'POST' })
 
     let workflowRunId: string;
     try {
-      workflowRunId = await triggerWorkflow('/character-sheet', payload, {
+      const claimed: CharacterSheetWorkflowInput = {
+        ...payload,
+        sheetVersionId,
+      };
+      workflowRunId = await triggerWorkflow('/character-sheet', claimed, {
         // Explicit regen must not reuse the bible-child id
         // `character-sheet:${id}` — that instance is already complete, and CF
         // would no-op a second Generate (sheetStatus stuck at generating).
@@ -591,9 +604,9 @@ export const regenerateCharacterSheetFn = createServerFn({ method: 'POST' })
         // new run.
       });
     } catch (error) {
-      await context.scopedDb.characters.updateSheetStatus(
+      await context.scopedDb.characters.failSheetClaim(
         character.id,
-        'failed',
+        sheetVersionId,
         error instanceof Error ? error.message : String(error)
       );
       throw error;
@@ -605,26 +618,17 @@ export const regenerateCharacterSheetFn = createServerFn({ method: 'POST' })
 export const getCharacterSheetStalenessFn = createServerFn({ method: 'GET' })
   .middleware([sequenceAccessMiddleware])
   .validator(zodValidator(characterIdInput))
-  .handler(async ({ context, data }): Promise<SheetStaleness> => {
-    const character = await requireCharacter(context.scopedDb, data);
-    if (character.sheetStatus === 'generating') return 'generating';
-    if (character.sheetInputHash == null) return 'untracked';
-
-    const payload = await buildRegenerateCharacterSheetPayload({
-      scopedDb: context.scopedDb,
-      userId: context.user.id,
-      teamId: context.teamId,
-      sequence: context.sequence,
-      character,
-    });
-    if (!payload.snapshotInputHash) return 'untracked';
-    return (await characterSheetHashMatchesStored(
-      character.sheetInputHash,
-      payload
-    ))
-      ? 'fresh'
-      : 'stale';
-  });
+  .handler(
+    async ({ context, data }): Promise<SheetStaleness> =>
+      (
+        await readReferenceStaleness(
+          context.scopedDb,
+          data.sequenceId,
+          'character',
+          data.characterId
+        )
+      ).status
+  );
 
 /** Recast a character with different talent, triggering sheet regeneration */
 export const recastCharacterFn = createServerFn({ method: 'POST' })
@@ -694,19 +698,24 @@ export const recastCharacterFn = createServerFn({ method: 'POST' })
       data.characterId,
       data.talentId
     );
-    await context.scopedDb.characters.update(data.characterId, {
-      age: castingAttrs.age,
-      gender: castingAttrs.gender,
-      ethnicity: castingAttrs.ethnicity,
-      physicalDescription: castingAttrs.physicalDescription,
-      personality: castingAttrs.personality,
-      movement: castingAttrs.movement,
-      consistencyTag: castingAttrs.consistencyTag,
-      isPerson: isPersonFromTalentCast(
-        character.isPerson,
-        talentWithSheets.isHuman
-      ),
-    });
+    // The talent's appearance becomes a 'recast' bible version (#1600).
+    await context.scopedDb.characters.updateBible(
+      data.characterId,
+      {
+        age: castingAttrs.age,
+        gender: castingAttrs.gender,
+        ethnicity: castingAttrs.ethnicity,
+        physicalDescription: castingAttrs.physicalDescription,
+        personality: castingAttrs.personality,
+        movement: castingAttrs.movement,
+        consistencyTag: castingAttrs.consistencyTag,
+        isPerson: isPersonFromTalentCast(
+          character.isPerson,
+          talentWithSheets.isHuman
+        ),
+      },
+      { actorId: context.user.id, source: 'recast' }
+    );
     // Cast copies the talent's voice (#1553): its own history row, labelled
     // 'library' because that voice came from the talent, not this role's
     // design. The role's old voice is released below once nothing points at
@@ -743,10 +752,11 @@ export const recastCharacterFn = createServerFn({ method: 'POST' })
         data.characterId
       );
 
-    // Always generate a character sheet showing the talent in costume
-    await context.scopedDb.characters.updateSheetStatus(
+    // Always generate a character sheet showing the talent in costume. The
+    // claim is taken after the cast writes above, which revoke older ones.
+    const sheetVersionId = await context.scopedDb.characters.claimSheet(
       data.characterId,
-      'generating'
+      { markGenerating: true }
     );
 
     await getGenerationChannel(character.sequenceId).emit(
@@ -770,6 +780,8 @@ export const recastCharacterFn = createServerFn({ method: 'POST' })
 
     const workflowInput: RecastCharacterWorkflowInput = {
       characterDbId: data.characterId,
+      // The recast bible version the metadata below spells out (#1600).
+      bibleVersionId: updatedCharacter.selectedBibleVersionId,
       characterName: character.name,
       characterMetadata: {
         characterId: character.characterId,
@@ -805,6 +817,7 @@ export const recastCharacterFn = createServerFn({ method: 'POST' })
       // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard
       talentSheetInputHash: defaultSheet?.inputHash ?? null,
       castTalentDescription: talentWithSheets.description,
+      sheetVersionId,
       styleConfig,
       aspectRatio: sequence.aspectRatio,
       resolution: sequence.resolution,

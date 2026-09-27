@@ -6,20 +6,22 @@
 import type { Database } from '@/platform/server/db/client';
 import { generateId } from '@/platform/id';
 import type {
-  Character,
   CharacterSheetVariant,
   NewCharacterSheetVariant,
 } from '@/platform/server/db/schema';
 import {
+  characterBibleVersions,
   characterSheetVariants,
   characters,
 } from '@/platform/server/db/schema';
+import { characterBibleColumns } from './bible-versions';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { pageOf } from '@/platform/server/db/read-page';
 import type { VersionListOptions } from '@/platform/server/db/read-page';
 import { insertDivergentRaceTolerant } from '@/platform/server/db/scoped/divergent-insert';
 import { buildEventInsert } from '@/sequences/server/db/sequence-events';
 import type { CharacterSheetInputHash } from '@/shots/input-hash';
+import { landCharacterSheet } from './sheet-claims';
 
 export function createCharacterSheetVariantsMethods(db: Database) {
   return {
@@ -167,17 +169,9 @@ export function createCharacterSheetVariantsMethods(db: Database) {
       inputHash: CharacterSheetInputHash | null;
       model: string;
       workflowRunId?: string | null;
-      isPerson?: boolean;
-    }): Promise<{ character: Character; version: CharacterSheetVariant }> => {
-      const {
-        characterId,
-        url,
-        storagePath,
-        inputHash,
-        model,
-        workflowRunId,
-        isPerson,
-      } = args;
+    }): Promise<{ version: CharacterSheetVariant }> => {
+      const { characterId, url, storagePath, inputHash, model, workflowRunId } =
+        args;
       const [existing] = await db
         .select()
         .from(characters)
@@ -211,15 +205,16 @@ export function createCharacterSheetVariantsMethods(db: Database) {
           sheetStatus: 'completed',
           sheetError: null,
           selectedSheetVersionId: version.id,
+          // An unclaimed write picks the sheet: it demotes a run's claim.
+          pendingPromoteSheetVersionId: null,
           updatedAt: now,
-          ...(isPerson !== undefined ? { isPerson } : {}),
         })
         .where(eq(characters.id, characterId))
-        .returning();
+        .returning({ id: characters.id });
       if (!character) {
         throw new Error(`Character ${characterId} disappeared during apply`);
       }
-      return { character, version };
+      return { version };
     },
 
     /**
@@ -259,8 +254,16 @@ export function createCharacterSheetVariantsMethods(db: Database) {
       }
 
       const [existing] = await db
-        .select()
+        .select({
+          sequenceId: characters.sequenceId,
+          selectedSheetVersionId: characters.selectedSheetVersionId,
+          name: characterBibleColumns.name,
+        })
         .from(characters)
+        .leftJoin(
+          characterBibleVersions,
+          eq(characterBibleVersions.id, characters.selectedBibleVersionId)
+        )
         .where(eq(characters.id, characterId));
       if (!existing) {
         throw new Error(`Character ${characterId} not found`);
@@ -274,6 +277,8 @@ export function createCharacterSheetVariantsMethods(db: Database) {
             sheetStatus: 'completed',
             sheetError: null,
             selectedSheetVersionId: version.id,
+            // The user's pick wins over an in-flight run (#1113).
+            pendingPromoteSheetVersionId: null,
             updatedAt: now,
           })
           .where(eq(characters.id, characterId)),
@@ -298,6 +303,14 @@ export function createCharacterSheetVariantsMethods(db: Database) {
       ]);
       return { ...version, divergedAt: null };
     },
+
+    /**
+     * A sheet run's completion (#1113): append its row under the claimed id
+     * and select it only while the claim still names it; otherwise park it
+     * as divergent. See {@link landCharacterSheet}.
+     */
+    promoteIfPending: (args: Parameters<typeof landCharacterSheet>[1]) =>
+      landCharacterSheet(db, args),
 
     insert: async (
       values: NewCharacterSheetVariant

@@ -16,9 +16,12 @@ import {
   toLocationMetadata,
 } from '@/cast/server/sheets/location-sheet-trigger';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
-import type { RecastLocationWorkflowInput } from '@/platform/server/workflow/types';
+import type {
+  LocationSheetWorkflowInput,
+  RecastLocationWorkflowInput,
+} from '@/platform/server/workflow/types';
 import { buildRecastRegenerateSnapshots } from '@/cast/server/workflows/recast-snapshot';
-import { locationSheetHashMatchesStored } from '@/cast/server/workflows/sheet-snapshots';
+import { readReferenceStaleness } from '@/cast/server/production-staleness';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
 import { z } from 'zod';
@@ -84,15 +87,18 @@ export const createSequenceLocationFn = createServerFn({ method: 'POST' })
       taken.add(locationId);
       locationId = nextIdentityToken(base, taken);
     }
-    const location = await context.scopedDb.sequenceLocations.create({
-      sequenceId,
-      locationId,
-      name,
-      ...bible,
-      consistencyTag:
-        bible.consistencyTag ?? `${locationId}: ${slugifyTag(name)}`,
-      referenceStatus: 'pending',
-    });
+    const location = await context.scopedDb.sequenceLocations.create(
+      {
+        sequenceId,
+        locationId,
+        name,
+        ...bible,
+        consistencyTag:
+          bible.consistencyTag ?? `${locationId}: ${slugifyTag(name)}`,
+        referenceStatus: 'pending',
+      },
+      { source: 'edit', createdBy: context.user.id }
+    );
     await context.scopedDb.sequenceEvents.record({
       sequenceId,
       actorId: context.user.id,
@@ -240,10 +246,12 @@ export const regenerateLocationSheetFn = createServerFn({ method: 'POST' })
       imageModel: data.imageModel,
     });
 
-    await context.scopedDb.sequenceLocations.updateReferenceStatus(
-      location.id,
-      'generating'
-    );
+    // The claim (#1113): last kickoff wins, and any edit to the location's
+    // inputs before this run lands revokes it.
+    const referenceVersionId =
+      await context.scopedDb.sequenceLocations.claimReference(location.id, {
+        markGenerating: true,
+      });
     try {
       await getGenerationChannel(location.sequenceId).emit(
         'generation.location-sheet:progress',
@@ -255,15 +263,19 @@ export const regenerateLocationSheetFn = createServerFn({ method: 'POST' })
 
     let workflowRunId: string;
     try {
-      workflowRunId = await triggerWorkflow('/location-sheet', payload, {
+      const claimed: LocationSheetWorkflowInput = {
+        ...payload,
+        referenceVersionId,
+      };
+      workflowRunId = await triggerWorkflow('/location-sheet', claimed, {
         // Explicit regen must not reuse the bible-child id
         // `location-sheet:${id}` — that instance is already complete, and CF
         // would no-op a second Generate. Same pattern as generateTalentSheetFn.
       });
     } catch (error) {
-      await context.scopedDb.sequenceLocations.updateReferenceStatus(
+      await context.scopedDb.sequenceLocations.failReferenceClaim(
         location.id,
-        'failed',
+        referenceVersionId,
         error instanceof Error ? error.message : String(error)
       );
       throw error;
@@ -271,34 +283,21 @@ export const regenerateLocationSheetFn = createServerFn({ method: 'POST' })
     return { locationDbId: location.id, workflowRunId };
   });
 
+/** Live sheet staleness for the location detail banner. */
 export const getLocationSheetStalenessFn = createServerFn({ method: 'GET' })
   .middleware([sequenceAccessMiddleware])
   .validator(zodValidator(locationIdInput))
-  .handler(async ({ context, data }): Promise<SheetStaleness> => {
-    const location = await context.scopedDb.sequenceLocations.getById(
-      data.locationDbId
-    );
-    if (!location || location.sequenceId !== data.sequenceId) {
-      throw new NotFoundError('Location not found');
-    }
-    if (location.referenceStatus === 'generating') return 'generating';
-    if (location.referenceInputHash == null) return 'untracked';
-
-    const payload = await buildRegenerateLocationSheetPayload({
-      scopedDb: context.scopedDb,
-      userId: context.user.id,
-      teamId: context.teamId,
-      sequence: context.sequence,
-      location,
-    });
-    if (!payload.snapshotInputHash) return 'untracked';
-    return (await locationSheetHashMatchesStored(
-      location.referenceInputHash,
-      payload
-    ))
-      ? 'fresh'
-      : 'stale';
-  });
+  .handler(
+    async ({ context, data }): Promise<SheetStaleness> =>
+      (
+        await readReferenceStaleness(
+          context.scopedDb,
+          data.sequenceId,
+          'location',
+          data.locationDbId
+        )
+      ).status
+  );
 
 /**
  * Recast a location with a library location reference.
@@ -352,10 +351,11 @@ export const recastLocationFn = createServerFn({ method: 'POST' })
       throw new NotFoundError('Location not found');
     }
 
-    await context.scopedDb.sequenceLocations.updateReferenceStatus(
-      data.locationId,
-      'generating'
-    );
+    // Claimed after the relink above, which revokes older claims (#1113).
+    const referenceVersionId =
+      await context.scopedDb.sequenceLocations.claimReference(data.locationId, {
+        markGenerating: true,
+      });
 
     await getGenerationChannel(location.sequenceId).emit(
       'generation.location-sheet:progress',
@@ -393,6 +393,8 @@ export const recastLocationFn = createServerFn({ method: 'POST' })
       libraryLocationDescription: data.description,
       libraryLocationId: data.libraryLocationId,
       libraryLocationReferenceHash: libraryLocation.referenceInputHash,
+      referenceVersionId,
+      bibleVersionId: updatedLocation.selectedBibleVersionId,
       imageModel,
       styleConfig,
       aspectRatio: sequence.aspectRatio,

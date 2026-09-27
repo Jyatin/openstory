@@ -29,18 +29,68 @@ import type {
   CharacterSheetWorkflowInput,
   CharacterSheetWorkflowResult,
 } from '@/platform/server/workflow/types';
-import {
-  decideSheetDivergence,
-  saveDivergentCharacterSheet,
-} from './sheet-divergence';
-import {
-  computeCharacterSheetHashCurrent,
-  characterSheetHashMatchesStored,
-} from './sheet-snapshots';
+import { reportParkedCharacterSheet } from './sheet-divergence';
+import { characterSheetHashMatchesStored } from './sheet-snapshots';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { getLogger } from '@/platform/logger';
 
 const logger = getLogger(['openstory', 'workflow', 'character-sheet']);
+
+type SheetLanding =
+  | { kind: 'convergent'; versionId: string | null }
+  | { kind: 'divergent' };
+
+/**
+ * Land the sheet through the claim the trigger took (#1113): select it only
+ * while the claim still names it, else park it as divergent and tell the UI.
+ * A run queued before #1113 carries no claim: it lands only while no newer run
+ * holds one, and otherwise parks instead of revoking that run's claim.
+ */
+async function landSheet(
+  scopedDb: WorkflowScopedDb,
+  input: CharacterSheetWorkflowInput,
+  stored: { url: string; path: string; model: string },
+  workflowRunId: string
+): Promise<SheetLanding> {
+  const sequenceId = input.sequenceId;
+  if (!sequenceId) {
+    throw new Error(
+      `Character sheet run for ${input.characterDbId} has no sequenceId`
+    );
+  }
+  // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+  const claimed = Boolean(input.sheetVersionId);
+  // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+  const versionId = input.sheetVersionId ?? generateId();
+  const landing = await scopedDb.characterSheetVariants.promoteIfPending({
+    characterId: input.characterDbId,
+    versionId,
+    claimed,
+    url: stored.url,
+    storagePath: stored.path,
+    inputHash: input.snapshotInputHash,
+    // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a payload queued before #1600
+    bibleVersionId: input.bibleVersionId ?? null,
+    model: stored.model,
+    workflowRunId,
+  });
+  if (landing === 'promoted') {
+    return { kind: 'convergent', versionId };
+  }
+  logger.warn('[CharacterSheetWorkflow:cf] claim moved; sheet parked', {
+    characterDbId: input.characterDbId,
+    versionId,
+    claimed,
+    storagePath: stored.path,
+  });
+  await reportParkedCharacterSheet({
+    sequenceId,
+    characterId: input.characterDbId,
+    versionId,
+    snapshotInputHash: input.snapshotInputHash,
+  });
+  return { kind: 'divergent' };
+}
 
 async function persistReusedTalentSheet(params: {
   event: Readonly<WorkflowEvent<CharacterSheetWorkflowInput>>;
@@ -98,50 +148,21 @@ async function persistReusedTalentSheet(params: {
     });
   });
 
-  const snapshotInputHash = input.snapshotInputHash ?? null;
-  const reconcileOutcome = await step.do(
-    'reconcile-database',
-    async (): Promise<
-      { kind: 'convergent'; versionId: string | null } | { kind: 'divergent' }
-    > => {
-      const currentHash = snapshotInputHash
-        ? await computeCharacterSheetHashCurrent(
-            input,
-            scopedDb.liveRead,
-            snapshotInputHash
-          )
-        : null;
-      const decision = decideSheetDivergence(snapshotInputHash, currentHash);
-      if (decision.kind === 'divergent') {
-        await saveDivergentCharacterSheet({
-          scopedDb,
-          characterId: characterDbId,
-          sequenceId,
-          model: input.imageModel ?? DEFAULT_IMAGE_MODEL,
-          url: storageResult.url,
-          storagePath: storageResult.path,
-          workflowRunId,
-          snapshotInputHash: decision.snapshotInputHash,
-        });
-        return { kind: 'divergent' };
-      }
-      const character = await scopedDb.characters.updateSheet(
-        characterDbId,
-        storageResult.url,
-        storageResult.path,
-        snapshotInputHash,
-        { model: input.imageModel ?? DEFAULT_IMAGE_MODEL, workflowRunId }
-      );
-      return {
-        kind: 'convergent',
-        versionId: character.selectedSheetVersionId,
-      };
-    }
+  const reconcileOutcome = await step.do('reconcile-database', () =>
+    landSheet(
+      scopedDb,
+      input,
+      {
+        url: storageResult.url,
+        path: storageResult.path,
+        model: input.imageModel ?? DEFAULT_IMAGE_MODEL,
+      },
+      workflowRunId
+    )
   );
 
   if (reconcileOutcome.kind === 'divergent') {
     await step.do('settle-divergent-status', async () => {
-      await scopedDb.characters.updateSheetStatus(characterDbId, 'completed');
       await getGenerationChannel(sequenceId).emit(
         'generation.character-sheet:progress',
         {
@@ -173,10 +194,7 @@ async function persistReusedTalentSheet(params: {
     sheetImageUrl: storageResult.url,
     sheetImagePath: storageResult.path,
     characterDbId,
-    sheetVersionId:
-      reconcileOutcome.kind === 'convergent'
-        ? reconcileOutcome.versionId
-        : null,
+    sheetVersionId: reconcileOutcome.versionId,
   };
 }
 
@@ -192,19 +210,14 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
     // Validate the snapshot hash inside the workflow body: a tampered
     // payload must halt the run from inside a step, not silently.
     await step.do('validate-snapshot', async () => {
-      if (input.snapshotInputHash) {
-        // Accepts the pre-#1785 shape too, so a run queued before the
-        // hash grew a channel does not read as tampered.
-        if (
-          !(await characterSheetHashMatchesStored(
-            input.snapshotInputHash,
-            input
-          ))
-        ) {
-          throw new WorkflowValidationError(
-            'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
-          );
-        }
+      // Accepts the pre-#1785 shape too, so a run queued before the
+      // hash grew a channel does not read as tampered.
+      if (
+        !(await characterSheetHashMatchesStored(input.snapshotInputHash, input))
+      ) {
+        throw new WorkflowValidationError(
+          'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
+        );
       }
     });
 
@@ -373,78 +386,32 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       });
     });
 
-    // Step 4: Divergence-aware database write. On convergent, update the
-    // character's primary sheet. On divergent, preserve the artifact as a
-    // variant row (the helper emits `stale:detected`) and skip the primary
-    // update so the in-flight run does not overwrite a now-stale identity.
-    const snapshotInputHash = input.snapshotInputHash ?? null;
-    const reconcileOutcome = await step.do(
-      'reconcile-database',
-      async (): Promise<
-        { kind: 'convergent'; versionId: string | null } | { kind: 'divergent' }
-      > => {
-        logger.info(
-          `[CharacterSheetWorkflow:cf] Updating database for ${input.characterName}`
-        );
-
-        const currentHash = snapshotInputHash
-          ? await computeCharacterSheetHashCurrent(
-              input,
-              scopedDb.liveRead,
-              snapshotInputHash
-            )
-          : null;
-
-        const decision = decideSheetDivergence(snapshotInputHash, currentHash);
-
-        if (decision.kind === 'divergent') {
-          logger.warn('[CharacterSheetWorkflow:cf] divergence detected', {
-            characterDbId: input.characterDbId,
-            snapshotInputHash: decision.snapshotInputHash,
-            currentInputHash: decision.currentInputHash,
-            storagePath: storageResult.path,
-          });
-          await saveDivergentCharacterSheet({
-            scopedDb,
-            characterId: characterDbId,
-            sequenceId,
-            model: generationParams.model,
-            url: storageResult.url,
-            storagePath: storageResult.path,
-            workflowRunId,
-            snapshotInputHash: decision.snapshotInputHash,
-          });
-          return { kind: 'divergent' };
-        }
-
-        const character = await scopedDb.characters.updateSheet(
-          input.characterDbId,
-          storageResult.url,
-          storageResult.path,
-          snapshotInputHash,
-          { model: generationParams.model, workflowRunId }
-        );
-        return {
-          kind: 'convergent',
-          versionId: character.selectedSheetVersionId,
-        };
-      }
+    // Step 4: Land through the claim (#1113). Selected only while the
+    // trigger's claim still names this run; otherwise parked as a divergent
+    // variant (and `stale:detected` emitted) so a run whose inputs moved, or
+    // that a newer kickoff superseded, cannot overwrite the live sheet.
+    const reconcileOutcome = await step.do('reconcile-database', () =>
+      landSheet(
+        scopedDb,
+        input,
+        {
+          url: storageResult.url,
+          path: storageResult.path,
+          model: generationParams.model,
+        },
+        workflowRunId
+      )
     );
     if (reconcileOutcome.kind === 'convergent') {
       sheetVersionId = reconcileOutcome.versionId;
     }
 
     if (reconcileOutcome.kind === 'divergent') {
-      // Helper already emitted `stale:detected` on the sequence channel.
-      // Settle the primary sheet's status so the UI does not stay wedged on
-      // "Regenerating…". The pre-existing `sheetImageUrl` (if any) remains
-      // the live primary identity — we deliberately did not overwrite it.
-      // For first-time generation the entity ends in `completed` with a
-      // null sheetImageUrl; the user can manually retry. Either way,
-      // flipping status to `completed` reflects "generation finished,
-      // primary unchanged, divergent variant saved alongside".
+      // `stale:detected` is out. The land batch already settled the status
+      // to `completed` unless a newer run holds the claim. The live sheet (if
+      // any) is untouched; a first-time sheet stays empty until the user picks
+      // the parked one or regenerates.
       await step.do('settle-divergent-status', async () => {
-        await scopedDb.characters.updateSheetStatus(characterDbId, 'completed');
         await getGenerationChannel(sequenceId).emit(
           'generation.character-sheet:progress',
           {
@@ -498,11 +465,13 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
   }): Promise<void> {
     const input = event.payload;
 
-    // Mark character sheet as failed
+    // Mark character sheet as failed — through the claim, so a newer run's
+    // claim and `generating` status survive this one's failure (#1113).
     if (input.characterDbId) {
-      await scopedDb.characters.updateSheetStatus(
+      await scopedDb.characters.failSheetClaim(
         input.characterDbId,
-        'failed',
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+        input.sheetVersionId ?? null,
         error
       );
 

@@ -11,6 +11,8 @@ import { DEFAULT_IMAGE_MODEL } from '@/models/models';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { CharacterMinimal } from '@/platform/server/db/schema';
 import { buildCharacterInsert } from './cast-records';
+import { computeCharacterSheetHashFromDto } from './sheet-snapshots';
+import type { SheetPayload } from './sheet-snapshots';
 import { buildCastingAttributes } from '@/cast/character-prompt';
 import { isPersonFromTalentCast } from '@/cast/likeness';
 import { reusesTalentSheet } from '@/cast/server/talent/reuse-talent-sheet';
@@ -71,6 +73,7 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
         const results: Array<{
           id: string;
           characterId: string;
+          bibleVersionId: string | null;
           voiceId: string | null;
           voiceDescription: string | null;
           useVoice: boolean | null;
@@ -82,11 +85,13 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
               character,
               talentMatch: matchMap.get(character.characterId),
               sheetStatus: character.voiceOnly ? 'completed' : 'generating',
-            })
+            }),
+            { source: 'analysis', createdBy: null }
           );
           results.push({
             id: created.id,
             characterId: created.characterId,
+            bibleVersionId: created.selectedBibleVersionId,
             voiceId: created.voiceId,
             voiceDescription: created.voiceDescription,
             useVoice: created.useVoice,
@@ -103,6 +108,12 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
     // Create mapping from characterId to database id
     const characterIdToDbId = new Map<string, string>(
       createdCharacters.map((c) => [c.characterId, c.id])
+    );
+    // The bible version each row landed on (#1600). A step result cached
+    // before #1600 has none.
+    const bibleVersionByDbId = new Map<string, string | null>(
+      // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a result cached before #1600
+      createdCharacters.map((c) => [c.id, c.bibleVersionId ?? null])
     );
 
     const characterSheetBinding = this.env.CHARACTER_SHEET_WORKFLOW;
@@ -145,14 +156,20 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       // actually be billed — see `reusesTalentSheet`.
       const reuseTalentSheet = reusesTalentSheet(character, talentMatch);
 
-      const childPayload: CharacterSheetWorkflowInput = {
+      const unclaimedFields: SheetPayload<CharacterSheetWorkflowInput> = {
         userId: input.userId,
         teamId: input.teamId,
         sequenceId: input.sequenceId,
         reservationId: input.reservationId,
         characterDbId,
+        bibleVersionId: bibleVersionByDbId.get(characterDbId) ?? null,
         characterName: character.name,
-        characterMetadata: character,
+        // The cast bible the row holds (`buildCharacterInsert`), so the stamped
+        // hash matches what a regenerate or a staleness check computes from the
+        // row (#1113). The prompt reads the talent's look first either way.
+        characterMetadata: castingAttrs
+          ? { ...character, ...castingAttrs }
+          : character,
         imageModel,
         // `|| undefined`: a match with no sheet carries `''`, which the hash
         // would read as a different image from the check's "none".
@@ -167,6 +184,25 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
         reuseTalentSheet,
         styleConfig: input.styleConfig,
         castTalentDescription: talentMatch?.talentDescription ?? null,
+        talentSheetInputHash: talentMatch?.sheetInputHash ?? null,
+      };
+      // A pipeline sheet is tracked like any other (#1113): stamped with its
+      // input hash, and landed through a claim a bible edit revokes.
+      const unclaimed = {
+        ...unclaimedFields,
+        snapshotInputHash:
+          await computeCharacterSheetHashFromDto(unclaimedFields),
+      };
+      const sheetVersionId = await step.do(
+        `claim-character-sheet-${index}`,
+        async () =>
+          await scopedDb.characters.claimSheet(characterDbId, {
+            markGenerating: false,
+          })
+      );
+      const childPayload: CharacterSheetWorkflowInput = {
+        ...unclaimed,
+        sheetVersionId,
       };
 
       const childResult = await spawnAndAwaitChild<

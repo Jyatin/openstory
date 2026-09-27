@@ -166,19 +166,20 @@ stale."** Diamonds are inputs; rounded boxes are hashed artifacts.
 ```mermaid
 flowchart LR
     subgraph inputs["upstream inputs"]
-        scene{{"scene input surface<br/>originalScript<br/>· metadata location/timeOfDay/storyBeat"}}
+        scene{{"scene input surface<br/>originalScript<br/>· metadata location/timeOfDay/storyBeat<br/>· continuity tags pick the bible entries"}}
         style{{"styleConfig"}}
         cbible{{"character bible<br/>(age, physicalDescription, …)<br/>name is a display label"}}
         lbible{{"location bible"}}
         ebible{{"element bible"}}
+        eimage{{"element image"}}
         ar{{"aspectRatio"}}
-        amodel{{"analysisModel"}}
-        imodel{{"imageModel"}}
-        vmodel{{"motionModel"}}
-        amodel2{{"audioModel"}}
-        dur{{"durationSeconds (snapped)"}}
+        amodel{{"analysisModel<br/>(pinned per prompt)"}}
+        lines{{"shot lines<br/>(shot_dialogue_versions)"}}
+        refonly{{"shot reference-only"}}
+        dur{{"shot durations"}}
         tags{{"music tags"}}
         voice{{"character voiceId<br/>(ElevenLabs or Seed voice)"}}
+        libref{{"library location<br/>reference hash"}}
     end
 
     scene --> VP(["visual prompt hash"])
@@ -196,35 +197,41 @@ flowchart LR
     ebible --> MP
     ar --> MP
     amodel --> MP
+    lines --> MP
+    refonly --> MP
+    TH -. "still URL" .-> MP
 
-    VP -. "fullPrompt text" .-> TH(["thumbnail / variant-image hash"])
-    imodel --> TH
+    VP -. "fullPrompt text" .-> TH(["still hash"])
     ar --> TH
-    CS(["character-sheet hash"]) --> TH
-    LS(["location-sheet hash"]) -. "skipped today (gap)" .-> TH
-    ER(["element-ref hash"]) --> TH
+    CS(["character sheet"]) -. "selected version id" .-> TH
+    LS(["location sheet"]) -. "selected version id" .-> TH
+    eimage --> TH
 
     cbible --> CS
     style --> CS
-    imodel --> CS
-    TS(["talent-sheet hash"]) --> CS
+    TS(["talent sheet hash"]) --> CS
     talentrow{{"talent description<br/>+ default sheet image/look"}} --> CS
 
     lbible --> LS
     style --> LS
-    imodel --> LS
+    libref --> LS
 
-    TH --> VID(["frame video / clip"])
+    TH -. "still version id" .-> VID(["clip manifest"])
     MP -. "prompt version id" .-> VID
-    vmodel --> VID
     dur --> VID
-    ar --> VID
+    lines --> VID
     voice --> VID
+    refonly --> VID
+    CS -. "sheet sent" .-> VID
+    LS -. "sheet sent" .-> VID
+    eimage -. "image sent" .-> VID
 
-    MUSIC(["sequence music-prompt hash"]) --> AUD(["frame / sequence audio hash"])
+    scene --> MUSIC(["sequence music-prompt hash"])
+    dur --> MUSIC
+    amodel --> MUSIC
+    MUSIC -. "prompt text" .-> AUD(["music track hash"])
     tags --> AUD
     dur --> AUD
-    amodel2 --> AUD
 ```
 
 Key consequences of the shape:
@@ -233,6 +240,21 @@ Key consequences of the shape:
   character's `physicalDescription` and the visual + motion **prompts** go stale;
   the rendered thumbnail goes stale only because the **character-sheet hash**
   changes and feeds the thumbnail hash.
+- **The style snapshot is versioned (#1600).** Each create, switch and
+  automatic derivation appends a `sequence_style_versions` row, so a stale
+  prompt names the knobs that moved (`Style: lighting`).
+- **A scene's narrative is versioned with its script (#1600).** Heading, time
+  of day, story beat, title and continuity tags live on the selected
+  `scene_script_versions` row, so an edit to any of them appends a row, and a
+  stale prompt names the field: `Scene: time of day`. The title stays a label
+  (never hashed, never a cause); continuity is named as "cast and tags",
+  because it decides which bible entries a scene's prompts hash.
+- **Bibles are versioned (#1600).** Each edit, recast or re-analysis
+  appends a `character_bible_versions` / `location_bible_versions` row, and
+  sheets record the version they read. The edges above are unchanged — the
+  hashes still read the bible's values — but a stale artifact's cause now
+  names the fields that moved (`Character "Jack": clothing`) instead of any
+  row touched after it.
 - **Voice ids bind on the clip**, not the motion prompt. A voice id (an
   ElevenLabs id, or a `seed:` id for a Seed voice, #1765) is in
   `VideoManifestEntry.audioSourceKey` (shape-stable: omitted when
@@ -252,18 +274,25 @@ Key consequences of the shape:
   each pointer, so the clip reads stale through its motion-prompt pointer too.
   Before #1786 the rename rewrote the selected row in place and the clip's
   pointer never moved. The rename popover says how many shots go out of date.
-- **Image → video is a hash cascade.** The video hash includes the source image's
-  hash (`ShotVideoSourceImage = { kind: 'variantHash'; hash }`), so a stale image
-  invalidates its motion without the video needing to know _why_ the image changed.
-- **`durationSeconds` deliberately feeds video/audio but NOT prompts** — it's a
-  generation parameter, not a prompt driver. (Fixed in #767; see §5-B.)
-- **A model switch never stales anything (#1785).** The model ids are in the
-  hashes, but verify always recomputes with the model the artifact was made
-  with: a still with its own `frame_variants.model`, a prompt with its latest
+- **Still → clip is a pointer, not a hash cascade.** The clip manifest records
+  the still version and motion-prompt version it was rendered from, and the
+  compare (`isSelectedVersionStale`) checks them against the shot's current
+  selections. A stale still does not stale the clip; selecting a new still
+  does. The same holds for the sheets and element images a render sent
+  (`referenceKeys`): re-selecting one re-stales the clip.
+- **A new still re-stales the motion prompt.** The motion prompt is written
+  looking at the still, so its hash reads the still's URL (unless the shot
+  renders reference-only).
+- **Duration deliberately feeds the clip and music but NOT the shot prompts** —
+  it's a generation parameter, not a prompt driver. (Fixed in #767; see §5-B.)
+  The music brief does carry each scene's length.
+- **A model switch never stales anything (#1785).** Model ids are in the
+  hashes (not drawn above), but verify always recomputes with the model the
+  artifact was made with: a still with its own `frame_variants.model`, a prompt with its latest
   version's `analysisModel`, a generated sheet with its selected version's
   `model` (`resolveSheetImageModel`), and the clip pointer compare ignores the
-  video model entirely. So `imodel` / `amodel` / `vmodel` above only ever
-  differ when the artifact itself was re-made. A sequence switch applies to
+  video model entirely. So a model id only ever differs when the artifact
+  itself was re-made. A sequence switch applies to
   the next generation. `findStalenessCauses` therefore never names "Image
   model" or "Script model" (they are not in `SETTINGS_CHANGED_LABELS`). One
   exception: an uploaded sheet has no model of its own, so its verify uses
@@ -279,15 +308,15 @@ Listed in generation order (matching §4.1):
 
 | Artifact                      | Stamp site                                                                                                               | Verify site                                              | Hashed inputs                                                                                                                                         |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Talent sheet** (library)    | `library-talent-sheet-workflow`                                                                                          | sheet-staleness reads                                    | talent name/description, referenceMediaHashes (sorted set), imageModel                                                                                |
-| **Character sheet**           | `character-sheet-workflow`                                                                                               | sheet-staleness reads                                    | character bible fields, talentSheetHash, cast talent (description, default sheet image + look), styleConfigHash, imageModel                           |
-| **Location sheet**            | `location-sheet-workflow`                                                                                                | sheet-staleness reads                                    | every location bible field the sheet prompt reads, libraryLocationReferenceHash, styleConfigHash, imageModel                                          |
+| **Talent sheet** (library)    | `library-talent-sheet-workflow`                                                                                          | none (no talent staleness check)                         | talent description, referenceMediaHashes (sorted set), imageModel                                                                                     |
+| **Character sheet**           | `character-sheet-workflow`                                                                                               | `readReferenceStaleness`                                 | character bible fields, talentSheetHash, cast talent (description, default sheet image + look), styleConfigHash, imageModel                           |
+| **Location sheet**            | `location-sheet-workflow`                                                                                                | `readReferenceStaleness`                                 | every location bible field the sheet prompt reads, libraryLocationReferenceHash, styleConfigHash, imageModel                                          |
 | **Visual prompt**             | `frame-prompt-workflow.ts` (1-shot) · `persist-derived-visual-prompts` in `analyze-script-workflow.ts` (2+ shots, #1517) | `computeShotStaleness`                                   | scene input surface, styleConfig, character/location/element bibles (narrowed, **cast**), aspectRatio, analysisModel, `PROMPT_INPUT_HASH_VERSION`     |
 | **Motion prompt**             | `motion-prompt-workflow.ts` · `motion-prompt-batch-workflow.ts` (derived)                                                | `computeShotStaleness`                                   | _same as visual_, plus starting-frame URL and `referenceOnly`. Voice ids are **not** a prompt channel.                                                |
-| **Sequence music prompt**     | `music-prompt-workflow`                                                                                                  | sequence music checks                                    | sceneSummaries, analysisModel                                                                                                                         |
+| **Sequence music prompt**     | `music-prompt-workflow`                                                                                                  | `readMusicPromptStaleness`                               | sceneSummaries, analysisModel                                                                                                                         |
 | **Thumbnail / variant image** | `shot-images-workflow.ts` / `image-workflow-snapshot.ts`                                                                 | `computeShotStaleness` via the regenerate-shots snapshot | effective visual prompt text, imageModel, aspectRatio, size, seed, characterSheetHashes, locationSheetHashes, elementReferenceHashes                  |
 | **Shot video**                | `motion-workflow*`                                                                                                       | pointer compare in `src/shots/scene-segments.ts`         | manifest pointers (motion-prompt / frame version ids, `usesStartFrame`, durationMs, `audioClipIds`, `audioSourceKey`, `dialogueKey`, `referenceKeys`) |
-| **Shot / sequence audio**     | `music-workflow`                                                                                                         | `frameVariants.isStale` / sequence checks                | musicPrompt, tags (sorted set), durationSeconds, audioModel                                                                                           |
+| **Sequence music track**      | `music-workflow`                                                                                                         | `musicTrackStaleness`                                    | music prompt text, tags, durationSeconds (clamped), audioModel                                                                                        |
 
 Two cross-cutting normalizations make the hash order-insensitive and
 default-stable:
@@ -339,7 +368,7 @@ contents, so regenerating them with identical inputs doesn't churn dependents.
 ```ts
 sha256Hex({
   artifact: 'talent:sheet',
-  talent: { name: trim(name), description: trim(description) },
+  talent: { description: trim(description) }, // the name is a label
   referenceMediaHashes: sortedRefs(referenceMediaHashes), // unordered set of talent_media rows
   imageModel,
 });
@@ -350,7 +379,8 @@ sha256Hex({
 ```ts
 sha256Hex({
   artifact: 'library-location:reference',
-  locationBible: { name: trim(name), description: trim(description) },
+  locationBible: { description: trim(description) }, // the name is a label
+  referenceMediaHashes: sortedRefs(referenceMediaHashes),
   styleConfigHash,
   imageModel,
 });
@@ -439,7 +469,7 @@ sha256Hex({
   styleConfig: styleConfigHashBody(styleConfig), // a projection, not the whole object
   characterBible, // sorted by characterId, then PROJECTED to driving fields
   locationBible, //  sorted by locationId,  then PROJECTED to driving fields
-  elementBible, //   sorted by token, projected, or null if absent
+  elementBible, //   sorted by description, projected, or null if absent
   aspectRatio: trim(aspectRatio),
   analysisModel: trim(analysisModel), // e.g. 'anthropic/claude-haiku-4.5'
 });
@@ -500,9 +530,9 @@ the prose are hashed; identity / provenance / image-gen tags are dropped:
     ambiance);
 }
 
-// element → 2 driving fields (drops consistencyTag, firstMention)
+// element → 1 driving field (drops token, consistencyTag, firstMention)
 {
-  (token, description);
+  description;
 }
 ```
 
@@ -561,10 +591,11 @@ sha256Hex({
 ```
 
 The summaries have ONE builder (`src/audio/server/workflows/music-scene-summaries.ts`),
-fed the scene row and its shots' durations on both sides (#1783). The pipeline
-stamp reaches it through `musicSceneSummariesFromAnalysis`, which runs the
-analysis scenes through `buildSceneInsert` and `sceneShotSpecs` — the insert
-builders that wrote the rows — so it needs no mid-run read. Verify,
+fed the scene's narrative and its shots' durations on both sides (#1783). The
+pipeline stamp reaches it through `musicSceneSummariesFromAnalysis`, which runs
+the analysis scenes through `buildSceneNarrative` and `sceneShotSpecs` — the
+builders that wrote the split script version and the shot rows (#1600) — so it
+needs no mid-run read. Verify,
 regenerate, Update all and smart retry use `musicSceneSummariesFromRows`.
 Before #1783 the pipeline stamped per-scene summaries with the analysis scene
 id, the snapped scene label and the visual prompt, while verify hashed one row
@@ -590,9 +621,11 @@ sha256Hex({
   aspectRatio,
   size: size ?? null,
   seed: seed ?? null,
-  characterSheetHashes: sortedRefs(characterSheetHashes), // ← cascade: each = characters.sheetInputHash
-  locationSheetHashes: sortedRefs(locationSheetHashes), // ⚠️ omitted today (snapshot gap)
-  elementReferenceHashes: sortedRefs(elementReferenceHashes),
+  // Each = the selected sheet version id, else the sheet's input hash, so a
+  // re-selected sheet re-stales the still even with identical inputs.
+  characterSheetHashes: sortedRefs(characterSheetHashes),
+  locationSheetHashes: sortedRefs(locationSheetHashes),
+  elementReferenceHashes: sortedRefs(elementReferenceHashes), // element image URLs
 });
 ```
 
@@ -633,19 +666,7 @@ sha256Hex({
 // no provenance is not the same claim as "generated from nothing".
 ```
 
-#### 8. Shot audio — `computeShotAudioInputHash`
-
-```ts
-sha256Hex({
-  artifact: 'shot:audio',
-  musicPrompt: trim(musicPrompt),
-  tags: sortedRefs(tags), // unordered set of music tags
-  durationSeconds,
-  audioModel,
-});
-```
-
-#### 9. Sequence music track — `computeSequenceMusicInputHash`
+#### 8. Sequence music track — `computeSequenceMusicInputHash`
 
 ```ts
 sha256Hex({
@@ -720,8 +741,8 @@ _broken_ state, kept because #1732 proved a new stamp site can walk straight
 back into it.
 
 The stamp and the verify still build their scene from different rows — an
-in-memory analysis `Scene` at trigger time, the `scenes` row plus the selected
-`scene_script_versions` row afterwards — but the **narrowing they apply to it is
+in-memory analysis `Scene` at trigger time, the selected
+`scene_script_versions` row (script and narrative, #1600) afterwards — but the **narrowing they apply to it is
 one function**, `scriptForShot` (#1732). `scene-script.test.ts` hashes the two
 builders against each other for the same underlying script, so a one-sided
 change to the hashed script view fails there rather than in a user's sequence.
@@ -879,13 +900,19 @@ Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
   re-stale three scenes' prompts (and their stills and clips) per script edit,
   and a pure reorder — which the v5 contract keeps inert — would re-stale
   every scene whose neighbours moved. The neighbours are context, not the
-  subject of the prompt. Pinned by the "neighbour scene script edited" row in
-  `staleness-matrix.test.ts`.
+  subject of the prompt. The hash input has no neighbour channel.
 - **A voice-only character's look** (visual prompt only). The visual LLM
   never sees a voice-only character (#1585), so the visual hash drops it too
-  (#1785); the toggle itself still moves the digest because the entry leaves
-  the bible. The motion hash keeps it (delivery). A stored visual digest
-  that still includes that character does not verify.
+  (#1785). The motion hash keeps it (delivery), and marks it
+  `voiceOnly: true` because the motion LLM is sent the flag (#1787). The mark
+  joins only when set, so a cast with no voice-only character hashes as
+  before. Every digest before the current shape (`v5-voiced` and older)
+  ignores the flag, so it would equal the stamp after a toggle. Verify
+  therefore accepts those digests only while no character's `voiceOnly`
+  moved since the prompt was made (`voiceOnlyMovedSince` over the character
+  bible versions). An untouched pre-#1785 stamp stays fresh on deploy; a
+  toggle after it stales both prompts. The regenerate bail uses the same
+  guard.
 - **Model switches.** See §3: verify pins each artifact to its own model.
 
 ---
@@ -904,5 +931,9 @@ Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
 | Bible persistence (cast)                 | `src/cast/server/workflows/character-bible-workflow.ts`, `location-bible-workflow.ts`                               |
 | Pipeline orchestration                   | `src/sequences/server/workflows/analyze-script-workflow.ts`                                                         |
 | Staleness verify (prompts + still)       | `src/shots/server/shot-staleness.ts` (`computeShotStaleness`, `findStalenessCauses`)                                |
+| Staleness verify (clip)                  | `src/shots/scene-segments.ts` (`isSelectedVersionStale`)                                                            |
+| Staleness verify (sheets)                | `src/cast/server/production-staleness.ts` (`readReferenceStaleness`)                                                |
+| Staleness verify (music)                 | `src/audio/server/music-staleness.ts` (`readMusicPromptStaleness`)                                                  |
+| Verdict matrix (every edge, as verdicts) | `src/shots/server/staleness-matrix.test.ts`                                                                         |
 | Still snapshot hash                      | `src/stills/server/workflows/image-workflow-snapshot.ts`, `src/shots/server/workflows/regenerate-shots-snapshot.ts` |
 | Design rationale                         | `docs/architecture/workflow-snapshots-and-content-hash-staleness.md`                                                |

@@ -11,6 +11,8 @@ import { generateId } from '@/platform/id';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { SequenceLocationMinimal } from '@/platform/server/db/schema';
 import { buildLocationInsert } from './cast-records';
+import { computeLocationSheetHashFromDto } from './sheet-snapshots';
+import type { SheetPayload } from './sheet-snapshots';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
@@ -76,8 +78,13 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
           })
         );
 
-        const created =
-          await scopedDb.sequenceLocations.createBulk(locationInserts);
+        const created = await scopedDb.sequenceLocations.createBulk(
+          locationInserts,
+          {
+            source: 'analysis',
+            createdBy: null,
+          }
+        );
         if (created.length !== input.locationBible.length) {
           throw new NonRetryableError(
             `[LocationBibleWorkflow:cf] expected ${input.locationBible.length} location records, created ${created.length}`
@@ -90,6 +97,15 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
     // Create a mapping from locationId (from bible) to database id
     const locationIdToDbId = new Map<string, string>(
       createdLocations.map((loc) => [loc.locationId, loc.id])
+    );
+    // The bible version each row landed on (#1600). A step result cached
+    // before #1600 has none.
+    const bibleVersionByDbId = new Map<string, string | null>(
+      createdLocations.map((loc) => [
+        loc.id,
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a result cached before #1600
+        loc.selectedBibleVersionId ?? null,
+      ])
     );
 
     const childBinding = this.env.LOCATION_SHEET_WORKFLOW;
@@ -111,18 +127,39 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
 
         const libraryMatch = matchMap.get(location.locationId);
 
-        const childPayload: LocationSheetWorkflowInput = {
+        const unclaimedFields: SheetPayload<LocationSheetWorkflowInput> = {
           userId: input.userId,
           teamId,
           sequenceId,
           reservationId: input.reservationId,
           locationDbId,
+          bibleVersionId: bibleVersionByDbId.get(locationDbId) ?? null,
           locationName: location.name,
           locationMetadata: location,
           imageModel: model,
           referenceImageUrl: libraryMatch?.referenceImageUrl,
           libraryLocationDescription: libraryMatch?.description,
           styleConfig: input.styleConfig,
+          libraryLocationReferenceHash:
+            libraryMatch?.referenceInputHash ?? null,
+        };
+        // Tracked like any other sheet (#1113): hashed, and landed through a
+        // claim a bible edit revokes.
+        const unclaimed = {
+          ...unclaimedFields,
+          snapshotInputHash:
+            await computeLocationSheetHashFromDto(unclaimedFields),
+        };
+        const referenceVersionId = await step.do(
+          `claim-location-sheet-${index}`,
+          async () =>
+            await scopedDb.sequenceLocations.claimReference(locationDbId, {
+              markGenerating: false,
+            })
+        );
+        const childPayload: LocationSheetWorkflowInput = {
+          ...unclaimed,
+          referenceVersionId,
         };
 
         return await spawnAndAwaitChild<

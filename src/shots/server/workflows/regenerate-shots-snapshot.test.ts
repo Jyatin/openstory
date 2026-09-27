@@ -65,6 +65,8 @@ function makeCharacter(
     sheetError: null,
     sheetInputHash: 'jack-hash-v1',
     selectedSheetVersionId: null,
+    selectedBibleVersionId: null,
+    pendingPromoteSheetVersionId: null,
     talentId: null,
     firstMentionLine: null,
     firstMentionText: null,
@@ -216,6 +218,8 @@ describe('buildRegenerateShotSnapshot', () => {
         makeCharacter({
           sheetInputHash: 'jack-hash-v1',
           selectedSheetVersionId: 'version-ulid-2',
+          selectedBibleVersionId: null,
+          pendingPromoteSheetVersionId: null,
         }),
       ],
       locations: NO_LOCATIONS,

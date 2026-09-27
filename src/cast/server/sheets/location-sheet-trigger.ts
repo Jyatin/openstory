@@ -8,6 +8,7 @@ import { resolveSheetImageModel } from '@/cast/sheet-image-model';
 import { resolveSequenceStyleConfig } from '@/look/style-config';
 import type { LocationSheetWorkflowInput } from '@/platform/server/workflow/types';
 import { computeLocationSheetHashFromDto } from '@/cast/server/workflows/sheet-snapshots';
+import type { SheetPayload } from '@/cast/server/workflows/sheet-snapshots';
 
 /** Narrow DB text column to the typed union, defaulting to 'interior'. */
 function parseLocationType(
@@ -56,7 +57,7 @@ export async function buildRegenerateLocationSheetPayload(params: {
   location: SequenceLocationWithReference;
   /** Generate-time pick; omit to reuse the live version's model or the sequence default. */
   imageModel?: string | null;
-}): Promise<LocationSheetWorkflowInput> {
+}): Promise<Omit<LocationSheetWorkflowInput, 'referenceVersionId'>> {
   const { scopedDb, userId, teamId, sequence, location } = params;
   const style =
     sequence.styleConfig == null && sequence.styleId
@@ -88,13 +89,14 @@ export async function buildRegenerateLocationSheetPayload(params: {
       )
     : null;
 
-  const partial: LocationSheetWorkflowInput = {
+  const partialFields: SheetPayload<LocationSheetWorkflowInput> = {
     userId,
     teamId,
     sequenceId: sequence.id,
     locationDbId: location.id,
     locationName: location.name,
     locationMetadata: toLocationMetadata(location),
+    bibleVersionId: location.selectedBibleVersionId,
     imageModel: resolveSheetImageModel({
       explicit: params.imageModel,
       liveVersionModel: liveVersion?.model,
@@ -105,6 +107,9 @@ export async function buildRegenerateLocationSheetPayload(params: {
     styleConfig,
     libraryLocationReferenceHash,
   };
-  partial.snapshotInputHash = await computeLocationSheetHashFromDto(partial);
+  const partial = {
+    ...partialFields,
+    snapshotInputHash: await computeLocationSheetHashFromDto(partialFields),
+  };
   return partial;
 }

@@ -190,15 +190,12 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     summary:
       'A prop, effect, sound or clip referenced by @token. Detected in the script at the Script stage or added by hand, then yours to edit.',
     counts: [
-      'Description (prompts)',
+      'Token and description (prompts)',
       'Image (still)',
       'Audio or video clip: sent as a reference when the video model takes one',
       'Its media URL, stamped on every clip it was sent to (referenceKeys)',
     ],
-    ignored: [
-      'Token: a label, so a rename stales nothing (text reads it as the element)',
-      'Consistency tag',
-    ],
+    ignored: ['Consistency tag'],
   },
   // --- You set -------------------------------------------------------------
   {
@@ -589,7 +586,7 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     band: 'renders',
     summary: 'The rendered start frame for a shot.',
     counts: [
-      'Selected visual prompt text, element tokens read as the element',
+      'Selected visual prompt text',
       'Image model',
       'Aspect ratio',
       'Selected character sheet versions',
@@ -659,12 +656,7 @@ const bibleToPrompt: GraphEdge[] = ['visualPrompt', 'motionPrompt'].flatMap(
     { from: 'script', to, tracking: 'hash' as const },
     { from: 'character', to, tracking: 'hash' as const },
     { from: 'location', to, tracking: 'hash' as const },
-    {
-      from: 'element',
-      to,
-      tracking: 'hash' as const,
-      note: 'the description counts; the token is read as a label, so a rename moves nothing',
-    },
+    { from: 'element', to, tracking: 'hash' as const },
     { from: 'style', to, tracking: 'hash' as const },
     { from: 'aspectRatio', to, tracking: 'hash' as const },
     {
@@ -864,17 +856,12 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     tracking: 'pointer',
     note: 'the selected sheet version id',
   },
-  {
-    from: 'element',
-    to: 'still',
-    tracking: 'hash',
-    note: "the image URL; the token in the prompt is swapped for the element's id before hashing",
-  },
+  { from: 'element', to: 'still', tracking: 'hash', note: 'the image URL' },
   {
     from: 'motionPrompt',
     to: 'clip',
     tracking: 'pointer',
-    note: 'the manifest records the prompt version; a token rename’s row counts as the row it rewrote, so a rename leaves the clip fresh',
+    note: 'the manifest records the prompt version',
   },
   {
     from: 'still',

@@ -205,11 +205,7 @@ function createTalentReadMethodsScoped(db: Database, teamId: string | null) {
               fetchedIds.map((id) => sql`${id}`),
               sql`, `
             )})`,
-            eq(talentSheets.isDefault, true),
-            // A diverged default is not the talent's identity: skip it and let
-            // the fallback pick, the same choice `resolveCastTalent` makes, so
-            // a cast sheet stamps the image its staleness check recomputes.
-            sql`${talentSheets.divergedAt} IS NULL`
+            eq(talentSheets.isDefault, true)
           )
         );
 

@@ -21,6 +21,7 @@ import type {
 } from '@/platform/server/workflow/types';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { DEFAULT_IMAGE_MODEL } from '@/models/models';
+import { sha256Hex } from '@/shots/input-hash';
 import {
   computeCharacterSheetHashCurrent,
   computeCharacterSheetHashFromDto,
@@ -112,7 +113,8 @@ describe('character-sheet hash', () => {
     };
     const currentHash = await computeCharacterSheetHashCurrent(
       baseInput,
-      asScopedDb(stub)
+      asScopedDb(stub),
+      null
     );
     expect(dtoHash).toBe(currentHash);
   });
@@ -130,7 +132,8 @@ describe('character-sheet hash', () => {
     };
     const currentHash = await computeCharacterSheetHashCurrent(
       baseInput,
-      asScopedDb(stub)
+      asScopedDb(stub),
+      null
     );
     expect(dtoHash).not.toBe(currentHash);
   });
@@ -153,7 +156,7 @@ describe('character-sheet hash', () => {
     });
     const dtoHash = await computeCharacterSheetHashFromDto(castInput);
     const current = (stub: CharacterStub) =>
-      computeCharacterSheetHashCurrent(castInput, asScopedDb(stub));
+      computeCharacterSheetHashCurrent(castInput, asScopedDb(stub), null);
     expect(await current(talentRow('Freckles', '/r2/talent/sheet-1.png'))).toBe(
       dtoHash
     );
@@ -163,6 +166,81 @@ describe('character-sheet hash', () => {
     expect(
       await current(talentRow('Freckles', '/r2/talent/sheet-2.png'))
     ).not.toBe(dtoHash);
+  });
+
+  it('keeps a pre-#1785 cast snapshot convergent when the live talent matches', async () => {
+    const castInput: CharacterSheetWorkflowInput = {
+      ...baseInput,
+      referenceImageUrl: '/r2/talent/sheet-1.png',
+      castTalentDescription: 'Freckles',
+    };
+    const stub: CharacterStub = {
+      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
+      talent: {
+        getWithRelations: async () => ({
+          id: 'tal1',
+          description: 'Freckles',
+          sheets: [
+            {
+              isDefault: true,
+              inputHash: 'talent-v1',
+              imageUrl: '/r2/talent/sheet-1.png',
+            },
+          ],
+        }),
+      },
+    };
+    // The pre-#1785 body is the current body with the talent channel omitted.
+    const pre1785 = await computeCharacterSheetHashFromDto({
+      ...castInput,
+      referenceImageUrl: undefined,
+      talentMetadata: undefined,
+      castTalentDescription: null,
+    });
+    const db = asScopedDb(stub);
+    expect(
+      await computeCharacterSheetHashCurrent(castInput, db, null)
+    ).not.toBe(pre1785);
+    expect(await computeCharacterSheetHashCurrent(castInput, db, pre1785)).toBe(
+      pre1785
+    );
+  });
+
+  it('still diverges a pre-#1785 cast snapshot when the talent sheet hash changes', async () => {
+    const castInput: CharacterSheetWorkflowInput = {
+      ...baseInput,
+      referenceImageUrl: '/r2/talent/sheet-1.png',
+      castTalentDescription: 'Freckles',
+    };
+    const pre1785 = await computeCharacterSheetHashFromDto({
+      ...castInput,
+      referenceImageUrl: undefined,
+      talentMetadata: undefined,
+      castTalentDescription: null,
+    });
+    const stub: CharacterStub = {
+      characters: { getById: async () => ({ id: 'c1', talentId: 'tal1' }) },
+      talent: {
+        getWithRelations: async () => ({
+          id: 'tal1',
+          description: 'Freckles',
+          sheets: [
+            {
+              isDefault: true,
+              inputHash: 'talent-v2',
+              imageUrl: '/r2/talent/sheet-1.png',
+            },
+          ],
+        }),
+      },
+    };
+    expect(
+      await computeCharacterSheetHashCurrent(
+        castInput,
+        asScopedDb(stub),
+        pre1785
+      )
+    ).not.toBe(pre1785);
   });
 
   it('treats missing imageModel as DEFAULT_IMAGE_MODEL on both paths', async () => {
@@ -217,7 +295,8 @@ describe('location-sheet hash', () => {
     };
     const currentHash = await computeLocationSheetHashCurrent(
       baseInput,
-      asScopedDb(stub)
+      asScopedDb(stub),
+      null
     );
     expect(dtoHash).toBe(currentHash);
   });
@@ -234,9 +313,60 @@ describe('location-sheet hash', () => {
     };
     const currentHash = await computeLocationSheetHashCurrent(
       baseInput,
-      asScopedDb(stub)
+      asScopedDb(stub),
+      null
     );
     expect(dtoHash).not.toBe(currentHash);
+  });
+
+  it('keeps a description-only snapshot convergent when the library reference matches', async () => {
+    const pre1785 = await sha256Hex({
+      artifact: 'location:sheet',
+      locationBible: { description: 'Foggy waterfront' },
+      libraryLocationReferenceHash: 'lib-v1',
+      styleConfigHash: 'no-style',
+      imageModel: 'nano_banana_2',
+    });
+    const stub: LocationStub = {
+      sequenceLocations: {
+        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
+      },
+      locations: {
+        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v1' }),
+      },
+    };
+    const db = asScopedDb(stub);
+    expect(await computeLocationSheetHashCurrent(baseInput, db, null)).not.toBe(
+      pre1785
+    );
+    expect(await computeLocationSheetHashCurrent(baseInput, db, pre1785)).toBe(
+      pre1785
+    );
+  });
+
+  it('still diverges a description-only snapshot when the library reference changes', async () => {
+    const pre1785 = await sha256Hex({
+      artifact: 'location:sheet',
+      locationBible: { description: 'Foggy waterfront' },
+      libraryLocationReferenceHash: 'lib-v1',
+      styleConfigHash: 'no-style',
+      imageModel: 'nano_banana_2',
+    });
+    const stub: LocationStub = {
+      sequenceLocations: {
+        getById: async () => ({ id: 'loc1', libraryLocationId: 'lib1' }),
+      },
+      locations: {
+        getById: async () => ({ id: 'lib1', referenceInputHash: 'lib-v2' }),
+      },
+    };
+    expect(
+      await computeLocationSheetHashCurrent(
+        baseInput,
+        asScopedDb(stub),
+        pre1785
+      )
+    ).not.toBe(pre1785);
   });
 });
 

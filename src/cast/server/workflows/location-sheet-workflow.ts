@@ -231,7 +231,11 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
         );
 
         const currentInputHash = snapshotInputHash
-          ? await computeLocationSheetHashCurrent(input, scopedDb.liveRead)
+          ? await computeLocationSheetHashCurrent(
+              input,
+              scopedDb.liveRead,
+              snapshotInputHash
+            )
           : null;
 
         const decision = decideSheetDivergence(

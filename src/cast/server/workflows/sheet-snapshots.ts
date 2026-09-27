@@ -11,12 +11,14 @@
  */
 
 import {
+  characterSheetInputHash,
   characterSheetInputHashMatches,
   computeCharacterSheetInputHash,
   computeLibraryLocationReferenceInputHash,
   computeShotImageInputHash,
   computeLocationSheetInputHash,
   computeTalentSheetInputHash,
+  locationSheetInputHash,
   locationSheetInputHashMatches,
   sha256Hex,
   type CharacterBibleHashFields,
@@ -224,16 +226,29 @@ export async function characterSheetHashMatchesStored(
  * config, and image model are frozen on the payload (they must not drift
  * mid-flight); the cast talent is re-read, since the talent and its default
  * sheet are the upstream rows that can change between trigger and write.
+ *
+ * A snapshot that matches this live input, including a pre-#1785 digest, is
+ * returned as-is. The reconcile compare then stays convergent for a run
+ * queued before the talent channel existed. A change that digest covered
+ * still returns the new digest.
  */
 export async function computeCharacterSheetHashCurrent(
   input: CharacterSheetWorkflowInput,
-  scopedDb: SheetSnapshotReadDb
+  scopedDb: SheetSnapshotReadDb,
+  snapshotInputHash: string | null
 ): Promise<CharacterSheetInputHash> {
   const character = await scopedDb.characters.getById(input.characterDbId);
-  return computeCharacterSheetHashFromDto({
+  const live: CharacterSheetWorkflowInput = {
     ...input,
     ...(await resolveCastTalent(scopedDb, character?.talentId ?? null)),
-  });
+  };
+  if (
+    snapshotInputHash &&
+    (await characterSheetHashMatchesStored(snapshotInputHash, live))
+  ) {
+    return characterSheetInputHash(snapshotInputHash);
+  }
+  return computeCharacterSheetHashFromDto(live);
 }
 
 /** Every bible field the location-sheet prompt reads (#1785). */
@@ -294,16 +309,27 @@ export async function locationSheetHashMatchesStored(
   });
 }
 
+/**
+ * Recompute the location-sheet hash from the live library reference.
+ * A snapshot that matches this live input, including a pre-#1785 digest, is
+ * returned as-is so a run queued before the bible projection widened is not
+ * parked. A change that digest covered still returns the new digest.
+ */
 export async function computeLocationSheetHashCurrent(
   input: LocationSheetWorkflowInput,
-  scopedDb: SheetSnapshotReadDb
+  scopedDb: SheetSnapshotReadDb,
+  snapshotInputHash: string | null
 ): Promise<LocationSheetInputHash> {
   const libraryLocationReferenceHash =
     await resolveLibraryLocationReferenceHash(scopedDb, input.locationDbId);
-  return computeLocationSheetHashFromDto({
-    ...input,
-    libraryLocationReferenceHash,
-  });
+  const live = { ...input, libraryLocationReferenceHash };
+  if (
+    snapshotInputHash &&
+    (await locationSheetHashMatchesStored(snapshotInputHash, live))
+  ) {
+    return locationSheetInputHash(snapshotInputHash);
+  }
+  return computeLocationSheetHashFromDto(live);
 }
 
 /**

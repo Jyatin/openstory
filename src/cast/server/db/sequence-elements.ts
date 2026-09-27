@@ -12,6 +12,7 @@ import type {
 } from '@/platform/server/db/schema';
 import {
   framePromptVersions,
+  frameVariants,
   frames,
   renderSegments,
   scenes,
@@ -535,6 +536,18 @@ export function createSequenceElementsMethods(db: Database) {
                     and(
                       eq(frames.id, image.frameId),
                       eq(frames.selectedImagePromptVersionId, image.id)
+                    )
+                  ),
+                // Selecting a still restores the prompt it links to. Point the
+                // stills linked to the old row at the rename, so re-selecting
+                // one never brings the old token back.
+                db
+                  .update(frameVariants)
+                  .set({ promptVersionId: imageId })
+                  .where(
+                    and(
+                      eq(frameVariants.frameId, image.frameId),
+                      eq(frameVariants.promptVersionId, image.id)
                     )
                   ),
               ]

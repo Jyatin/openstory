@@ -22,6 +22,7 @@ import type { Database } from '@/platform/server/db/client';
 import { generateId } from '@/platform/id';
 import {
   framePromptVersions,
+  frameVariants,
   frames,
   sceneScriptVersions,
   scenes,
@@ -440,6 +441,17 @@ describe('cascadeRename', () => {
       .where(eq(frames.shotId, before?.shotId ?? ''));
     if (!before?.motionId || !before.scriptId || !frameBefore)
       throw new Error('test setup: selections missing');
+    const [still] = await db
+      .insert(frameVariants)
+      .values({
+        frameId: frameBefore.id,
+        sequenceId,
+        kind: 'model',
+        model: 'nano_banana_2',
+        status: 'completed',
+        promptVersionId: frameBefore.selectedImagePromptVersionId,
+      })
+      .returning();
 
     await methods.cascadeRename({
       sequenceId,
@@ -448,8 +460,8 @@ describe('cascadeRename', () => {
       newToken: 'BRAND',
     });
 
-    // History is untouched: the rows stills, clips and hashes pinned still
-    // say what they said.
+    // History is untouched: the rows clips and hashes pinned still say what
+    // they said.
     const [oldMotion] = await db
       .select()
       .from(shotPromptVersions)
@@ -493,6 +505,13 @@ describe('cascadeRename', () => {
       .where(eq(frames.id, frameBefore.id));
     expect(image?.version.source).toBe('renamed');
     expect(image?.version.text).toBe('A BRAND on a wall.');
+    // A still rendered before the rename restores the renamed prompt when
+    // selected, not the old token.
+    const [stillAfter] = await db
+      .select()
+      .from(frameVariants)
+      .where(eq(frameVariants.id, still?.id ?? ''));
+    expect(stillAfter?.promptVersionId).toBe(image?.version.id);
     const [script] = await db
       .select({ version: sceneScriptVersions })
       .from(scenes)

@@ -915,7 +915,11 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
               workflowRunId,
               sequenceId: input.sequenceId,
               userId: input.userId,
-              prompt: structured ? structured.fullPrompt : prompt,
+              // A run queued before #1786 carries the typed text on the
+              // payload; its `motionPrompt` is the pre-edit selection.
+              prompt: structured
+                ? (input.userEditText ?? structured.fullPrompt)
+                : prompt,
               rejection: lastRejection ?? 'unknown rejection',
               analysisModelId:
                 getAnalysisModelById(provenance.analysisModel ?? '')?.id ??

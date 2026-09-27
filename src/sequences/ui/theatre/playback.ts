@@ -7,11 +7,15 @@
  *   continuity + global timestamps).
  * - A music `Input` + `AudioBufferSink` mixed through a music-only `GainNode`
  *   that applies the variant's measured loudness gain.
- * - Per-scene dialogue audio decoded in the background after `prepare()`
- *   resolves (first frame first, #1253); `play()` awaits it, then clips are
- *   scheduled as `AudioBufferSourceNode`s on `play()` / `seek()`, routed
- *   through a master gain node so dialogue is not attenuated by the music
- *   loudness gain.
+ * - Scene sound (dialogue / VO) streamed like the music (#1845): an
+ *   `AudioBufferSink` per scene, a second ahead of the playhead, queued as
+ *   `AudioBufferSourceNode`s on the master gain (not attenuated by the music
+ *   loudness gain). Nothing is decoded before it is needed, so a first play
+ *   waits on its own second of sound, not the whole clip.
+ * - Buffering: when the next frame or the scene's sound is not in yet, the
+ *   `AudioContext` is suspended — the clock and every queued node stop
+ *   together — and `onBuffering` fires, instead of dropping frames or
+ *   playing the scene silent.
  * - Codec gating up front via `prepare()`; throws so the React component can
  *   render a fallback CTA.
  *
@@ -25,16 +29,16 @@ import {
   AudioBufferSink,
   Input,
   type InputAudioTrack,
-  UrlSource,
   type WrappedAudioBuffer,
   type WrappedCanvas,
 } from 'mediabunny';
+import { createRangedSource } from './ranged-source';
 
 import {
   ConcatenatedVideoSource,
+  type SceneAudioTrack,
   type SceneInput,
 } from './concatenated-video-source';
-import { decodeAudioTrack } from './decode-audio-track';
 import {
   forAwaitUntilDisposed,
   isInputDisposedError,
@@ -65,6 +69,8 @@ export type SequencePlayerOptions = {
   /** Scene-open progress during `prepare()` — drives the loading label (#1253). */
   onLoadProgress?: (loadedScenes: number, totalScenes: number) => void;
   onTimeUpdate?: (time: number) => void;
+  /** Playback stalled on the network (true) or picked up again (false). */
+  onBuffering?: (buffering: boolean) => void;
   onEnded?: () => void;
   onError?: (error: Error) => void;
 };
@@ -91,10 +97,15 @@ export type SequencePlayerMeta = {
   resolutionsLabel: string;
 };
 
-type DialogueClip = {
-  buffer: AudioBuffer;
-  sceneOffsetSeconds: number;
-};
+/**
+ * How long a wait (for the next frame, or past the queued sound) counts as a
+ * stall. Frames are ~40 ms apart; a looser bound keeps decode jitter from
+ * flapping the AudioContext between suspend and resume.
+ */
+const STALL_SLACK_SECONDS = 0.25;
+
+/** How long before a cut the next clip's opening is fetched. */
+const PREFETCH_LEAD_SECONDS = 3;
 
 export class SequencePlayerEngine {
   private readonly opts: SequencePlayerOptions;
@@ -109,17 +120,27 @@ export class SequencePlayerEngine {
   private musicInput: Input | null = null;
   private musicTrack: InputAudioTrack | null = null;
   private audioSink: AudioBufferSink | null = null;
-  private dialogueClips: DialogueClip[] = [];
+  /** Scene sound (dialogue / VO) in timeline order, from `prepare()`. */
+  private sceneAudioTracks: SceneAudioTrack[] = [];
+  /** Bumped per play and pause so a stale scene-sound lane stops. */
+  private laneGeneration = 0;
   /**
-   * Dialogue decoding runs off the critical path so the first frame + controls
-   * show as soon as the scene headers are open (#1253). `play()` awaits it.
+   * Timeline point up to which scene sound is queued. The playhead passing
+   * it (plus slack) is a stall.
    */
-  private dialogueReady: Promise<void> = Promise.resolve();
+  private laneHead = 0;
+  /** Scenes whose first video bytes have been asked for. */
+  private readonly prefetchedScenes = new Set<number>();
+  /** End (timestamp + duration) of the frame on the canvas. */
+  private lastFrameEnd = 0;
+  /** `performance.now()` since the next frame has been awaited, or null. */
+  private frameWaitStart: number | null = null;
+  private buffering = false;
 
   private meta: SequencePlayerMeta | null = null;
 
   private playing = false;
-  /** play() was called and is waiting on dialogue decode; pause() cancels it. */
+  /** play() was called and is waiting on the AudioContext; pause() cancels it. */
   private playRequested = false;
   /** Bumped on each new play() so a stale await cannot steal the live request. */
   private playGeneration = 0;
@@ -172,11 +193,13 @@ export class SequencePlayerEngine {
     if (this.opts.musicUrl) {
       this.musicInput = new Input({
         formats: ALL_FORMATS,
-        source: new UrlSource(this.opts.musicUrl),
+        source: createRangedSource(this.opts.musicUrl),
       });
       this.musicTrack = await this.musicInput.getPrimaryAudioTrack();
+
       if (this.musicTrack && (await this.musicTrack.canDecode())) {
         musicSampleRate = await this.musicTrack.getSampleRate();
+
         hasAudio = true;
       } else {
         this.musicTrack = null;
@@ -199,8 +222,8 @@ export class SequencePlayerEngine {
       this.audioSink = new AudioBufferSink(this.musicTrack);
     }
 
-    const sceneAudioTracks = this.videoSource.getSceneAudioTracks();
-    if (sceneAudioTracks.length > 0) hasAudio = true;
+    this.sceneAudioTracks = this.videoSource.getSceneAudioTracks();
+    if (this.sceneAudioTracks.length > 0) hasAudio = true;
 
     this.opts.canvas.width = videoMeta.displayWidth;
     this.opts.canvas.height = videoMeta.displayHeight;
@@ -218,60 +241,32 @@ export class SequencePlayerEngine {
 
     await this.primeFirstFrame();
     this.startRenderLoop();
-
-    // Per-scene dialogue/VO lives in each scene video's embedded audio track.
-    // Decode in the background so the first frame + controls show as soon as
-    // the headers are open. `play()` awaits `dialogueReady` before scheduling,
-    // so the first play may wait on this; after that, play()/seek() schedule
-    // against the AudioContext clock with no async IO. A single failing track
-    // shouldn't kill the whole player — log and stay silent for that scene.
-    this.dialogueReady = (async () => {
-      const dialogueClips: DialogueClip[] = [];
-      for (const {
-        sceneIndex,
-        sceneOffsetSeconds,
-        track,
-        isStill,
-      } of sceneAudioTracks) {
-        if (this.disposed) return;
-        try {
-          if (isStill) {
-            // AudioBufferSink also decodes PCM cut WAVs, which have no
-            // WebCodecs decoder configuration. Schedule its chunks unchanged.
-            for await (const { buffer, timestamp } of new AudioBufferSink(
-              track
-            ).buffers()) {
-              // oxlint-disable-next-line typescript/no-unnecessary-condition -- may dispose during decoding
-              if (this.disposed) return;
-              dialogueClips.push({
-                buffer,
-                sceneOffsetSeconds: sceneOffsetSeconds + timestamp,
-              });
-            }
-            continue;
-          }
-          const buffer = await decodeAudioTrack(track);
-          if (!buffer) continue;
-          dialogueClips.push({ buffer, sceneOffsetSeconds });
-        } catch (err) {
-          // dispose() tears the Inputs down under an in-flight decode; that
-          // rejection isn't a broken track.
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- flips during the await
-          if (this.disposed) return;
-          if (isStill) throw err;
-          logger.warn(
-            `SequencePlayerEngine: failed to decode embedded audio for scene ${sceneIndex}`,
-            { err }
-          );
-        }
-      }
-      this.dialogueClips = dialogueClips;
-    })();
-
-    void this.dialogueReady.catch(() => {
-      /* play() surfaces the failure. */
-    });
     return this.meta;
+  }
+
+  /**
+   * Warm the next clip in the last seconds of the current one. Not earlier:
+   * on a slow link it would take bandwidth from the clip that is playing.
+   */
+  private prefetchNearCut(time: number): void {
+    const offsets = this.meta?.sceneOffsetsSeconds;
+    if (!offsets) return;
+    const next = this.videoSource.locate(time).sceneIndex + 1;
+    const cut = offsets[next];
+    if (
+      cut === undefined ||
+      cut - time > PREFETCH_LEAD_SECONDS ||
+      this.prefetchedScenes.has(next)
+    ) {
+      return;
+    }
+    this.prefetchedScenes.add(next);
+    void this.videoSource.prefetch(next).catch((err: unknown) => {
+      if (this.disposed) return;
+      logger.warn(`SequencePlayerEngine: prefetch failed for scene ${next}`, {
+        err,
+      });
+    });
   }
 
   getMeta(): SequencePlayerMeta {
@@ -310,7 +305,6 @@ export class SequencePlayerEngine {
       if (this.audioContext.state === 'suspended') {
         await this.audioContext.resume();
       }
-      await this.dialogueReady;
     } catch (err) {
       if (generation === this.playGeneration) this.playRequested = false;
       // oxlint-disable-next-line typescript/no-unnecessary-condition -- flips during the await
@@ -356,7 +350,7 @@ export class SequencePlayerEngine {
       });
     }
 
-    this.scheduleDialogueClips();
+    this.startSceneAudioLane(this.playbackTimeAtStart);
     return 'playing';
   }
 
@@ -365,6 +359,8 @@ export class SequencePlayerEngine {
     if (!this.playing) return;
     this.playbackTimeAtStart = this.getPlaybackTime();
     this.playing = false;
+    this.setBuffering(false);
+    this.laneGeneration++;
     void this.audioBufferIterator?.return();
     this.audioBufferIterator = null;
     for (const node of this.queuedAudioNodes) {
@@ -448,7 +444,7 @@ export class SequencePlayerEngine {
     this.audioSink = null;
     this.masterGain = null;
     this.musicGain = null;
-    this.dialogueClips = [];
+    this.sceneAudioTracks = [];
   }
 
   private applyGain(): void {
@@ -462,50 +458,124 @@ export class SequencePlayerEngine {
   }
 
   /**
-   * Schedule every dialogue clip whose end timestamp is still ahead of the
-   * current playback head. Each clip is anchored to its scene's global offset:
-   * if the user seeks into the middle of a scene, the clip starts mid-buffer.
+   * Stream scene sound from `from` on, a second ahead of the playhead, the
+   * way the music streams. Scenes without sound are skipped; the lane head
+   * jumps to the next scene that has some.
    */
-  private scheduleDialogueClips(): void {
-    if (
-      !this.audioContext ||
-      !this.masterGain ||
-      this.audioContextStartTime === null
-    ) {
-      return;
-    }
-    const playStart = this.playbackTimeAtStart;
-    for (const { buffer, sceneOffsetSeconds } of this.dialogueClips) {
-      const clipEnd = sceneOffsetSeconds + buffer.duration;
-      if (clipEnd <= playStart) continue;
+  private startSceneAudioLane(from: number): void {
+    const generation = ++this.laneGeneration;
+    const stale = () =>
+      this.disposed || !this.playing || generation !== this.laneGeneration;
+    const master = this.masterGain;
+    const meta = this.meta;
+    this.laneHead = from;
+    if (!master || !meta) return;
+    const sceneEnd = (i: number) =>
+      meta.sceneOffsetsSeconds[i + 1] ?? meta.durationSeconds;
+    const tracks = this.sceneAudioTracks.filter(
+      (t) => sceneEnd(t.sceneIndex) > from
+    );
+    void (async () => {
+      for (const { sceneIndex, sceneOffsetSeconds, track, isStill } of tracks) {
+        this.laneHead = Math.max(this.laneHead, sceneOffsetSeconds);
+        try {
+          // AudioBufferSink also decodes PCM cut WAVs (a still's takes),
+          // which have no WebCodecs decoder configuration.
+          for await (const { buffer, timestamp } of new AudioBufferSink(
+            track
+          ).buffers(Math.max(0, from - sceneOffsetSeconds))) {
+            if (stale()) return;
+            const at = sceneOffsetSeconds + timestamp;
+            this.queueBuffer(buffer, at, master);
+            this.laneHead = at + buffer.duration;
+            await this.waitUntilNear(this.laneHead, stale);
+            if (stale()) return;
+          }
+        } catch (err) {
+          // dispose() tears the Inputs down under an in-flight decode; that
+          // rejection isn't a broken track.
+          if (stale()) return;
+          if (isStill) {
+            this.opts.onError?.(
+              err instanceof Error ? err : new Error(String(err))
+            );
+            return;
+          }
+          // A broken clip track stays silent; the lane moves on.
+          logger.warn(
+            `SequencePlayerEngine: failed to decode embedded audio for scene ${sceneIndex}`,
+            { err }
+          );
+        }
+      }
+      if (!stale()) this.laneHead = Infinity;
+    })();
+  }
 
-      const node = this.audioContext.createBufferSource();
-      node.buffer = buffer;
-      node.connect(this.masterGain);
+  /** Queue `buffer` to sound at timeline time `at`, trimming what is past. */
+  private queueBuffer(buffer: AudioBuffer, at: number, to: AudioNode): void {
+    const context = this.audioContext;
+    const base = this.audioContextStartTime;
+    if (!context || base === null) return;
+    // Sample-aligned, so consecutive chunks join without a click.
+    const startAt =
+      Math.round(context.sampleRate * (base + at - this.playbackTimeAtStart)) /
+      context.sampleRate;
+    const late = context.currentTime - startAt;
+    if (late >= buffer.duration) return;
+    const node = context.createBufferSource();
+    node.buffer = buffer;
+    node.connect(to);
+    node.start(Math.max(startAt, context.currentTime), Math.max(0, late));
+    this.queuedAudioNodes.add(node);
+    node.onended = () => {
+      this.queuedAudioNodes.delete(node);
+    };
+  }
 
-      const scheduleTime =
-        this.audioContextStartTime + sceneOffsetSeconds - playStart;
-      // A seek into a clip already puts scheduleTime in the past. Its
-      // lateness IS the buffer offset; adding playStart again skips speech.
-      const bufferOffset = Math.max(
-        0,
-        this.audioContext.currentTime - scheduleTime
-      );
-      if (bufferOffset >= buffer.duration) continue;
-      node.start(
-        Math.max(scheduleTime, this.audioContext.currentTime),
-        bufferOffset
-      );
+  /** Resolve once `time` is within a second of the playhead, or on `stale`. */
+  private waitUntilNear(time: number, stale: () => boolean): Promise<void> {
+    if (time - this.getPlaybackTime() < 1) return Promise.resolve();
+    return new Promise((resolve) => {
+      const id = window.setInterval(() => {
+        if (stale() || time - this.getPlaybackTime() < 1) {
+          clearInterval(id);
+          resolve();
+        }
+      }, 100);
+    });
+  }
 
-      this.queuedAudioNodes.add(node);
-      node.onended = () => {
-        this.queuedAudioNodes.delete(node);
-      };
-    }
+  /**
+   * Suspend the AudioContext while waiting on the network: its clock is the
+   * playback clock, so the playhead, the music and every queued dialogue node
+   * hold together and pick up where they were.
+   */
+  private setBuffering(buffering: boolean): void {
+    if (this.buffering === buffering) return;
+    this.buffering = buffering;
+    if (buffering) void this.audioContext?.suspend();
+    else if (this.playing) void this.audioContext?.resume();
+    this.opts.onBuffering?.(buffering);
+  }
+
+  /**
+   * Stalled: the clock is past the drawn frame and the next one is not
+   * decoded, or past the scene sound queued so far.
+   */
+  private isStalled(time: number): boolean {
+    // Timed on the wait itself, not the clock: in a background tab frames
+    // are only drawn on the odd tick, and catching up is not a stall.
+    const videoLate =
+      this.frameWaitStart !== null &&
+      time > this.lastFrameEnd &&
+      performance.now() - this.frameWaitStart > STALL_SLACK_SECONDS * 1000;
+    return videoLate || time > this.laneHead + STALL_SLACK_SECONDS;
   }
 
   private async primeFirstFrame(): Promise<void> {
     this.asyncId++;
+    this.frameWaitStart = null;
     await this.videoFrameIterator?.return();
     this.videoFrameIterator = this.videoSource.canvases(
       this.playbackTimeAtStart,
@@ -515,6 +585,7 @@ export class SequencePlayerEngine {
     let second: WrappedCanvas | null;
     try {
       first = (await this.videoFrameIterator.next()).value ?? null;
+
       second = (await this.videoFrameIterator.next()).value ?? null;
     } catch (err) {
       if (this.disposed && isInputDisposedError(err)) return;
@@ -549,6 +620,8 @@ export class SequencePlayerEngine {
           });
         }
         if (this.playing) {
+          this.prefetchNearCut(playbackTime);
+          this.setBuffering(this.isStalled(playbackTime));
           this.opts.onTimeUpdate?.(playbackTime);
         }
       }
@@ -558,6 +631,7 @@ export class SequencePlayerEngine {
   }
 
   private drawFrame(frame: WrappedCanvas): void {
+    this.lastFrameEnd = frame.timestamp + frame.duration;
     const { width, height } = this.opts.canvas;
     this.canvasContext.clearRect(0, 0, width, height);
     this.canvasContext.drawImage(frame.canvas, 0, 0);
@@ -568,11 +642,14 @@ export class SequencePlayerEngine {
     let iterator = this.videoFrameIterator;
     while (iterator) {
       let newNextFrame: WrappedCanvas | null;
+      this.frameWaitStart = performance.now();
       try {
         newNextFrame = (await iterator.next()).value ?? null;
       } catch (err) {
         if (this.disposed && isInputDisposedError(err)) return;
         throw err;
+      } finally {
+        if (currentAsyncId === this.asyncId) this.frameWaitStart = null;
       }
       if (currentAsyncId !== this.asyncId) return;
       if (!newNextFrame) {
@@ -621,43 +698,11 @@ export class SequencePlayerEngine {
         this.audioBufferIterator !== iterator ||
         this.audioContext !== audioContext,
       async ({ buffer, timestamp }) => {
-        const startBaseline = this.audioContextStartTime;
-        if (startBaseline === null) return;
-        const node = audioContext.createBufferSource();
-        node.buffer = buffer;
-        node.connect(musicGain);
-
-        let startTimestamp =
-          startBaseline + timestamp - this.playbackTimeAtStart;
-        startTimestamp =
-          Math.round(audioContext.sampleRate * startTimestamp) /
-          audioContext.sampleRate;
-
-        if (startTimestamp >= audioContext.currentTime) {
-          node.start(startTimestamp);
-        } else {
-          node.start(
-            audioContext.currentTime,
-            audioContext.currentTime - startTimestamp
-          );
-        }
-
-        this.queuedAudioNodes.add(node);
-        node.onended = () => {
-          this.queuedAudioNodes.delete(node);
-        };
-
-        // Throttle: don't get more than ~1s ahead of playback.
-        if (timestamp - this.getPlaybackTime() >= 1) {
-          await new Promise<void>((resolve) => {
-            const id = window.setInterval(() => {
-              if (this.disposed || timestamp - this.getPlaybackTime() < 1) {
-                clearInterval(id);
-                resolve();
-              }
-            }, 100);
-          });
-        }
+        this.queueBuffer(buffer, timestamp, musicGain);
+        await this.waitUntilNear(
+          timestamp,
+          () => this.disposed || this.audioBufferIterator !== iterator
+        );
       }
     );
   }

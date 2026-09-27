@@ -27,6 +27,7 @@ import {
   UrlSource,
   type WrappedCanvas,
 } from 'mediabunny';
+import { createRangedSource } from './ranged-source';
 import {
   computeTargetResolution,
   describeResolutions,
@@ -46,10 +47,21 @@ const logger = getLogger(['openstory', 'sequence-player', 'concat-source']);
 
 type CanvasFit = 'fill' | 'contain' | 'cover';
 
+/** How much of the next clip `prefetch` reads ahead of the cut. */
+const PREFETCH_SECONDS = 1;
+
 export type SceneInput = {
   orderIndex: number;
 } & (
-  | { videoUrl: string }
+  | {
+      videoUrl: string;
+      /**
+       * The shot's still — what the clip opens on — shown while the player
+       * warms up. Not the clip itself: a hidden `<video>` would download it
+       * beside the player's own reads.
+       */
+      posterUrl: string | null;
+    }
   | {
       imageUrl: string | null;
       fallbackImageUrl: string | null;
@@ -244,7 +256,7 @@ export class ConcatenatedVideoSource {
     if (!('videoUrl' in scene)) return this.openStill(scene);
     const input = new Input({
       formats: ALL_FORMATS,
-      source: new UrlSource(scene.videoUrl),
+      source: createRangedSource(scene.videoUrl),
     });
     try {
       return await this.probeScene(input, i);
@@ -275,7 +287,11 @@ export class ConcatenatedVideoSource {
       for (const url of scene.audioUrls) {
         const input = new Input({
           formats: ALL_FORMATS,
-          source: new UrlSource(url),
+          // data: / blob: takes are in memory and answer no Range request.
+          source:
+            url.startsWith('data:') || url.startsWith('blob:')
+              ? new UrlSource(url)
+              : createRangedSource(url),
         });
         inputs.push(input);
         const track = await input.getPrimaryAudioTrack();
@@ -423,6 +439,21 @@ export class ConcatenatedVideoSource {
       }
     }
     return { sceneIndex: 0, localTime: 0 };
+  }
+
+  /**
+   * Read the opening second of scene `sceneIndex`'s video so its bytes are in
+   * the range reader's cache before the playhead crosses into it — the first
+   * frame of a clip is otherwise a cold fetch at the cut. Stills have
+   * nothing to read.
+   */
+  async prefetch(sceneIndex: number): Promise<void> {
+    const track = this.videoTracks[sceneIndex];
+    if (!track) return;
+    const sink = new EncodedPacketSink(track);
+    for await (const packet of sink.packets()) {
+      if (this.disposed || packet.timestamp >= PREFETCH_SECONDS) return;
+    }
   }
 
   /**

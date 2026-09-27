@@ -358,17 +358,22 @@ export type CharacterBibleHashFields = {
  * sheet the prompt copies — a promoted variant keeps its sheet's `inputHash`
  * but changes the image.
  */
-export type CharacterSheetTalentHashFields = {
-  description: string | null;
-  sheetImageUrl: string | null;
+const characterSheetTalentHashFieldsSchema = z.object({
+  description: z.string().nullable(),
+  sheetImageUrl: z.string().nullable(),
   /** Required; `null` is "the talent sheet has no look metadata". */
-  sheetLook: {
-    age: string | null;
-    gender: string | null;
-    ethnicity: string | null;
-    physicalDescription: string | null;
-  } | null;
-};
+  sheetLook: z
+    .object({
+      age: z.string().nullable(),
+      gender: z.string().nullable(),
+      ethnicity: z.string().nullable(),
+      physicalDescription: z.string().nullable(),
+    })
+    .nullable(),
+});
+export type CharacterSheetTalentHashFields = z.infer<
+  typeof characterSheetTalentHashFieldsSchema
+>;
 
 export type CharacterSheetHashInput = {
   characterBible: CharacterBibleHashFields;
@@ -445,20 +450,7 @@ const characterBibleHashFieldsSchema = z.object({
 const characterSheetHashInputSchema = z.object({
   characterBible: characterBibleHashFieldsSchema,
   talentSheetHash: z.string().nullable(),
-  talent: z
-    .object({
-      description: z.string().nullable(),
-      sheetImageUrl: z.string().nullable(),
-      sheetLook: z
-        .object({
-          age: z.string().nullable(),
-          gender: z.string().nullable(),
-          ethnicity: z.string().nullable(),
-          physicalDescription: z.string().nullable(),
-        })
-        .nullable(),
-    })
-    .nullable(),
+  talent: characterSheetTalentHashFieldsSchema.nullable(),
   styleConfigHash: z.string(),
   imageModel: z.string(),
 });
@@ -495,26 +487,30 @@ export async function characterSheetInputHashMatches(
   return digests.includes(stored);
 }
 
-type LocationBibleHashFields = {
-  name: string;
-  description: string | null;
-};
+const locationBibleHashFieldsSchema = z.object({
+  name: z.string(),
+  description: z.string().nullable(),
+});
+type LocationBibleHashFields = z.infer<typeof locationBibleHashFieldsSchema>;
 
 /**
  * Every bible field the location-sheet prompt reads (#1785). `name` is a
  * label, hashed only by the pre-#1108 digest.
  */
-export type LocationSheetBibleHashFields = LocationBibleHashFields &
-  Pick<
-    LocationBibleEntry,
-    | 'type'
-    | 'timeOfDay'
-    | 'architecturalStyle'
-    | 'keyFeatures'
-    | 'colorPalette'
-    | 'lightingSetup'
-    | 'ambiance'
-  >;
+const locationSheetBibleHashFieldsSchema = locationBibleHashFieldsSchema.extend(
+  {
+    type: z.enum(['interior', 'exterior', 'both']),
+    timeOfDay: z.string(),
+    architecturalStyle: z.string(),
+    keyFeatures: z.string(),
+    colorPalette: z.string(),
+    lightingSetup: z.string(),
+    ambiance: z.string(),
+  }
+);
+export type LocationSheetBibleHashFields = z.infer<
+  typeof locationSheetBibleHashFieldsSchema
+>;
 
 export type LocationSheetHashInput = {
   locationBible: LocationSheetBibleHashFields;
@@ -544,21 +540,8 @@ function locationSheetHashBody(
   };
 }
 
-const locationBibleHashFieldsSchema = z.object({
-  name: z.string(),
-  description: z.string().nullable(),
-});
-
 const locationSheetHashInputSchema = z.object({
-  locationBible: locationBibleHashFieldsSchema.extend({
-    type: z.enum(['interior', 'exterior', 'both']),
-    timeOfDay: z.string(),
-    architecturalStyle: z.string(),
-    keyFeatures: z.string(),
-    colorPalette: z.string(),
-    lightingSetup: z.string(),
-    ambiance: z.string(),
-  }),
+  locationBible: locationSheetBibleHashFieldsSchema,
   libraryLocationReferenceHash: z.string().nullable(),
   styleConfigHash: z.string(),
   imageModel: z.string(),

@@ -122,43 +122,49 @@ export async function loadShotPromptDialogue(
   sequenceId: string,
   shot: { id: string }
 ): Promise<ShotPromptDialogue> {
-  const [linesByShotId, sceneContext, shots, selectedMotion] =
-    await Promise.all([
-      loadShotDialogueLines(scopedDb, sequenceId),
-      loadSceneContextBySequence(scopedDb, sequenceId),
-      scopedDb.shots.listBySequence(sequenceId),
-      scopedDb.shotPromptVersions.getSelectedMotion(shot.id),
-    ]);
-  return shotPromptDialogueResolver({
-    linesByShotId,
+  const [shots, selectedMotion] = await Promise.all([
+    scopedDb.shots.listBySequence(sequenceId),
+    scopedDb.shotPromptVersions.getSelectedMotion(shot.id),
+  ]);
+  const promptDialogueOf = await loadShotPromptDialogueResolver(
+    scopedDb,
+    sequenceId,
     shots,
-    legacyDialogueOf: (shotId) =>
-      shotId === shot.id ? selectedMotion?.dialogue : undefined,
-    scriptDialogueOf: (sceneId) => sceneContext.get(sceneId)?.script?.dialogue,
-  })(shot);
+    (shotId) => (shotId === shot.id ? selectedMotion?.dialogue : undefined)
+  );
+  return promptDialogueOf(shot);
 }
 
 /**
- * {@link shotDialogueResolver} for a caller that holds neither the lines nor
- * the scene scripts yet — both read here, in parallel. `shots` is every shot
- * of the sequence, or of the scene when only one scene is being resolved.
+ * {@link shotPromptDialogueResolver} for a caller that holds neither the
+ * lines nor the scene scripts yet — both read here, in parallel. `shots` is
+ * every shot of the sequence, or of the scene when only one scene is being
+ * resolved.
  */
-export async function loadShotDialogueResolver(
+async function loadShotPromptDialogueResolver(
   scopedDb: Pick<ScopedDb, 'shotDialogue' | 'scenes' | 'sceneScriptVersions'>,
   sequenceId: string,
   shots: Parameters<typeof shotDialogueResolver>[0]['shots'],
   legacyDialogueOf: (shotId: string) => MotionDialogue | null | undefined
-): Promise<ShotDialogueResolver> {
+): Promise<(shot: { id: string }) => ShotPromptDialogue> {
   const [linesByShotId, sceneContext] = await Promise.all([
     loadShotDialogueLines(scopedDb, sequenceId),
     loadSceneContextBySequence(scopedDb, sequenceId),
   ]);
-  return shotDialogueResolver({
+  return shotPromptDialogueResolver({
     linesByShotId,
     shots,
     legacyDialogueOf,
     scriptDialogueOf: (sceneId) => sceneContext.get(sceneId)?.script?.dialogue,
   });
+}
+
+/** {@link loadShotPromptDialogueResolver}, lines only. */
+export async function loadShotDialogueResolver(
+  ...args: Parameters<typeof loadShotPromptDialogueResolver>
+): Promise<ShotDialogueResolver> {
+  const promptDialogueOf = await loadShotPromptDialogueResolver(...args);
+  return (shot) => promptDialogueOf(shot).dialogue;
 }
 
 /**

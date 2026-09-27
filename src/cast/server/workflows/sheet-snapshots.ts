@@ -47,6 +47,7 @@ import type {
   LibraryLocationSheetWorkflowInput,
   LibraryTalentSheetWorkflowInput,
   LocationSheetWorkflowInput,
+  StillHashInput,
 } from '@/platform/server/workflow/types';
 import {
   matchCharactersToShotImage,
@@ -529,7 +530,7 @@ export function resolveSceneShotImageReferences(params: {
  * shot row and `input_hash` on the matching primary `shot_variants` row.
  */
 export function computeShotImageSceneHash(
-  scene: ShotImageSceneSnapshot,
+  scene: StillHashInput,
   imageModel: string,
   aspectRatio: string
 ): Promise<ShotImageInputHash> {

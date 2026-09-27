@@ -162,10 +162,15 @@ async function version(id: string) {
   return row;
 }
 
-const landCharacter = (versionId: string, url = `/r2/${versionId}.png`) =>
+const landCharacter = (
+  versionId: string,
+  url = `/r2/${versionId}.png`,
+  claimed = true
+) =>
   charVersions().promoteIfPending({
     characterId,
     versionId,
+    claimed,
     url,
     storagePath: url,
     inputHash: HASH,
@@ -239,6 +244,30 @@ describe('character sheet claims', () => {
     row = await character();
     expect(row.selectedSheetVersionId).toBe(newer);
     expect(row.sheetStatus).toBe('completed');
+  });
+
+  it('lands a run queued before #1113 while no run holds a claim', async () => {
+    expect(await landCharacter('pre-1113', undefined, false)).toBe('promoted');
+    expect((await character()).selectedSheetVersionId).toBe('pre-1113');
+  });
+
+  it('parks a run queued before #1113 behind a newer claim, keeping it', async () => {
+    const newer = await chars().claimSheet(characterId, {
+      markGenerating: true,
+    });
+
+    expect(await landCharacter('pre-1113', undefined, false)).toBe('parked');
+    let row = await character();
+    expect(row.pendingPromoteSheetVersionId).toBe(newer);
+    expect(row.sheetStatus).toBe('generating');
+    expect((await version('pre-1113'))?.divergedAt).not.toBeNull();
+
+    await chars().failSheetClaim(characterId, null, 'pre-1113 boom');
+    row = await character();
+    expect(row.pendingPromoteSheetVersionId).toBe(newer);
+    expect(row.sheetStatus).toBe('generating');
+
+    expect(await landCharacter(newer)).toBe('promoted');
   });
 
   it('clears only its own claim when it fails', async () => {
@@ -330,6 +359,7 @@ describe('sequence location claims', () => {
     locVersions().promoteIfPending({
       locationId,
       versionId,
+      claimed: true,
       url: `/r2/${versionId}.png`,
       storagePath: `${versionId}.png`,
       inputHash: LOC_HASH,

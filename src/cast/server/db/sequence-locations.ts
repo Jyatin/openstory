@@ -34,9 +34,7 @@ import {
   resolveSceneForShot,
 } from '@/shots/server/scene-script';
 import { typedEntries } from '@/platform/typed-object';
-import type { LocationSheetInputHash } from '@/shots/input-hash';
 import { matchLocationsToScene } from '@/shots/scene-matching';
-import { createLocationSheetVariantsMethods } from './location-sheet-variants';
 import { keepClaimUnlessChanged } from './sheet-claims';
 import { buildEventInsert } from '@/sequences/server/db/sequence-events';
 
@@ -357,7 +355,7 @@ export function createSequenceLocationsMethods(db: Database) {
     /** The twin of `characters.failSheetClaim`. */
     failReferenceClaim: async (
       id: string,
-      versionId: string,
+      versionId: string | null,
       error: string
     ): Promise<void> => {
       await db
@@ -371,10 +369,15 @@ export function createSequenceLocationsMethods(db: Database) {
         .where(
           and(
             eq(sequenceLocations.id, id),
-            or(
-              eq(sequenceLocations.pendingPromoteReferenceVersionId, versionId),
-              isNull(sequenceLocations.pendingPromoteReferenceVersionId)
-            )
+            versionId === null
+              ? isNull(sequenceLocations.pendingPromoteReferenceVersionId)
+              : or(
+                  eq(
+                    sequenceLocations.pendingPromoteReferenceVersionId,
+                    versionId
+                  ),
+                  isNull(sequenceLocations.pendingPromoteReferenceVersionId)
+                )
           )
         );
     },
@@ -388,26 +391,6 @@ export function createSequenceLocationsMethods(db: Database) {
         referenceStatus: status,
         referenceError: error ?? null,
       });
-    },
-
-    updateReference: async (
-      id: string,
-      imageUrl: string,
-      imagePath: string,
-      inputHash: LocationSheetInputHash | null = null,
-      opts?: { model?: string; workflowRunId?: string | null }
-    ): Promise<SequenceLocation> => {
-      const { location } = await createLocationSheetVariantsMethods(
-        db
-      ).applyConvergent({
-        locationDbId: id,
-        url: imageUrl,
-        storagePath: imagePath,
-        inputHash,
-        model: opts?.model ?? 'unknown',
-        workflowRunId: opts?.workflowRunId,
-      });
-      return location;
     },
 
     getNeedingReferences: async (

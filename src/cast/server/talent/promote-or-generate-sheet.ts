@@ -72,7 +72,7 @@ export async function maybePromoteOrGenerateSheet(
     return;
   }
 
-  const workflowInput: SheetPayload<LibraryTalentSheetWorkflowInput> = {
+  const workflowInputFields: SheetPayload<LibraryTalentSheetWorkflowInput> = {
     userId: params.userId,
     teamId: params.teamId,
     talentId: talentRecord.id,
@@ -83,8 +83,11 @@ export async function maybePromoteOrGenerateSheet(
     uploadedSheetUrl,
     uploadedSheetMetadata,
   };
-  workflowInput.snapshotInputHash =
-    await computeLibraryTalentSheetHashFromDto(workflowInput);
+  const workflowInput = {
+    ...workflowInputFields,
+    snapshotInputHash:
+      await computeLibraryTalentSheetHashFromDto(workflowInputFields),
+  };
 
   await enqueueLibraryTalentSheet(params.scopedDb, {
     talentId: talentRecord.id,

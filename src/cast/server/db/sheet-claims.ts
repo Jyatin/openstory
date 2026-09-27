@@ -66,6 +66,11 @@ export type SheetLanding = 'promoted' | 'parked';
 type LandArgs<H> = {
   /** The claim id the trigger minted; becomes the version row's id. */
   versionId: string;
+  /**
+   * False for a run queued before #1113: it holds no claim, so it lands only
+   * while no newer run holds one, and parks rather than revoke that claim.
+   */
+  claimed: boolean;
   url: string;
   storagePath: string;
   inputHash: H | null;
@@ -117,7 +122,9 @@ export async function landCharacterSheet(
       .where(
         and(
           eq(characters.id, characterId),
-          eq(characters.pendingPromoteSheetVersionId, versionId)
+          args.claimed
+            ? eq(characters.pendingPromoteSheetVersionId, versionId)
+            : isNull(characters.pendingPromoteSheetVersionId)
         )
       ),
     db
@@ -208,7 +215,9 @@ export async function landLocationReference(
       .where(
         and(
           eq(sequenceLocations.id, locationId),
-          eq(sequenceLocations.pendingPromoteReferenceVersionId, versionId)
+          args.claimed
+            ? eq(sequenceLocations.pendingPromoteReferenceVersionId, versionId)
+            : isNull(sequenceLocations.pendingPromoteReferenceVersionId)
         )
       ),
     db

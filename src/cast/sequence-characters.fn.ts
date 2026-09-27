@@ -626,7 +626,6 @@ export const getCharacterSheetStalenessFn = createServerFn({ method: 'GET' })
       sequence: context.sequence,
       character,
     });
-    if (!payload.snapshotInputHash) return 'untracked';
     return (await characterSheetHashMatchesStored(
       character.sheetInputHash,
       payload

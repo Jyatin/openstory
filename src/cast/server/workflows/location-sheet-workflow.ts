@@ -41,19 +41,14 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
     const workflowRunId = event.instanceId;
 
     await step.do('validate-snapshot', async () => {
-      if (input.snapshotInputHash) {
-        // Accepts the pre-#1785 shape too, so a run queued before the
-        // hash grew a channel does not read as tampered.
-        if (
-          !(await locationSheetHashMatchesStored(
-            input.snapshotInputHash,
-            input
-          ))
-        ) {
-          throw new WorkflowValidationError(
-            'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
-          );
-        }
+      // Accepts the pre-#1785 shape too, so a run queued before the
+      // hash grew a channel does not read as tampered.
+      if (
+        !(await locationSheetHashMatchesStored(input.snapshotInputHash, input))
+      ) {
+        throw new WorkflowValidationError(
+          'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
+        );
       }
     });
 
@@ -210,33 +205,24 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
     });
 
     // Step 4: Land through the claim (#1113) — see the character twin.
-    // A run queued before #1113 carries no claim and lands unconditionally.
+    // A run queued before #1113 carries no claim: it lands only while no newer
+    // run holds one, and otherwise parks instead of revoking that run's claim.
     const reconcileOutcome = await step.do(
       'reconcile-database',
       async (): Promise<
         { kind: 'convergent'; versionId: string | null } | { kind: 'divergent' }
       > => {
-        const versionId = input.referenceVersionId;
         // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
-        if (!versionId) {
-          const location = await scopedDb.sequenceLocations.updateReference(
-            locationDbId,
-            storageResult.url,
-            storageResult.path,
-            input.snapshotInputHash ?? null,
-            { model: generationParams.model, workflowRunId }
-          );
-          return {
-            kind: 'convergent',
-            versionId: location.selectedReferenceVersionId,
-          };
-        }
+        const claimed = Boolean(input.referenceVersionId);
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+        const versionId = input.referenceVersionId ?? generateId();
         const landing = await scopedDb.locationSheetVariants.promoteIfPending({
           locationId: locationDbId,
           versionId,
+          claimed,
           url: storageResult.url,
           storagePath: storageResult.path,
-          inputHash: input.snapshotInputHash ?? null,
+          inputHash: input.snapshotInputHash,
           model: generationParams.model,
           workflowRunId,
         });
@@ -244,6 +230,7 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
         logger.warn('[LocationSheetWorkflow:cf] claim moved; sheet parked', {
           locationDbId,
           versionId,
+          claimed,
           storagePath: storageResult.path,
         });
         await reportParkedLocationSheet({
@@ -321,20 +308,12 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
 
     // Mark location reference as failed — through the claim (#1113).
     if (input.locationDbId && input.teamId) {
-      // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
-      if (input.referenceVersionId) {
-        await scopedDb.sequenceLocations.failReferenceClaim(
-          input.locationDbId,
-          input.referenceVersionId,
-          error
-        );
-      } else {
-        await scopedDb.sequenceLocations.updateReferenceStatus(
-          input.locationDbId,
-          'failed',
-          error
-        );
-      }
+      await scopedDb.sequenceLocations.failReferenceClaim(
+        input.locationDbId,
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+        input.referenceVersionId ?? null,
+        error
+      );
 
       // Emit failure event for realtime UI update
       if (input.sequenceId) {

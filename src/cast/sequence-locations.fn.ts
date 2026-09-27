@@ -300,7 +300,6 @@ export const getLocationSheetStalenessFn = createServerFn({ method: 'GET' })
       sequence: context.sequence,
       location,
     });
-    if (!payload.snapshotInputHash) return 'untracked';
     return (await locationSheetHashMatchesStored(
       location.referenceInputHash,
       payload

@@ -57,7 +57,7 @@ export async function buildRegenerateLocationSheetPayload(params: {
   location: SequenceLocationWithReference;
   /** Generate-time pick; omit to reuse the live version's model or the sequence default. */
   imageModel?: string | null;
-}): Promise<SheetPayload<LocationSheetWorkflowInput>> {
+}): Promise<Omit<LocationSheetWorkflowInput, 'referenceVersionId'>> {
   const { scopedDb, userId, teamId, sequence, location } = params;
   const style =
     sequence.styleConfig == null && sequence.styleId
@@ -89,7 +89,7 @@ export async function buildRegenerateLocationSheetPayload(params: {
       )
     : null;
 
-  const partial: SheetPayload<LocationSheetWorkflowInput> = {
+  const partialFields: SheetPayload<LocationSheetWorkflowInput> = {
     userId,
     teamId,
     sequenceId: sequence.id,
@@ -106,6 +106,9 @@ export async function buildRegenerateLocationSheetPayload(params: {
     styleConfig,
     libraryLocationReferenceHash,
   };
-  partial.snapshotInputHash = await computeLocationSheetHashFromDto(partial);
+  const partial = {
+    ...partialFields,
+    snapshotInputHash: await computeLocationSheetHashFromDto(partialFields),
+  };
   return partial;
 }

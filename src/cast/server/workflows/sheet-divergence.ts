@@ -49,7 +49,7 @@ export async function reportParkedCharacterSheet(args: {
   sequenceId: string;
   characterId: string;
   versionId: string;
-  snapshotInputHash: CharacterSheetInputHash | undefined;
+  snapshotInputHash: CharacterSheetInputHash;
 }): Promise<void> {
   await getGenerationChannel(args.sequenceId).emit(
     'generation.stale:detected',
@@ -57,7 +57,7 @@ export async function reportParkedCharacterSheet(args: {
       entityType: 'character',
       entityId: args.characterId,
       artifact: 'sheet',
-      snapshotInputHash: args.snapshotInputHash ?? '',
+      snapshotInputHash: args.snapshotInputHash,
       divergedVariantId: args.versionId,
     }
   );
@@ -68,7 +68,7 @@ export async function reportParkedLocationSheet(args: {
   sequenceId: string;
   locationId: string;
   versionId: string;
-  snapshotInputHash: LocationSheetInputHash | undefined;
+  snapshotInputHash: LocationSheetInputHash;
 }): Promise<void> {
   await getGenerationChannel(args.sequenceId).emit(
     'generation.stale:detected',
@@ -76,7 +76,7 @@ export async function reportParkedLocationSheet(args: {
       entityType: 'location',
       entityId: args.locationId,
       artifact: 'sheet',
-      snapshotInputHash: args.snapshotInputHash ?? '',
+      snapshotInputHash: args.snapshotInputHash,
       divergedVariantId: args.versionId,
     }
   );

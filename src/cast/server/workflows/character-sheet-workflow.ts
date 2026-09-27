@@ -43,8 +43,8 @@ type SheetLanding =
 /**
  * Land the sheet through the claim the trigger took (#1113): select it only
  * while the claim still names it, else park it as divergent and tell the UI.
- * A run queued before #1113 carries no claim and lands unconditionally, as it
- * did before minus the write-time hash recheck.
+ * A run queued before #1113 carries no claim: it lands only while no newer run
+ * holds one, and otherwise parks instead of revoking that run's claim.
  */
 async function landSheet(
   scopedDb: WorkflowScopedDb,
@@ -53,38 +53,38 @@ async function landSheet(
   workflowRunId: string
 ): Promise<SheetLanding> {
   const sequenceId = input.sequenceId;
-  // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
-  if (!input.sheetVersionId || !sequenceId) {
-    const character = await scopedDb.characters.updateSheet(
-      input.characterDbId,
-      stored.url,
-      stored.path,
-      input.snapshotInputHash ?? null,
-      { model: stored.model, workflowRunId }
+  if (!sequenceId) {
+    throw new Error(
+      `Character sheet run for ${input.characterDbId} has no sequenceId`
     );
-    return { kind: 'convergent', versionId: character.selectedSheetVersionId };
   }
+  // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+  const claimed = Boolean(input.sheetVersionId);
+  // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+  const versionId = input.sheetVersionId ?? generateId();
   const landing = await scopedDb.characterSheetVariants.promoteIfPending({
     characterId: input.characterDbId,
-    versionId: input.sheetVersionId,
+    versionId,
+    claimed,
     url: stored.url,
     storagePath: stored.path,
-    inputHash: input.snapshotInputHash ?? null,
+    inputHash: input.snapshotInputHash,
     model: stored.model,
     workflowRunId,
   });
   if (landing === 'promoted') {
-    return { kind: 'convergent', versionId: input.sheetVersionId };
+    return { kind: 'convergent', versionId };
   }
   logger.warn('[CharacterSheetWorkflow:cf] claim moved; sheet parked', {
     characterDbId: input.characterDbId,
-    versionId: input.sheetVersionId,
+    versionId,
+    claimed,
     storagePath: stored.path,
   });
   await reportParkedCharacterSheet({
     sequenceId,
     characterId: input.characterDbId,
-    versionId: input.sheetVersionId,
+    versionId,
     snapshotInputHash: input.snapshotInputHash,
   });
   return { kind: 'divergent' };
@@ -208,19 +208,14 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
     // Validate the snapshot hash inside the workflow body: a tampered
     // payload must halt the run from inside a step, not silently.
     await step.do('validate-snapshot', async () => {
-      if (input.snapshotInputHash) {
-        // Accepts the pre-#1785 shape too, so a run queued before the
-        // hash grew a channel does not read as tampered.
-        if (
-          !(await characterSheetHashMatchesStored(
-            input.snapshotInputHash,
-            input
-          ))
-        ) {
-          throw new WorkflowValidationError(
-            'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
-          );
-        }
+      // Accepts the pre-#1785 shape too, so a run queued before the
+      // hash grew a channel does not read as tampered.
+      if (
+        !(await characterSheetHashMatchesStored(input.snapshotInputHash, input))
+      ) {
+        throw new WorkflowValidationError(
+          'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
+        );
       }
     });
 
@@ -471,20 +466,12 @@ export class CharacterSheetWorkflow extends OpenStoryWorkflowEntrypoint<Characte
     // Mark character sheet as failed — through the claim, so a newer run's
     // claim and `generating` status survive this one's failure (#1113).
     if (input.characterDbId) {
-      // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
-      if (input.sheetVersionId) {
-        await scopedDb.characters.failSheetClaim(
-          input.characterDbId,
-          input.sheetVersionId,
-          error
-        );
-      } else {
-        await scopedDb.characters.updateSheetStatus(
-          input.characterDbId,
-          'failed',
-          error
-        );
-      }
+      await scopedDb.characters.failSheetClaim(
+        input.characterDbId,
+        // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
+        input.sheetVersionId ?? null,
+        error
+      );
 
       // Emit failure event for realtime UI update
       if (input.sequenceId) {

@@ -40,6 +40,7 @@ vi.doMock('@/platform/realtime', () => ({
 }));
 
 const { CharacterSheetWorkflow } = await import('./character-sheet-workflow');
+const { computeCharacterSheetHashFromDto } = await import('./sheet-snapshots');
 
 class Probe extends CharacterSheetWorkflow {
   runBody(
@@ -74,7 +75,6 @@ function makeStep(): WorkflowStep {
 }
 
 const mockPromoteIfPending = vi.fn();
-const mockUpdateSheet = vi.fn();
 const mockUpdateSheetStatus = vi.fn();
 const mockFailSheetClaim = vi.fn();
 
@@ -82,7 +82,6 @@ function makeScopedDb(): WorkflowScopedDb {
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stub covering only the scoped-db surface runImpl touches
   return {
     characters: {
-      updateSheet: mockUpdateSheet,
       updateSheetStatus: mockUpdateSheetStatus,
       failSheetClaim: mockFailSheetClaim,
     },
@@ -110,22 +109,26 @@ const characterMetadata: CharacterBibleEntry = {
   consistencyTag: 'sam',
 };
 
-function makeEvent(
+async function makeEvent(
   overrides: Partial<CharacterSheetWorkflowInput> = {}
-): Readonly<WorkflowEvent<CharacterSheetWorkflowInput>> {
+): Promise<Readonly<WorkflowEvent<CharacterSheetWorkflowInput>>> {
+  const fields = {
+    userId: 'u1',
+    teamId: 'team-1',
+    sequenceId: 'seq-1',
+    characterDbId: 'char-1',
+    characterName: 'Sam',
+    characterMetadata,
+    referenceImageUrl: '/r2/talent/team-1/tal-1/sheet.png',
+    reuseTalentSheet: true,
+    castTalentDescription: null,
+    sheetVersionId: 'ver-1',
+    ...overrides,
+  };
   return {
     payload: {
-      userId: 'u1',
-      teamId: 'team-1',
-      sequenceId: 'seq-1',
-      characterDbId: 'char-1',
-      characterName: 'Sam',
-      characterMetadata,
-      referenceImageUrl: '/r2/talent/team-1/tal-1/sheet.png',
-      reuseTalentSheet: true,
-      castTalentDescription: null,
-      sheetVersionId: 'ver-1',
-      ...overrides,
+      ...fields,
+      snapshotInputHash: await computeCharacterSheetHashFromDto(fields),
     },
     instanceId: 'run-1',
     workflowName: 'character-sheet',
@@ -143,13 +146,12 @@ beforeEach(() => {
   mockRecordProvenance.mockResolvedValue(undefined);
   mockEmit.mockResolvedValue(undefined);
   mockPromoteIfPending.mockResolvedValue('promoted');
-  mockUpdateSheet.mockResolvedValue({ selectedSheetVersionId: 'legacy-ver' });
 });
 
 describe('CharacterSheetWorkflow reuseTalentSheet', () => {
   it('copies the talent sheet into CHARACTERS and does not generate or deduct', async () => {
     const result = await makeWorkflow().runBody(
-      makeEvent(),
+      await makeEvent(),
       makeStep(),
       makeScopedDb()
     );
@@ -173,7 +175,7 @@ describe('CharacterSheetWorkflow reuseTalentSheet', () => {
 describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
   it('lands through the claim the trigger took', async () => {
     const result = await makeWorkflow().runBody(
-      makeEvent(),
+      await makeEvent(),
       makeStep(),
       makeScopedDb()
     );
@@ -182,10 +184,10 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
       expect.objectContaining({
         characterId: 'char-1',
         versionId: 'ver-1',
+        claimed: true,
         url: '/r2/characters/team-1/seq-1/char-1/copied.png',
       })
     );
-    expect(mockUpdateSheet).not.toHaveBeenCalled();
     expect(result.sheetVersionId).toBe('ver-1');
   });
 
@@ -193,13 +195,12 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
     mockPromoteIfPending.mockResolvedValue('parked');
 
     const result = await makeWorkflow().runBody(
-      makeEvent(),
+      await makeEvent(),
       makeStep(),
       makeScopedDb()
     );
 
     expect(result.diverged).toBe(true);
-    expect(mockUpdateSheet).not.toHaveBeenCalled();
     expect(mockEmit).toHaveBeenCalledWith(
       'generation.stale:detected',
       expect.objectContaining({
@@ -210,8 +211,8 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
     );
   });
 
-  it('lands a run queued before #1113 (no claim) unconditionally', async () => {
-    const legacy = makeEvent();
+  it('lands a run queued before #1113 (no claim) only while no run holds one', async () => {
+    const legacy = await makeEvent();
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- a pre-#1113 payload lacks the field
     delete (legacy.payload as Partial<CharacterSheetWorkflowInput>)
       .sheetVersionId;
@@ -222,13 +223,27 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
       makeScopedDb()
     );
 
-    expect(mockPromoteIfPending).not.toHaveBeenCalled();
-    expect(mockUpdateSheet).toHaveBeenCalledTimes(1);
-    expect(result.sheetVersionId).toBe('legacy-ver');
+    expect(mockPromoteIfPending).toHaveBeenCalledWith(
+      expect.objectContaining({ characterId: 'char-1', claimed: false })
+    );
+    // The minted id is what the run reports as its sheet.
+    expect(mockPromoteIfPending.mock.lastCall?.[0]).toMatchObject({
+      versionId: result.sheetVersionId,
+    });
+  });
+
+  it('fails a run queued before #1113 without touching a newer claim', async () => {
+    const legacy = await makeEvent();
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- a pre-#1113 payload lacks the field
+    delete (legacy.payload as Partial<CharacterSheetWorkflowInput>)
+      .sheetVersionId;
+    await makeWorkflow().failBody(legacy, makeScopedDb());
+    expect(mockFailSheetClaim).toHaveBeenCalledWith('char-1', null, 'boom');
+    expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
   });
 
   it('fails only its own claim', async () => {
-    await makeWorkflow().failBody(makeEvent(), makeScopedDb());
+    await makeWorkflow().failBody(await makeEvent(), makeScopedDb());
     expect(mockFailSheetClaim).toHaveBeenCalledWith('char-1', 'ver-1', 'boom');
     expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
   });

@@ -47,9 +47,7 @@ import {
 } from '@/shots/server/scene-script';
 import { typedEntries } from '@/platform/typed-object';
 import { matchCharacterToShotTags } from '@/shots/scene-matching';
-import { createCharacterSheetVariantsMethods } from './character-sheet-variants';
 import { keepClaimUnlessChanged } from './sheet-claims';
-import type { CharacterSheetInputHash } from '@/shots/input-hash';
 import { buildEventInsert } from '@/sequences/server/db/sequence-events';
 
 /** The bible fields the sheet prompt and its hash read (#1113). */
@@ -631,11 +629,12 @@ export function createCharactersMethods(db: Database) {
     /**
      * A sheet run failed (#1113): clear its claim and mark the sheet failed —
      * only while it still holds the claim, or nobody does. A newer run's claim
-     * and its `generating` status are left alone.
+     * and its `generating` status are left alone. `versionId` is null for a
+     * run queued before #1113, which holds no claim.
      */
     failSheetClaim: async (
       id: string,
-      versionId: string,
+      versionId: string | null,
       error: string
     ): Promise<void> => {
       await db
@@ -649,10 +648,12 @@ export function createCharactersMethods(db: Database) {
         .where(
           and(
             eq(characters.id, id),
-            or(
-              eq(characters.pendingPromoteSheetVersionId, versionId),
-              isNull(characters.pendingPromoteSheetVersionId)
-            )
+            versionId === null
+              ? isNull(characters.pendingPromoteSheetVersionId)
+              : or(
+                  eq(characters.pendingPromoteSheetVersionId, versionId),
+                  isNull(characters.pendingPromoteSheetVersionId)
+                )
           )
         );
     },
@@ -860,31 +861,6 @@ export function createCharactersMethods(db: Database) {
         .where(eq(characterVoiceVersions.id, versionId))
         .returning();
       return row ?? null;
-    },
-
-    /**
-     * Convergent sheet write: append a version and select it. `opts.model`
-     * labels the history row; defaults to `'unknown'` when the caller has
-     * no model (legacy tests).
-     */
-    updateSheet: async (
-      id: string,
-      imageUrl: string,
-      imagePath: string,
-      inputHash: CharacterSheetInputHash | null = null,
-      opts?: { model?: string; workflowRunId?: string | null }
-    ): Promise<Character> => {
-      const { character } = await createCharacterSheetVariantsMethods(
-        db
-      ).applyConvergent({
-        characterId: id,
-        url: imageUrl,
-        storagePath: imagePath,
-        inputHash,
-        model: opts?.model ?? 'unknown',
-        workflowRunId: opts?.workflowRunId,
-      });
-      return character;
     },
 
     getNeedingSheets: async (

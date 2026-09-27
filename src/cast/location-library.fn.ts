@@ -258,20 +258,24 @@ export const addLocationSheetsFn = createServerFn({ method: 'POST' })
       existingUrls = [];
     }
 
-    const workflowInput: SheetPayload<LibraryLocationSheetWorkflowInput> = {
-      locationDbId: data.locationId,
-      locationName: location.name,
-      locationDescription: location.description ?? undefined,
-      referenceImageUrls: [
-        ...existingUrls,
-        ...processedImages.map((img) => img.url),
-      ],
-      userId: context.user.id,
-      teamId: context.teamId,
-      sequenceId: 'library',
+    const workflowInputFields: SheetPayload<LibraryLocationSheetWorkflowInput> =
+      {
+        locationDbId: data.locationId,
+        locationName: location.name,
+        locationDescription: location.description ?? undefined,
+        referenceImageUrls: [
+          ...existingUrls,
+          ...processedImages.map((img) => img.url),
+        ],
+        userId: context.user.id,
+        teamId: context.teamId,
+        sequenceId: 'library',
+      };
+    const workflowInput = {
+      ...workflowInputFields,
+      snapshotInputHash:
+        await computeLibraryLocationSheetHashFromDto(workflowInputFields),
     };
-    workflowInput.snapshotInputHash =
-      await computeLibraryLocationSheetHashFromDto(workflowInput);
 
     const workflowRunId = await triggerLibraryLocationSheet(
       context.scopedDb,

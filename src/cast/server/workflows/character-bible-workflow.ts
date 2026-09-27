@@ -147,7 +147,7 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       // actually be billed — see `reusesTalentSheet`.
       const reuseTalentSheet = reusesTalentSheet(character, talentMatch);
 
-      const unclaimed: SheetPayload<CharacterSheetWorkflowInput> = {
+      const unclaimedFields: SheetPayload<CharacterSheetWorkflowInput> = {
         userId: input.userId,
         teamId: input.teamId,
         sequenceId: input.sequenceId,
@@ -178,8 +178,11 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
       };
       // A pipeline sheet is tracked like any other (#1113): stamped with its
       // input hash, and landed through a claim a bible edit revokes.
-      unclaimed.snapshotInputHash =
-        await computeCharacterSheetHashFromDto(unclaimed);
+      const unclaimed = {
+        ...unclaimedFields,
+        snapshotInputHash:
+          await computeCharacterSheetHashFromDto(unclaimedFields),
+      };
       const sheetVersionId = await step.do(
         `claim-character-sheet-${index}`,
         async () =>

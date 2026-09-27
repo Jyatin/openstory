@@ -26,7 +26,6 @@ import type {
   LibraryLocationSheetWorkflowResult,
 } from '@/platform/server/workflow/types';
 import { saveDivergentLibraryLocationSheet } from './sheet-divergence';
-import { computeLibraryLocationSheetHashFromDto } from './sheet-snapshots';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { getLogger } from '@/platform/logger';
 
@@ -258,9 +257,7 @@ export class LibraryLocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<Li
           );
           return { diverged: false };
         }
-        const snapshotHash =
-          input.snapshotInputHash ??
-          (await computeLibraryLocationSheetHashFromDto(input));
+        const snapshotHash = input.snapshotInputHash;
         const landed = await scopedDb.locations.updateReferenceIfClaimed(
           input.locationDbId,
           claimId,

@@ -149,7 +149,7 @@ export async function createLibraryLocation(
 
   // Sheet generation works with or without reference images. The public API
   // defers the trigger until the sequence exists (`enqueueSheet: false`).
-  const workflowInput: SheetPayload<LibraryLocationSheetWorkflowInput> = {
+  const workflowInputFields: SheetPayload<LibraryLocationSheetWorkflowInput> = {
     locationDbId: newLocation.id,
     locationName: input.name,
     locationDescription: input.description,
@@ -158,8 +158,11 @@ export async function createLibraryLocation(
     teamId: ctx.teamId,
     sequenceId: 'library',
   };
-  workflowInput.snapshotInputHash =
-    await computeLibraryLocationSheetHashFromDto(workflowInput);
+  const workflowInput = {
+    ...workflowInputFields,
+    snapshotInputHash:
+      await computeLibraryLocationSheetHashFromDto(workflowInputFields),
+  };
 
   if (options?.enqueueSheet !== false) {
     // Dashboard create: fire-and-forget so the dialog can return immediately.

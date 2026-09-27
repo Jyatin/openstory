@@ -47,6 +47,8 @@ vi.doMock('@/platform/realtime', () => ({
 
 const { LibraryTalentSheetWorkflow } =
   await import('./library-talent-sheet-workflow');
+const { computeLibraryTalentSheetHashFromDto } =
+  await import('./sheet-snapshots');
 
 class Probe extends LibraryTalentSheetWorkflow {
   runBody(
@@ -106,10 +108,10 @@ function makeScopedDb(): WorkflowScopedDb {
   } as unknown as WorkflowScopedDb;
 }
 
-function makeInput(
+async function makeInput(
   overrides: Partial<LibraryTalentSheetWorkflowInput> = {}
-): LibraryTalentSheetWorkflowInput {
-  return {
+): Promise<LibraryTalentSheetWorkflowInput> {
+  const fields = {
     userId: 'u1',
     teamId: 'team-1',
     talentId: 'tal-1',
@@ -118,6 +120,10 @@ function makeInput(
     referenceImageUrls: ['/r2/talent/team-1/tal-1/photo.png'],
     sheetId: 'sheet-claim',
     ...overrides,
+  };
+  return {
+    ...fields,
+    snapshotInputHash: await computeLibraryTalentSheetHashFromDto(fields),
   };
 }
 
@@ -174,7 +180,7 @@ describe('LibraryTalentSheetWorkflow uploaded sheet', () => {
   it('copies the stored sheet and does not generate or bill a 4-panel', async () => {
     const uploadedSheetUrl = '/r2/talent/team-1/tal-1/upload.png';
     await makeWorkflow().runBody(
-      makeEvent(makeInput({ uploadedSheetUrl })),
+      makeEvent(await makeInput({ uploadedSheetUrl })),
       makeStep(),
       makeScopedDb()
     );
@@ -200,7 +206,7 @@ describe('LibraryTalentSheetWorkflow uploaded sheet', () => {
 describe('LibraryTalentSheetWorkflow generate-if-missing', () => {
   it('generates and bills the 4-panel when no sheet was uploaded', async () => {
     await makeWorkflow().runBody(
-      makeEvent(makeInput()),
+      makeEvent(await makeInput()),
       makeStep(),
       makeScopedDb()
     );
@@ -219,7 +225,7 @@ describe('LibraryTalentSheetWorkflow generate-if-missing', () => {
 describe('LibraryTalentSheetWorkflow sheet claim (#1113)', () => {
   it('writes under the claimed id and sets the headshot while held', async () => {
     const result = await makeWorkflow().runBody(
-      makeEvent(makeInput()),
+      makeEvent(await makeInput()),
       makeStep(),
       makeScopedDb()
     );
@@ -239,7 +245,7 @@ describe('LibraryTalentSheetWorkflow sheet claim (#1113)', () => {
     });
 
     await makeWorkflow().runBody(
-      makeEvent(makeInput()),
+      makeEvent(await makeInput()),
       makeStep(),
       makeScopedDb()
     );
@@ -253,7 +259,7 @@ describe('LibraryTalentSheetWorkflow sheet claim (#1113)', () => {
   });
 
   it('clears only its own claim when it fails', async () => {
-    await makeWorkflow().failBody(makeEvent(makeInput()), makeScopedDb());
+    await makeWorkflow().failBody(makeEvent(await makeInput()), makeScopedDb());
     expect(mockClearSheetClaimIf).toHaveBeenCalledWith('tal-1', 'sheet-claim');
   });
 });

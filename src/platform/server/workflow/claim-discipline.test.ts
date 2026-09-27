@@ -174,8 +174,6 @@ const UNCLAIMED_WRITERS: readonly ScopedMethod[] = [
   'shotPromptVersions.write',
   'shotPromptVersions.writeAiVersion',
   'characters.updateVoice',
-  'characters.updateSheet',
-  'sequenceLocations.updateReference',
   'locations.updateReference',
 ];
 const UNCLAIMED_CALL_SITES: Record<string, string> = {
@@ -197,12 +195,10 @@ const UNCLAIMED_CALL_SITES: Record<string, string> = {
     'pre-#1786 user edit; the rescue write is select: false',
   'src/stills/server/workflows/soften-image-prompt.ts: framePromptVersions.write':
     'select: false, lands unselected (#1786)',
-  // A sheet payload queued before #1113 carries no claim (drain path). The
-  // library talent twin is `talent.sheets.create`, nested past this scan.
-  'src/cast/server/workflows/character-sheet-workflow.ts: characters.updateSheet':
-    'pre-#1113 payload, no claim',
-  'src/cast/server/workflows/location-sheet-workflow.ts: sequenceLocations.updateReference':
-    'pre-#1113 payload, no claim',
+  // A library sheet payload queued before #1113 carries no claim (drain path;
+  // character and sequence-location runs land through the claim batch in its
+  // unclaimed mode). The library talent twin is `talent.sheets.create`,
+  // nested past this scan.
   'src/cast/server/workflows/library-location-sheet-workflow.ts: locations.updateReference':
     'pre-#1113 payload, no claim',
   // A pre-#1715 payload has no husk to claim (drain path).

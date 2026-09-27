@@ -180,7 +180,7 @@ export async function createLibraryTalent(
   // otherwise we generate a 4-panel (from reference photos and/or the
   // name + description). The public API defers the billed trigger until
   // the sequence exists (`enqueueSheet: false`).
-  const workflowInput: SheetPayload<LibraryTalentSheetWorkflowInput> = {
+  const workflowInputFields: SheetPayload<LibraryTalentSheetWorkflowInput> = {
     userId: ctx.user.id,
     teamId: ctx.teamId,
     talentId: newTalent.id,
@@ -191,8 +191,11 @@ export async function createLibraryTalent(
     uploadedSheetUrl,
     uploadedSheetMetadata,
   };
-  workflowInput.snapshotInputHash =
-    await computeLibraryTalentSheetHashFromDto(workflowInput);
+  const workflowInput = {
+    ...workflowInputFields,
+    snapshotInputHash:
+      await computeLibraryTalentSheetHashFromDto(workflowInputFields),
+  };
 
   const deferredSheet: EnqueueLibraryTalentSheetParams = {
     talentId: newTalent.id,

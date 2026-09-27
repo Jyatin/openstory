@@ -156,7 +156,10 @@ export class RecastCharacterWorkflow extends OpenStoryWorkflowEntrypoint<RecastC
         logger.info(
           `[RecastCharacterWorkflow:cf] Starting recast for ${input.characterName} with ${input.shotSnapshots.length} affected shots`
         );
-        const partial: CharacterSheetWorkflowInput = {
+        const partialFields: Omit<
+          CharacterSheetWorkflowInput,
+          'snapshotInputHash'
+        > = {
           characterDbId: input.characterDbId,
           characterName: input.characterName,
           characterMetadata: input.characterMetadata,
@@ -174,8 +177,11 @@ export class RecastCharacterWorkflow extends OpenStoryWorkflowEntrypoint<RecastC
           // The claim recastCharacterFn took (#1113).
           sheetVersionId: input.sheetVersionId,
         };
-        partial.snapshotInputHash =
-          await computeCharacterSheetHashFromDto(partial);
+        const partial = {
+          ...partialFields,
+          snapshotInputHash:
+            await computeCharacterSheetHashFromDto(partialFields),
+        };
         return partial;
       }
     );
@@ -214,8 +220,7 @@ export class RecastCharacterWorkflow extends OpenStoryWorkflowEntrypoint<RecastC
       input,
       {
         imageUrl: sheetImageUrl,
-        inputHash:
-          sheetResult.sheetVersionId ?? sheetPayload.snapshotInputHash ?? null,
+        inputHash: sheetResult.sheetVersionId ?? sheetPayload.snapshotInputHash,
       }
     );
 

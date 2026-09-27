@@ -113,7 +113,7 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
 
         const libraryMatch = matchMap.get(location.locationId);
 
-        const unclaimed: SheetPayload<LocationSheetWorkflowInput> = {
+        const unclaimedFields: SheetPayload<LocationSheetWorkflowInput> = {
           userId: input.userId,
           teamId,
           sequenceId,
@@ -130,8 +130,11 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
         };
         // Tracked like any other sheet (#1113): hashed, and landed through a
         // claim a bible edit revokes.
-        unclaimed.snapshotInputHash =
-          await computeLocationSheetHashFromDto(unclaimed);
+        const unclaimed = {
+          ...unclaimedFields,
+          snapshotInputHash:
+            await computeLocationSheetHashFromDto(unclaimedFields),
+        };
         const referenceVersionId = await step.do(
           `claim-location-sheet-${index}`,
           async () =>

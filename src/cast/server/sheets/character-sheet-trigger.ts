@@ -63,7 +63,7 @@ export async function buildRegenerateCharacterSheetPayload(params: {
   character: CharacterWithSheet;
   /** Generate-time pick; omit to reuse the live version's model or the sequence default. */
   imageModel?: string | null;
-}): Promise<SheetPayload<CharacterSheetWorkflowInput>> {
+}): Promise<Omit<CharacterSheetWorkflowInput, 'sheetVersionId'>> {
   const { scopedDb, userId, teamId, sequence, character } = params;
   // The UI hides the button; this is the guard for every other caller.
   if (character.voiceOnly) {
@@ -91,7 +91,7 @@ export async function buildRegenerateCharacterSheetPayload(params: {
       )
     : null;
 
-  const partial: SheetPayload<CharacterSheetWorkflowInput> = {
+  const partialFields: SheetPayload<CharacterSheetWorkflowInput> = {
     userId,
     teamId,
     sequenceId: sequence.id,
@@ -109,6 +109,9 @@ export async function buildRegenerateCharacterSheetPayload(params: {
     reuseTalentSheet: false,
     styleConfig,
   };
-  partial.snapshotInputHash = await computeCharacterSheetHashFromDto(partial);
+  const partial = {
+    ...partialFields,
+    snapshotInputHash: await computeCharacterSheetHashFromDto(partialFields),
+  };
   return partial;
 }

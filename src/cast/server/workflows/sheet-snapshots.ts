@@ -55,13 +55,16 @@ import {
 export type { ShotImageSceneSnapshot } from '@/platform/server/workflow/types';
 
 /**
- * A sheet payload before its trigger takes the claim (#1113): what the
- * hashers read, and what the regenerate builders return, since staleness
- * checks build a payload only to hash it.
+ * A sheet payload before its trigger stamps the hash and takes the claim
+ * (#1113): what the hashers read.
  */
 export type SheetPayload<T> = Omit<
   T,
-  'sheetVersionId' | 'referenceVersionId' | 'sheetId' | 'referenceClaimId'
+  | 'sheetVersionId'
+  | 'referenceVersionId'
+  | 'sheetId'
+  | 'referenceClaimId'
+  | 'snapshotInputHash'
 >;
 
 /** The payload fields a cast talent supplies to a character sheet. */

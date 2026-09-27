@@ -153,7 +153,10 @@ export class RecastLocationWorkflow extends OpenStoryWorkflowEntrypoint<RecastLo
     const sheetBody = await step.do(
       'build-location-sheet-snapshot',
       async (): Promise<LocationSheetWorkflowInput> => {
-        const partial: LocationSheetWorkflowInput = {
+        const partialFields: Omit<
+          LocationSheetWorkflowInput,
+          'snapshotInputHash'
+        > = {
           locationDbId: input.locationDbId,
           locationName: input.locationName,
           locationMetadata: input.locationMetadata,
@@ -168,8 +171,11 @@ export class RecastLocationWorkflow extends OpenStoryWorkflowEntrypoint<RecastLo
           // The claim recastLocationFn took (#1113).
           referenceVersionId: input.referenceVersionId,
         };
-        partial.snapshotInputHash =
-          await computeLocationSheetHashFromDto(partial);
+        const partial = {
+          ...partialFields,
+          snapshotInputHash:
+            await computeLocationSheetHashFromDto(partialFields),
+        };
         return partial;
       }
     );
@@ -219,8 +225,7 @@ export class RecastLocationWorkflow extends OpenStoryWorkflowEntrypoint<RecastLo
       input,
       {
         imageUrl: referenceImageUrl,
-        inputHash:
-          sheetResult.sheetVersionId ?? sheetBody.snapshotInputHash ?? null,
+        inputHash: sheetResult.sheetVersionId ?? sheetBody.snapshotInputHash,
       }
     );
 

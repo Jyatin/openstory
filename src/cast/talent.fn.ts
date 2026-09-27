@@ -399,7 +399,7 @@ export const generateTalentSheetFn = createServerFn({ method: 'POST' })
 
     const imageMedia = talentRecord.media.filter((m) => m.type === 'image');
 
-    const workflowInput: SheetPayload<LibraryTalentSheetWorkflowInput> = {
+    const workflowInputFields: SheetPayload<LibraryTalentSheetWorkflowInput> = {
       userId: context.user.id,
       teamId: context.teamId,
       talentId: talentRecord.id,
@@ -408,8 +408,11 @@ export const generateTalentSheetFn = createServerFn({ method: 'POST' })
       referenceImageUrls: imageMedia.map((m) => m.url).sort(),
       sheetName: data.sheetName,
     };
-    workflowInput.snapshotInputHash =
-      await computeLibraryTalentSheetHashFromDto(workflowInput);
+    const workflowInput = {
+      ...workflowInputFields,
+      snapshotInputHash:
+        await computeLibraryTalentSheetHashFromDto(workflowInputFields),
+    };
 
     const runId = await enqueueLibraryTalentSheet(context.scopedDb, {
       talentId: talentRecord.id,

@@ -43,14 +43,12 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
     const workflowRunId = event.instanceId;
 
     await step.do('validate-snapshot', async () => {
-      if (input.snapshotInputHash) {
-        const expected = input.snapshotInputHash;
-        const recomputed = await computeLibraryTalentSheetHashFromDto(input);
-        if (recomputed !== expected) {
-          throw new WorkflowValidationError(
-            'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
-          );
-        }
+      const expected = input.snapshotInputHash;
+      const recomputed = await computeLibraryTalentSheetHashFromDto(input);
+      if (recomputed !== expected) {
+        throw new WorkflowValidationError(
+          'snapshotInputHash does not match the inlined DTO; payload was tampered with or serialized inconsistently'
+        );
       }
     });
 
@@ -206,7 +204,7 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
           imagePath: storageResult.path,
           metadata: input.uploadedSheetMetadata,
           source: sheetSource,
-          inputHash: input.snapshotInputHash ?? null,
+          inputHash: input.snapshotInputHash,
         } as const;
 
         // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a run queued before #1113 has no claim
@@ -247,9 +245,7 @@ export class LibraryTalentSheetWorkflow extends OpenStoryWorkflowEntrypoint<Libr
           url: storageResult.url,
           storagePath: storageResult.path,
           workflowRunId,
-          snapshotInputHash:
-            input.snapshotInputHash ??
-            (await computeLibraryTalentSheetHashFromDto(input)),
+          snapshotInputHash: input.snapshotInputHash,
         });
         return { kind: 'divergent', sheet };
       }

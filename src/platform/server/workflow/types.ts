@@ -779,7 +779,7 @@ export interface CharacterSheetWorkflowInput extends SequenceWorkflowContext {
    */
   castTalentDescription: string | null;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: CharacterSheetInputHash;
+  snapshotInputHash: CharacterSheetInputHash;
   /**
    * The sheet claim (#1113): the id this run's version row will carry, taken at the trigger
    * (`characters.claimSheet`). The run lands only while the claim still names it,
@@ -1362,7 +1362,7 @@ export interface LibraryTalentSheetWorkflowInput extends UserWorkflowContext {
   /** Appearance metadata extracted from the uploaded sheet, when available. */
   uploadedSheetMetadata?: CharacterBibleEntry;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: TalentSheetInputHash;
+  snapshotInputHash: TalentSheetInputHash;
   /**
    * The sheet claim (#1113): the id of the `talent_sheets` row this run writes, taken at the trigger
    * (`talent.claimSheet`). The run lands only while the claim still names it,
@@ -1405,7 +1405,7 @@ export interface LocationSheetWorkflowInput extends SequenceWorkflowContext {
    */
   libraryLocationReferenceHash?: string | null;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash?: LocationSheetInputHash;
+  snapshotInputHash: LocationSheetInputHash;
   /**
    * The reference claim (#1113): the id this run's version row will carry, taken at the trigger
    * (`sequenceLocations.claimReference`). The run lands only while the claim still names it,
@@ -1451,7 +1451,7 @@ export interface LibraryLocationSheetWorkflowInput extends UserWorkflowContext {
    * gated on it: if the location was renamed/re-described mid-run the sheet is
    * parked as a divergent variant instead of becoming the live reference.
    */
-  snapshotInputHash?: LibraryLocationReferenceInputHash;
+  snapshotInputHash: LibraryLocationReferenceInputHash;
   /**
    * The reference claim (#1113): the id this run holds until it publishes, taken at the trigger
    * (`locations.claimReference`). The run lands only while the claim still names it,

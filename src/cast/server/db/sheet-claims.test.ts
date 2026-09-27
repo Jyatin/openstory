@@ -258,7 +258,9 @@ describe('character sheet claims', () => {
   });
 
   it('lands a run queued before #1113 while no run holds a claim', async () => {
-    expect(await landCharacter('pre-1113', undefined, null, false)).toBe('promoted');
+    expect(await landCharacter('pre-1113', undefined, null, false)).toBe(
+      'promoted'
+    );
     expect((await character()).selectedSheetVersionId).toBe('pre-1113');
   });
 
@@ -267,7 +269,9 @@ describe('character sheet claims', () => {
       markGenerating: true,
     });
 
-    expect(await landCharacter('pre-1113', undefined, null, false)).toBe('parked');
+    expect(await landCharacter('pre-1113', undefined, null, false)).toBe(
+      'parked'
+    );
     let row = await character();
     expect(row.pendingPromoteSheetVersionId).toBe(newer);
     expect(row.sheetStatus).toBe('generating');

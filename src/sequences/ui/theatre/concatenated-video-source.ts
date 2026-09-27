@@ -27,7 +27,6 @@ import {
   UrlSource,
   type WrappedCanvas,
 } from 'mediabunny';
-import { addCorsCacheBuster } from './cors-cache-buster';
 import {
   computeTargetResolution,
   describeResolutions,
@@ -245,7 +244,7 @@ export class ConcatenatedVideoSource {
     if (!('videoUrl' in scene)) return this.openStill(scene);
     const input = new Input({
       formats: ALL_FORMATS,
-      source: new UrlSource(addCorsCacheBuster(scene.videoUrl)),
+      source: new UrlSource(scene.videoUrl),
     });
     try {
       return await this.probeScene(input, i);
@@ -276,11 +275,7 @@ export class ConcatenatedVideoSource {
       for (const url of scene.audioUrls) {
         const input = new Input({
           formats: ALL_FORMATS,
-          source: new UrlSource(
-            url.startsWith('data:') || url.startsWith('blob:')
-              ? url
-              : addCorsCacheBuster(url)
-          ),
+          source: new UrlSource(url),
         });
         inputs.push(input);
         const track = await input.getPrimaryAudioTrack();

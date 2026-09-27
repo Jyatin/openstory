@@ -19,7 +19,6 @@ import {
   hashMotionPromptInput,
   computeMotionPromptInputHashV4,
   computeMusicPromptInputHash,
-  LEGACY_1785_HASH_UNTIL,
   LEGACY_HASH_UNTIL,
   libraryLocationReferenceInputHashMatches,
   computeSequenceMusicInputHash,
@@ -390,13 +389,10 @@ describe('computeCharacterSheetInputHash', () => {
     );
     expect(new Set([a, ...edits]).size).toBe(4);
     // Uncast digests do not move, and a sheet stamped before the talent
-    // channel existed still verifies until LEGACY_1785_HASH_UNTIL.
+    // channel existed still verifies until LEGACY_HASH_UNTIL.
     expect(await computeCharacterSheetInputHash(base)).not.toBe(a);
     const preTalent = await computeCharacterSheetInputHash(base);
     expect(await characterSheetInputHashMatches(preTalent, cast)).toBe(true);
-    // Every existing cast sheet carries a pre-#1785 digest; it outlives the
-    // older fallbacks so their cleanup does not re-stale them all.
-    expect(LEGACY_1785_HASH_UNTIL > LEGACY_HASH_UNTIL).toBe(true);
   });
 
   it('does not fold isPerson into the sheet hash (#1682)', async () => {

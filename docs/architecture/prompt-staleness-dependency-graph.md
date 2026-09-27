@@ -86,7 +86,7 @@ no-context case.
 Helpers live in [`src/shots/input-hash.ts`](../../src/shots/input-hash.ts). The
 compare is not `stored === live`: `visualPromptInputHashMatches` /
 `motionPromptInputHashMatches` also accept the previous digest shapes (v4, and
-the v5 named / titled variants) until `LEGACY_HASH_UNTIL` (2026-09-28, #1371),
+the v5 named / titled variants) until `LEGACY_HASH_UNTIL` (2026-12-31, #1371),
 so a version bump doesn't re-stale the world.
 
 **The invariant that must hold:** the hash computed at **stamp time** (inside the
@@ -385,8 +385,8 @@ sha256Hex({
 One resolver, `resolveCastTalent` (`sheet-snapshots.ts`), feeds the
 regenerate/verify payload, the upload stamp and the workflow's divergence
 recompute, so the three cannot pick different talent sheets. Pre-#1785 digests
-(no talent channel) still verify until `LEGACY_1785_HASH_UNTIL`
-(2026-12-31) — later than `LEGACY_HASH_UNTIL`, since every cast sheet carries one.
+(no talent channel) still verify until `LEGACY_HASH_UNTIL`
+(2026-12-31, #1371).
 
 #### 2. Location sheet — `computeLocationSheetInputHash`
 
@@ -412,7 +412,7 @@ sha256Hex({
 ```
 
 Pre-#1785 digests (description only) still verify until
-`LEGACY_1785_HASH_UNTIL` (2026-12-31); every existing location sheet carries one.
+`LEGACY_HASH_UNTIL` (2026-12-31, #1371).
 **Known gap:** the linked library location's `description` and
 `referenceImageUrl` are read live into the prompt but reach this hash only
 through `libraryLocationReferenceHash`, i.e. after the library reference is

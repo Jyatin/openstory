@@ -388,8 +388,8 @@ export type CharacterSheetHashInput = {
 /**
  * Sheet digest shapes. `current` hashes the cast talent (#1785) and drops the
  * name; `pre-1785` is the nameless digest without the talent channel;
- * `named` is the pre-#1108 digest. Verify accepts `named` until
- * {@link LEGACY_HASH_UNTIL} and `pre-1785` until {@link LEGACY_1785_HASH_UNTIL}.
+ * `named` is the pre-#1108 digest. Verify accepts the legacy two until
+ * {@link LEGACY_HASH_UNTIL}.
  */
 type SheetHashKind = 'current' | 'pre-1785' | 'named';
 
@@ -909,17 +909,11 @@ const PROMPT_INPUT_HASH_VERSION = 5;
 const PROMPT_INPUT_HASH_VERSION_V4 = 4;
 
 /**
- * Delete the v4 / named / titled verify fallbacks after this date.
+ * Delete every legacy verify fallback after this date: v4 / named / titled,
+ * and the pre-#1785, pre-#1784 and pre-#1783 shapes.
  * Tracking: https://github.com/openstory-so/openstory/issues/1371
  */
-export const LEGACY_HASH_UNTIL = '2026-09-28';
-
-/**
- * Delete the `pre-1785` sheet verify fallback after this date — not
- * {@link LEGACY_HASH_UNTIL}: every location sheet and every cast character
- * sheet still carries one, and dropping it re-stales them all at once.
- */
-export const LEGACY_1785_HASH_UNTIL = '2026-12-31';
+export const LEGACY_HASH_UNTIL = '2026-12-31';
 
 /**
  * Older prompt shapes. Verify accepts these until {@link LEGACY_HASH_UNTIL}.

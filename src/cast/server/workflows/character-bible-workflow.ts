@@ -154,7 +154,9 @@ export class CharacterBibleWorkflow extends OpenStoryWorkflowEntrypoint<Characte
         characterName: character.name,
         characterMetadata: character,
         imageModel,
-        referenceImageUrl: talentMatch?.sheetImageUrl,
+        // `|| undefined`: a match with no sheet carries `''`, which the hash
+        // would read as a different image from the check's "none".
+        referenceImageUrl: talentMatch?.sheetImageUrl || undefined,
         talentMetadata: talentMatch?.sheetMetadata,
         // Image-anchored, name-free: naming a person + "look exactly like"
         // trips OpenAI's real-person likeness moderation (see

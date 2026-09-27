@@ -379,7 +379,8 @@ sha256Hex({
 One resolver, `resolveCastTalent` (`sheet-snapshots.ts`), feeds the
 regenerate/verify payload, the upload stamp and the workflow's divergence
 recompute, so the three cannot pick different talent sheets. Pre-#1785 digests
-(no talent channel) still verify until `LEGACY_HASH_UNTIL`.
+(no talent channel) still verify until `LEGACY_1785_HASH_UNTIL`
+(2026-12-31) — later than `LEGACY_HASH_UNTIL`, since every cast sheet carries one.
 
 #### 2. Location sheet — `computeLocationSheetInputHash`
 
@@ -404,7 +405,8 @@ sha256Hex({
 });
 ```
 
-Pre-#1785 digests (description only) still verify until `LEGACY_HASH_UNTIL`.
+Pre-#1785 digests (description only) still verify until
+`LEGACY_1785_HASH_UNTIL` (2026-12-31); every existing location sheet carries one.
 **Known gap:** the linked library location's `description` and
 `referenceImageUrl` are read live into the prompt but reach this hash only
 through `libraryLocationReferenceHash`, i.e. after the library reference is
@@ -821,7 +823,8 @@ Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
   never sees a voice-only character (#1585), so the visual hash drops it too
   (#1785); the toggle itself still moves the digest because the entry leaves
   the bible. The motion hash keeps it (delivery). Pre-#1785 digests that
-  hashed the character (`v5-voiced`) still verify until `LEGACY_HASH_UNTIL`.
+  hashed the character (`v5-voiced`) still verify until
+  `LEGACY_1785_HASH_UNTIL` (2026-12-31).
 - **Model switches.** See §3: verify pins each artifact to its own model.
 
 ---

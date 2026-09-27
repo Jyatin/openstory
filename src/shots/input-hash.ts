@@ -380,8 +380,8 @@ export type CharacterSheetHashInput = {
 /**
  * Sheet digest shapes. `current` hashes the cast talent (#1785) and drops the
  * name; `pre-1785` is the nameless digest without the talent channel;
- * `named` is the pre-#1108 digest. Verify accepts the legacy two until
- * {@link LEGACY_HASH_UNTIL}.
+ * `named` is the pre-#1108 digest. Verify accepts `named` until
+ * {@link LEGACY_HASH_UNTIL} and `pre-1785` until {@link LEGACY_1785_HASH_UNTIL}.
  */
 type SheetHashKind = 'current' | 'pre-1785' | 'named';
 
@@ -889,8 +889,17 @@ const PROMPT_INPUT_HASH_VERSION_V4 = 4;
 export const LEGACY_HASH_UNTIL = '2026-09-28';
 
 /**
+ * Delete the `pre-1785` sheet and `v5-voiced` prompt verify fallbacks after
+ * this date — not {@link LEGACY_HASH_UNTIL}: every location sheet, every cast
+ * character sheet and every visual prompt with a voice-only character still
+ * carries one, and dropping it re-stales them all at once.
+ */
+export const LEGACY_1785_HASH_UNTIL = '2026-12-31';
+
+/**
  * `v5-voiced` is the current shape before #1785 took voice-only characters
- * out of the visual body; the older legacy shapes predate that too.
+ * out of the visual body (verified until {@link LEGACY_1785_HASH_UNTIL}); the
+ * older legacy shapes predate that too.
  */
 type PromptHashKind = 'current' | 'v5-voiced' | 'v5-titled' | 'v5-named' | 'v4';
 

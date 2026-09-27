@@ -65,7 +65,14 @@ export type PromotableFrameVariant = CompletedFrameVariant & {
 export function buildFrameImageSelection(
   db: Database,
   frameId: string,
-  version: PromotableFrameVariant
+  version: PromotableFrameVariant,
+  /**
+   * A claim-consuming promote (#1786): the same UPDATE consumes the frame's
+   * promote claim and restores the still's prompt, and lands only while the
+   * claim still names this version. One statement, so a retried step never
+   * finds the pointer moved and the mirror missing.
+   */
+  claim: { restorePromptVersionId: string | null } | null
 ) {
   return db
     .update(frames)
@@ -73,9 +80,20 @@ export function buildFrameImageSelection(
       selectedImageVersionId: version.id,
       imageStatus: version.status,
       imageError: version.error,
+      ...(claim && { pendingPromoteVersionId: null }),
+      ...(claim?.restorePromptVersionId && {
+        selectedImagePromptVersionId: claim.restorePromptVersionId,
+      }),
       updatedAt: new Date(),
     })
-    .where(eq(frames.id, frameId));
+    .where(
+      claim
+        ? and(
+            eq(frames.id, frameId),
+            eq(frames.pendingPromoteVersionId, version.id)
+          )
+        : eq(frames.id, frameId)
+    );
 }
 
 type FrameOrderBy = 'orderIndex' | 'createdAt' | 'updatedAt';
@@ -327,6 +345,34 @@ export function createFramesMethods(db: Database) {
             eq(frames.pendingPromoteVersionId, versionId)
           )
         );
+    },
+
+    /**
+     * Move the promote claim from `fromVersionId` to `toVersionId` only while
+     * `fromVersionId` still holds it (#1786) — a run handing its claim to a
+     * replacement row (the content-rejection model fallback) must not re-take
+     * a claim a newer kickoff or a manual select already moved. A claim
+     * already on `toVersionId` (a retried handover) counts as moved.
+     */
+    movePendingPromoteVersionIdIf: async (
+      frameId: string,
+      fromVersionId: string,
+      toVersionId: string
+    ): Promise<boolean> => {
+      const moved = await db
+        .update(frames)
+        .set({ pendingPromoteVersionId: toVersionId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(frames.id, frameId),
+            inArray(frames.pendingPromoteVersionId, [
+              fromVersionId,
+              toVersionId,
+            ])
+          )
+        )
+        .returning({ id: frames.id });
+      return moved.length > 0;
     },
 
     delete: async (frameId: string): Promise<boolean> => {

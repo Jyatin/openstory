@@ -244,6 +244,14 @@ Key consequences of the shape:
   `shotDialogueResolver` (the `dialogue` channel), and the clip manifest
   records every line its render prompt quoted (`dialogueKey`), voiced or not.
   The visual prompt still reads the scene script: a still has no dialogue.
+- **A token rename re-stales what names the token (#1786).** The token
+  reaches the model: an image prompt keeps it beside its tag
+  (`LOGO (Image 2)`), and every reference description starts with it. So the
+  prompts and still read stale through their hashes (the element bible hashes
+  `token`). The rename appends `renamed` prompt and scene-script rows and moves
+  each pointer, so the clip reads stale through its motion-prompt pointer too.
+  Before #1786 the rename rewrote the selected row in place and the clip's
+  pointer never moved. The rename popover says how many shots go out of date.
 - **Image → video is a hash cascade.** The video hash includes the source image's
   hash (`ShotVideoSourceImage = { kind: 'variantHash'; hash }`), so a stale image
   invalidates its motion without the video needing to know _why_ the image changed.
@@ -595,7 +603,11 @@ The stamp is over the render manifest (motion-prompt / still version ids,
 (`isSelectedVersionStale`) is pointer-based: stored entries vs the shot's
 current prompt / still version ids **and** the live `audioSourceKey` (voice
 id, line, tone and TTS model, omitted when voiceless). A voice change therefore
-re-stales the clip, not the motion prompt. The TTS model follows the voice
+re-stales the clip, not the motion prompt. A new selected motion-prompt
+version — an edit, a regeneration, a token rename — re-stales it too. A rescue
+rewrite (soften, shorten) is the exception by construction: the clip's
+manifest pins the rewrite, and the rewrite takes the selection only with that
+clip's promote. The TTS model follows the voice
 (`eleven_v3` for an ElevenLabs voice, `seed-audio-1.0` for a Seed voice,
 #1765), so it moves only when the voice does.
 

@@ -190,12 +190,12 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     summary:
       'A prop, effect, sound or clip referenced by @token. Detected in the script at the Script stage or added by hand, then yours to edit.',
     counts: [
-      'Token and description (prompts)',
+      'Token and description (prompts). The token reaches the model, so a rename re-stales every prompt, still and clip that names it',
       'Image (still)',
       'Audio or video clip: sent as a reference when the video model takes one',
       'Its media URL, stamped on every clip it was sent to (referenceKeys)',
     ],
-    ignored: [],
+    ignored: ['Consistency tag'],
   },
   // --- You set -------------------------------------------------------------
   {
@@ -592,6 +592,7 @@ export const GRAPH_NODES: readonly GraphNode[] = [
       'Selected character sheet versions',
       'Selected location sheet versions',
       'Element image URLs',
+      'For a tile picked from the 3×3 grid: the same list, as it stood when the grid was made',
     ],
     ignored: ['Seed and size, unless set'],
     storedAs: 'frame_variants.inputHash',
@@ -834,7 +835,7 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     from: 'visualPrompt',
     to: 'still',
     tracking: 'hash',
-    note: 'the selected prompt text',
+    note: 'the selected prompt text; a tile picked from the 3×3 grid carries the prompt the grid was drawn from',
   },
   {
     from: 'imageModel',
@@ -860,7 +861,7 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     from: 'motionPrompt',
     to: 'clip',
     tracking: 'pointer',
-    note: 'the manifest records the prompt version',
+    note: 'the manifest records the prompt version; a token rename writes a new version, so it re-stales the clip',
   },
   {
     from: 'still',

@@ -190,12 +190,15 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     summary:
       'A prop, effect, sound or clip referenced by @token. Detected in the script at the Script stage or added by hand, then yours to edit.',
     counts: [
-      'Token and description (prompts)',
+      'Description (prompts)',
       'Image (still)',
       'Audio or video clip: sent as a reference when the video model takes one',
       'Its media URL, stamped on every clip it was sent to (referenceKeys)',
     ],
-    ignored: [],
+    ignored: [
+      'Token: a label, so a rename stales nothing (text reads it as the element)',
+      'Consistency tag',
+    ],
   },
   // --- You set -------------------------------------------------------------
   {
@@ -586,12 +589,13 @@ export const GRAPH_NODES: readonly GraphNode[] = [
     band: 'renders',
     summary: 'The rendered start frame for a shot.',
     counts: [
-      'Selected visual prompt text',
+      'Selected visual prompt text, element tokens read as the element',
       'Image model',
       'Aspect ratio',
       'Selected character sheet versions',
       'Selected location sheet versions',
       'Element image URLs',
+      'For a tile picked from the 3×3 grid: the same list, as it stood when the grid was made',
     ],
     ignored: ['Seed and size, unless set'],
     storedAs: 'frame_variants.inputHash',
@@ -655,7 +659,12 @@ const bibleToPrompt: GraphEdge[] = ['visualPrompt', 'motionPrompt'].flatMap(
     { from: 'script', to, tracking: 'hash' as const },
     { from: 'character', to, tracking: 'hash' as const },
     { from: 'location', to, tracking: 'hash' as const },
-    { from: 'element', to, tracking: 'hash' as const },
+    {
+      from: 'element',
+      to,
+      tracking: 'hash' as const,
+      note: 'the description counts; the token is read as a label, so a rename moves nothing',
+    },
     { from: 'style', to, tracking: 'hash' as const },
     { from: 'aspectRatio', to, tracking: 'hash' as const },
     {
@@ -834,7 +843,7 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     from: 'visualPrompt',
     to: 'still',
     tracking: 'hash',
-    note: 'the selected prompt text',
+    note: 'the selected prompt text; a tile picked from the 3×3 grid carries the prompt the grid was drawn from',
   },
   {
     from: 'imageModel',
@@ -855,12 +864,17 @@ export const GRAPH_EDGES: readonly GraphEdge[] = [
     tracking: 'pointer',
     note: 'the selected sheet version id',
   },
-  { from: 'element', to: 'still', tracking: 'hash', note: 'the image URL' },
+  {
+    from: 'element',
+    to: 'still',
+    tracking: 'hash',
+    note: "the image URL; the token in the prompt is swapped for the element's id before hashing",
+  },
   {
     from: 'motionPrompt',
     to: 'clip',
     tracking: 'pointer',
-    note: 'the manifest records the prompt version',
+    note: 'the manifest records the prompt version; a token rename’s row counts as the row it rewrote, so a rename leaves the clip fresh',
   },
   {
     from: 'still',

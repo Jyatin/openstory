@@ -340,30 +340,44 @@ export async function generateImageWithContentRetry(
       const originalVersionId = versionId;
       const originalRejection = lastRejection;
       const fallbackHash = snapshotInputHash;
-      versionId = await step.do('switch-to-fallback-model', async () => {
-        await scopedDb.frameVariants.update(originalVersionId, {
-          status: 'failed',
-          error: originalRejection,
-        });
-        const fallbackVersion = await scopedDb.frameVariants.appendVersion({
-          frameId,
-          sequenceId,
-          kind: 'model',
-          model: IMAGE_CONTENT_FALLBACK_MODEL,
-          status: 'generating',
-          workflowRunId,
-          promptVersionId: input.promptVersionId ?? null,
-          pendingInputHash: fallbackHash,
-        });
+      // The append is the step's last write, so a retry never appends a
+      // second fallback row; the handover and emit are their own step.
+      const fallbackVersionId = await step.do(
+        'switch-to-fallback-model',
+        async () => {
+          await scopedDb.frameVariants.update(originalVersionId, {
+            status: 'failed',
+            error: originalRejection,
+          });
+          const fallbackVersion = await scopedDb.frameVariants.appendVersion({
+            frameId,
+            sequenceId,
+            kind: 'model',
+            model: IMAGE_CONTENT_FALLBACK_MODEL,
+            status: 'generating',
+            workflowRunId,
+            promptVersionId: input.promptVersionId ?? null,
+            pendingInputHash: fallbackHash,
+          });
+          return fallbackVersion.id;
+        }
+      );
+      versionId = fallbackVersionId;
+      await step.do('hand-claim-to-fallback', async () => {
         // Hand the promote claim to the fallback row only while the original
         // still holds it (#1786): a newer kickoff or a manual select made
         // mid-run keeps its choice, and the fallback lands in history.
         if (!input.variantOnly) {
-          await scopedDb.frames.movePendingPromoteVersionIdIf(
+          const handed = await scopedDb.frames.movePendingPromoteVersionIdIf(
             frameId,
             originalVersionId,
-            fallbackVersion.id
+            fallbackVersionId
           );
+          if (!handed) {
+            logger.info(
+              `[ImageWorkflow] promote claim moved mid-run; fallback for shot ${input.shotId} lands in history`
+            );
+          }
         }
         if (input.shotId) {
           await getGenerationChannel(sequenceId).emit(
@@ -377,7 +391,6 @@ export async function generateImageWithContentRetry(
             }
           );
         }
-        return fallbackVersion.id;
       });
     }
 

@@ -241,6 +241,16 @@ describe('frames.movePendingPromoteVersionIdIf (#1786)', () => {
     expect(await claimOf(frameId)).toBe(b.id);
   });
 
+  it('a retried handover finds the claim already moved and reports it moved', async () => {
+    const { m, frameId, a, b } = await setup();
+    await m.setPendingPromoteVersionId(frameId, a.id);
+    await m.movePendingPromoteVersionIdIf(frameId, a.id, b.id);
+    expect(await m.movePendingPromoteVersionIdIf(frameId, a.id, b.id)).toBe(
+      true
+    );
+    expect(await claimOf(frameId)).toBe(b.id);
+  });
+
   it('a newer kickoff made mid-run keeps its claim', async () => {
     const { m, frameId, a, b, c } = await setup();
     await m.setPendingPromoteVersionId(frameId, c.id);

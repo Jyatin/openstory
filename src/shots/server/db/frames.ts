@@ -351,7 +351,8 @@ export function createFramesMethods(db: Database) {
      * Move the promote claim from `fromVersionId` to `toVersionId` only while
      * `fromVersionId` still holds it (#1786) — a run handing its claim to a
      * replacement row (the content-rejection model fallback) must not re-take
-     * a claim a newer kickoff or a manual select already moved.
+     * a claim a newer kickoff or a manual select already moved. A claim
+     * already on `toVersionId` (a retried handover) counts as moved.
      */
     movePendingPromoteVersionIdIf: async (
       frameId: string,
@@ -364,7 +365,10 @@ export function createFramesMethods(db: Database) {
         .where(
           and(
             eq(frames.id, frameId),
-            eq(frames.pendingPromoteVersionId, fromVersionId)
+            inArray(frames.pendingPromoteVersionId, [
+              fromVersionId,
+              toVersionId,
+            ])
           )
         )
         .returning({ id: frames.id });

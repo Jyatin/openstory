@@ -233,6 +233,39 @@ describe('generateImageWithContentRetry', () => {
     expect(out.prompt).toBe('A graphic fight in the alley');
   });
 
+  it('a retried fallback step appends one Grok row, not two (#1786)', async () => {
+    generateImageWithProvider
+      .mockRejectedValueOnce(contentError())
+      .mockRejectedValueOnce(contentError())
+      .mockRejectedValueOnce(contentError())
+      .mockResolvedValueOnce(okResult());
+    let failFallbackEmit = true;
+    emit.mockImplementation(async (_event: string, payload: object) => {
+      if ('modelFallback' in payload && failFallbackEmit) {
+        failFallbackEmit = false;
+        throw new Error('realtime down');
+      }
+    });
+    const { scopedDb, appendVersion, movePendingPromoteVersionIdIf } =
+      makeScopedDb();
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- helper only uses `do`
+    const retryingStep = {
+      do: async <T>(_name: string, fn: () => Promise<T>) =>
+        fn().catch(async () => fn()),
+    } as unknown as WorkflowStep;
+
+    const out = await generateImageWithContentRetry({
+      ...BASE_ARGS,
+      step: retryingStep,
+      scopedDb,
+      input: makeInput(),
+    });
+
+    expect(appendVersion).toHaveBeenCalledTimes(1);
+    expect(movePendingPromoteVersionIdIf).toHaveBeenCalledTimes(2);
+    expect(out.versionId).toBe('var-grok');
+  });
+
   it('does not steal primary promote when the original run was variant-only', async () => {
     generateImageWithProvider
       .mockRejectedValueOnce(contentError())

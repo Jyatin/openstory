@@ -23,6 +23,7 @@ import {
   planCounts,
   planWork,
   switchLocks,
+  switchStopAt,
   type PlanUnit,
 } from '@/sequences/generation-plan';
 import { sliderStopLabel, type GenerationStage } from '@/sequences/pipeline';
@@ -37,7 +38,7 @@ export function continueFromPlan(args: {
   saved: Flags;
   requested: Flags;
   stopAt: GenerationStage;
-}): PlanUnit[] {
+}): { work: PlanUnit[]; stopAt: GenerationStage } {
   const locks = switchLocks(args.current);
   if (
     args.saved.generateStartFrames &&
@@ -57,13 +58,14 @@ export function continueFromPlan(args: {
       'Voices can’t be turned off: shots already have recorded dialogue'
     );
   }
-  const work = planWork(args.next, args.stopAt);
+  const stopAt = switchStopAt(args);
+  const work = planWork(args.next, stopAt);
   if (work.length === 0) {
     throw new ValidationError(
-      `Nothing to generate up to ${sliderStopLabel(args.stopAt)}`
+      `Nothing to generate up to ${sliderStopLabel(stopAt)}`
     );
   }
-  return work;
+  return { work, stopAt };
 }
 
 /**

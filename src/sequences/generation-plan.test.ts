@@ -404,7 +404,23 @@ describe('footer helpers', () => {
   });
 
   it('locks a switch once its units exist', () => {
-    expect(switchLocks(plan)).toEqual({ startFrames: false, voices: true });
+    expect(switchLocks(plan)).toEqual({
+      startFrames: false,
+      voices: true,
+      // s1's clip is blocked, so it may not exist yet: Draft first stays open.
+      draft: false,
+    });
+    expect(
+      switchLocks([
+        {
+          kind: 'clip',
+          id: 's1',
+          state: 'done',
+          requires: [],
+          cascaded: false,
+        },
+      ]).draft
+    ).toBe(true);
     expect(
       switchLocks([
         {

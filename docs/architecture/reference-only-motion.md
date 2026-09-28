@@ -390,3 +390,18 @@ passes its existing style snapshot. The render builder includes this header
 for standalone shots as well as packed siblings; dialogue reassembly retains
 the same header. Prompt-authoring workflows share `scenePromptContext`, which
 removes legacy `styleTag` and supplies the resolved scene direction.
+
+### Location column retirement (#1890)
+
+The location bible and its legacy fallback no longer store time of day,
+lighting or palette. The generated migration uses six native `DROP COLUMN`
+statements without rebuilding either table. Merge and deploy this only after
+the field-ownership change (#1889) is deployed: migrations run before the
+new Worker, so the old Worker must already have stopped reading the fields.
+
+The migration was applied with foreign keys enabled in one transaction to
+a current-schema copy of local D1: all 77 table counts (6,099 rows) were
+unchanged, `foreign_key_check` returned no rows and `integrity_check` returned
+`ok`. Neither table had a trigger or an index on a retired field. A separate
+sequence-table rebuild control changed 22 child-table counts, demonstrating
+that the same check detects cascading deletion.

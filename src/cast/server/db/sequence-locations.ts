@@ -141,12 +141,9 @@ const liveReferenceVersionId = sql`COALESCE(${sequenceLocations.selectedReferenc
 const {
   legacyName: _name,
   legacyType: _type,
-  legacyTimeOfDay: _timeOfDay,
   legacyDescription: _description,
   legacyArchitecturalStyle: _architecturalStyle,
   legacyKeyFeatures: _keyFeatures,
-  legacyColorPalette: _colorPalette,
-  legacyLightingSetup: _lightingSetup,
   legacyAmbiance: _ambiance,
   legacyConsistencyTag: _consistencyTag,
   ...locationRowColumns

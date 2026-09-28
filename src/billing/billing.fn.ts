@@ -3,12 +3,14 @@
  * Balance, checkout, transactions, and auto-top-up
  */
 
-import { requireTeamAdminAccess } from '@/platform/server/auth/action-utils';
+import {
+  requireTeamAdminAccess,
+  requireTeamMemberAccess,
+} from '@/platform/server/auth/action-utils';
+import { hasMinimumRole } from '@/platform/server/auth/constants';
 import {
   createCheckoutSession,
   createSetupCheckoutSession,
-  grantWelcomeCreditsForPaymentMethod,
-  grantWelcomeIfTeamHasCard,
   teamHasSavedCard,
 } from '@/billing/server/checkout';
 import {
@@ -19,7 +21,6 @@ import {
   mapCheckoutFailureReason,
 } from '@/billing/server/checkout-events';
 import {
-  hasOtherCredits,
   isStripeEnabled,
   MAX_TOPUP_AMOUNT_USD,
   MIN_TOPUP_AMOUNT_USD,
@@ -27,10 +28,7 @@ import {
 } from './constants';
 import { micros, microsToDisplayUsd, microsToUsd, usdToMicros } from './money';
 import type { TransactionType } from '@/platform/server/db/schema/credits';
-import {
-  isWelcomeCardAlreadyClaimedError,
-  ValidationError,
-} from '@/platform/errors';
+import { ValidationError } from '@/platform/errors';
 import { FOUNDER_EMAIL } from '@/ui/marketing/constants';
 import { getLogger } from '@/platform/logger';
 import { captureProductEvent } from '@/platform/server/observability/product-events';
@@ -77,11 +75,7 @@ export const createCheckoutSessionFn = createServerFn({ method: 'POST' })
     return { url };
   });
 
-/**
- * Save a card with no charge (Stripe Checkout `mode: 'setup'`). Unlocks the
- * welcome grant on session.completed, setup_intent.succeeded, or the claim
- * fn on return.
- */
+/** Save a card with no charge (Stripe Checkout `mode: 'setup'`). */
 export const createSetupCheckoutSessionFn = createServerFn({ method: 'POST' })
   .middleware([authWithTeamMiddleware])
   .handler(async ({ context }) => {
@@ -91,38 +85,14 @@ export const createSetupCheckoutSessionFn = createServerFn({ method: 'POST' })
 
     await requireTeamAdminAccess(context.user.id, context.teamId);
 
-    const req = getRequest();
-    const appUrl = getServerAppUrl(req);
-
-    const { url } = await createSetupCheckoutSession({
+    const appUrl = getServerAppUrl(getRequest());
+    return createSetupCheckoutSession({
       scopedDb: context.scopedDb,
       teamId: context.teamId,
       userId: context.user.id,
       userEmail: context.user.email,
-      successUrl: `${appUrl}/?welcome_setup=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${appUrl}/?welcome_setup=canceled`,
-    });
-
-    return { url };
-  });
-
-/**
- * After Stripe setup redirect: grant the welcome credits if a card is on
- * file. Idempotent with the webhook.
- */
-export const claimWelcomeCreditsFn = createServerFn({ method: 'POST' })
-  .middleware([authWithTeamMiddleware])
-  .handler(async ({ context }) => {
-    if (!isStripeEnabled()) {
-      return { granted: false, hasCard: false, hasSignupGrant: false };
-    }
-
-    await requireTeamAdminAccess(context.user.id, context.teamId);
-
-    return grantWelcomeIfTeamHasCard({
-      scopedDb: context.scopedDb,
-      teamId: context.teamId,
-      userId: context.user.id,
+      successUrl: `${appUrl}/credits?card_saved=true`,
+      cancelUrl: `${appUrl}/credits`,
     });
   });
 
@@ -170,24 +140,37 @@ export type SavedPaymentMethod = {
 };
 
 /**
- * Saved cards for the team's Stripe customer. Welcome claim saves a card
- * via SetupIntent; Checkout (`setup_future_usage: 'off_session'`) saves one
- * on a first purchase. The add-credits dialog falls back to Checkout when
+ * Saved cards for the team's Stripe customer. Checkout
+ * (`setup_future_usage: 'off_session'`) saves one on a first purchase. The add-credits dialog falls back to Checkout when
  * none are on file.
  *
  * Admin-only: these cards belong to whoever set billing up, and
- * `purchaseCreditsFn` can charge them without further consent.
+ * `purchaseCreditsFn` can charge them without further consent. A member
+ * gets `canManage: false` and no cards, so the page can say so.
  */
 export const listPaymentMethodsFn = createServerFn({ method: 'GET' })
   .middleware([authWithTeamMiddleware])
   .handler(
-    async ({ context }): Promise<{ paymentMethods: SavedPaymentMethod[] }> => {
-      if (!isStripeEnabled()) return { paymentMethods: [] };
+    async ({
+      context,
+    }): Promise<{
+      canManage: boolean;
+      paymentMethods: SavedPaymentMethod[];
+    }> => {
+      if (!isStripeEnabled()) return { canManage: false, paymentMethods: [] };
 
-      await requireTeamAdminAccess(context.user.id, context.teamId);
+      const role = await requireTeamMemberAccess(
+        context.user.id,
+        context.teamId
+      );
+      if (!hasMinimumRole(role, 'admin')) {
+        return { canManage: false, paymentMethods: [] };
+      }
 
       const settings = await context.scopedDb.billing.getBillingSettings();
-      if (!settings.stripeCustomerId) return { paymentMethods: [] };
+      if (!settings.stripeCustomerId) {
+        return { canManage: true, paymentMethods: [] };
+      }
 
       // Dynamic import — keeps the Stripe Node SDK out of the client bundle (#1253).
       const { getStripeOrThrow } = await import('@/billing/server/stripe');
@@ -224,7 +207,7 @@ export const listPaymentMethodsFn = createServerFn({ method: 'GET' })
         )
         .sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 
-      return { paymentMethods };
+      return { canManage: true, paymentMethods };
     }
   );
 
@@ -411,23 +394,6 @@ export const purchaseCreditsFn = createServerFn({ method: 'POST' })
       },
     });
 
-    try {
-      await grantWelcomeCreditsForPaymentMethod({
-        scopedDb: context.scopedDb,
-        teamId: context.teamId,
-        userId: context.user.id,
-        paymentMethodId: data.paymentMethodId,
-        source: 'purchase',
-      });
-    } catch (err) {
-      if (!isWelcomeCardAlreadyClaimedError(err)) {
-        logger.error(
-          'Welcome grant after purchase failed; webhook will retry',
-          { err }
-        );
-      }
-    }
-
     // `null` means this exact grant already landed (replayed request) — the
     // earlier credit stands, so report the balance rather than a phantom.
     return {
@@ -447,15 +413,10 @@ export const getBillingBalanceFn = createServerFn({ method: 'GET' })
   .handler(async ({ context }) => {
     const { scopedDb } = context;
 
-    const [funds, settings, hasUsedCredits, hasSignupGrant] = await Promise.all(
-      [
-        scopedDb.billing.getAvailable(),
-        scopedDb.billing.getBillingSettings(),
-        // Drives welcome-credits suppression (#1096).
-        scopedDb.billing.hasUsedCredits(),
-        scopedDb.billing.hasSignupGrant(),
-      ]
-    );
+    const [funds, settings] = await Promise.all([
+      scopedDb.billing.getAvailable(),
+      scopedDb.billing.getBillingSettings(),
+    ]);
 
     return {
       teamId: context.teamId,
@@ -464,9 +425,6 @@ export const getBillingBalanceFn = createServerFn({ method: 'GET' })
       reservedUsd: microsToUsd(funds.reserved),
       asOfMs: funds.asOfMs,
       stripeEnabled: isStripeEnabled(),
-      hasUsedCredits,
-      hasSignupGrant,
-      hasOtherCredits: hasOtherCredits(funds.balance, hasSignupGrant),
       autoTopUp: {
         enabled: settings.autoTopUpEnabled,
         thresholdUsd: settings.autoTopUpThresholdMicros
@@ -479,7 +437,6 @@ export const getBillingBalanceFn = createServerFn({ method: 'GET' })
           ? { at: new Date(settings.autoTopUpFailedAt).toISOString() }
           : null,
       },
-      hasPaymentMethod: !!settings.stripeCustomerId,
     };
   });
 
@@ -631,9 +588,7 @@ export const updateAutoTopUpFn = createServerFn({ method: 'POST' })
     await requireTeamAdminAccess(context.user.id, context.teamId);
 
     if (data.enabled && !(await teamHasSavedCard(context.scopedDb))) {
-      throw new ValidationError(
-        'Save a card first — no charge, or make a purchase'
-      );
+      throw new ValidationError('Add a card first');
     }
 
     await context.scopedDb.billing.updateAutoTopUpSettings({

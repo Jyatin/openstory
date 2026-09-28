@@ -27,8 +27,10 @@ import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-wor
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
 import type {
   AnalyzeScriptWorkflowInput,
+  UpdateStaleShotsWorkflowInput,
   StoryboardWorkflowInput,
 } from '@/platform/server/workflow/types';
+import type { UpdateStaleShotsResult } from '@/shots/server/workflows/update-stale-shots-workflow';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { getLogger } from '@/platform/logger';
 
@@ -178,64 +180,114 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
       });
     }
 
-    // Spawn the analyze-script child and block until it returns. Pattern 3.
-    await spawnAndAwaitChild<AnalyzeScriptWorkflowInput, unknown>(step, {
-      binding: this.env.ANALYZE_SCRIPT_WORKFLOW,
-      parentBindingName: 'STORYBOARD_WORKFLOW',
-      parentInstanceId: event.instanceId,
-      childId: `analyze-script:${sequenceId}`,
-      childPayload: {
-        userId: input.userId,
-        teamId: input.teamId,
-        sequenceId,
-        reservationId: input.reservationId,
-        script,
-        userCountry: input.userCountry,
-        aspectRatio,
-        resolution,
-        draftMotion: input.draftMotion,
-        styleConfig: input.styleConfig,
-        pendingAutoStyleId: input.pendingAutoStyleId,
-        analysisModelId,
-        elementIds,
-        musicPromptSource: input.musicPromptSource,
-        imageModel,
-        imageModels: input.imageModels ?? [imageModel],
-        videoModel,
-        videoModels: input.videoModels ?? [videoModel],
-        autoGenerateMotion: input.autoGenerateMotion ?? false,
-        autoGenerateMusic: input.autoGenerateMusic ?? false,
-        stopAt: input.stopAt,
-        startFrom: input.startFrom,
-        checkpoint: input.checkpoint,
-        musicModel: input.musicModel,
-        audioModels: input.audioModels,
-        suggestedTalentIds: input.suggestedTalentIds,
-        suggestedLocationIds: input.suggestedLocationIds,
-        suggestedTalent: input.suggestedTalent,
-        suggestedLocations: input.suggestedLocations,
-        referenceOnly: input.referenceOnly,
-        generateVoices: input.generateVoices ?? false,
-        leftoverGrokShotIds: input.leftoverGrokShotIds,
-      },
-      spawnStepName: 'spawn-analyze-script',
-      awaitStepName: 'await-analyze-script',
-      // Must exceed the child's own await budget: analyze-script's phases run
-      // sequentially — scene-split (45m) + matching (45m) + bibles/visual
-      // prompts (60m) + shot-images (90m) + motion-batch (90m) ≈ 5.5 hours
-      // worst case — a shorter parent wait here times out first and leaves
-      // the still-running child notifying a terminal parent
-      // (`instance.in_finite_state`, the #801/#839 burst failures).
-      // Completion notifies early, so this ceiling costs nothing in the
-      // common case.
-      timeout: '6 hours',
-    });
+    // A continue (#1818) runs the plan's units — only those, through the
+    // per-shot executor Update all uses — instead of the stage-shaped script
+    // run. The banner still moves: the executor announces its phases.
+    let continueFailure: string | null = null;
+    if (input.plan) {
+      const result = await spawnAndAwaitChild<
+        UpdateStaleShotsWorkflowInput,
+        UpdateStaleShotsResult
+      >(step, {
+        binding: this.env.UPDATE_STALE_SHOTS_WORKFLOW,
+        parentBindingName: 'STORYBOARD_WORKFLOW',
+        parentInstanceId: event.instanceId,
+        childId: `continue:${sequenceId}:${event.instanceId}`,
+        childPayload: {
+          userId: input.userId,
+          teamId: input.teamId,
+          sequenceId,
+          reservationId: input.reservationId,
+          plan: input.plan,
+          announcePhases: true,
+          leftoverGrokShotIds: input.leftoverGrokShotIds,
+        },
+        spawnStepName: 'spawn-continue',
+        awaitStepName: 'await-continue',
+        // Sheets (30m) then prompts + stills + clips per shot (90m each,
+        // in parallel), plus notify lag under a burst.
+        timeout: '4 hours',
+      });
+      // The executor records a unit's failure and carries on; the run as a
+      // whole did not finish what was asked, so it ends failed, not
+      // completed, and sends no "ready" email.
+      const [first] = result.failures;
+      if (first) {
+        continueFailure =
+          result.failures.length === 1
+            ? first.error
+            : `${result.failures.length} steps failed. First: ${first.error}`;
+      }
+    } else
+      // Spawn the analyze-script child and block until it returns. Pattern 3.
+      await spawnAndAwaitChild<AnalyzeScriptWorkflowInput, unknown>(step, {
+        binding: this.env.ANALYZE_SCRIPT_WORKFLOW,
+        parentBindingName: 'STORYBOARD_WORKFLOW',
+        parentInstanceId: event.instanceId,
+        childId: `analyze-script:${sequenceId}`,
+        childPayload: {
+          userId: input.userId,
+          teamId: input.teamId,
+          sequenceId,
+          reservationId: input.reservationId,
+          script,
+          userCountry: input.userCountry,
+          aspectRatio,
+          resolution,
+          draftMotion: input.draftMotion,
+          styleConfig: input.styleConfig,
+          pendingAutoStyleId: input.pendingAutoStyleId,
+          analysisModelId,
+          elementIds,
+          musicPromptSource: input.musicPromptSource,
+          imageModel,
+          imageModels: input.imageModels ?? [imageModel],
+          videoModel,
+          videoModels: input.videoModels ?? [videoModel],
+          autoGenerateMotion: input.autoGenerateMotion ?? false,
+          autoGenerateMusic: input.autoGenerateMusic ?? false,
+          stopAt: input.stopAt,
+          musicModel: input.musicModel,
+          audioModels: input.audioModels,
+          suggestedTalentIds: input.suggestedTalentIds,
+          suggestedLocationIds: input.suggestedLocationIds,
+          suggestedTalent: input.suggestedTalent,
+          suggestedLocations: input.suggestedLocations,
+          referenceOnly: input.referenceOnly,
+          generateVoices: input.generateVoices ?? false,
+          leftoverGrokShotIds: input.leftoverGrokShotIds,
+        },
+        spawnStepName: 'spawn-analyze-script',
+        awaitStepName: 'await-analyze-script',
+        // Must exceed the child's own await budget: analyze-script's phases run
+        // sequentially — scene-split (45m) + matching (45m) + bibles/visual
+        // prompts (60m) + shot-images (90m) + motion-batch (90m) ≈ 5.5 hours
+        // worst case — a shorter parent wait here times out first and leaves
+        // the still-running child notifying a terminal parent
+        // (`instance.in_finite_state`, the #801/#839 burst failures).
+        // Completion notifies early, so this ceiling costs nothing in the
+        // common case.
+        timeout: '6 hours',
+      });
 
     const reservationId = input.reservationId;
     if (reservationId) {
       await step.do('zero-reservation', async () => {
         await scopedDb.billing.zeroReservation(reservationId);
       });
+    }
+
+    if (continueFailure) {
+      const message = continueFailure;
+      await step.do('mark-failed', async () => {
+        await seq.updateStatus('failed', message);
+      });
+      await step.do('emit-failed', async () => {
+        await getGenerationChannel(sequenceId).emit('generation.failed', {
+          message,
+        });
+      });
+      return;
     }
 
     await step.do('mark-completed', async () => {

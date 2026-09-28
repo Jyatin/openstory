@@ -120,6 +120,7 @@ vi.doMock('@/shots/input-hash', () => ({
 const { computePlan, claimTargets, findTargetMissingStartFrameMode } =
   await import('./update-stale-plan');
 type PlanTarget = import('./update-stale-plan').PlanTarget;
+type PlanUnitRef = import('@/sequences/generation-plan').PlanUnitRef;
 
 type VideoFixture = {
   segments?: Array<{
@@ -672,6 +673,69 @@ describe('computePlan — per-shot start-frame mode', () => {
   });
 });
 
+describe("computePlan — a continue's units (#1818)", () => {
+  const units = (
+    ...list: Array<[PlanUnitRef['kind'], string]>
+  ): PlanUnitRef[] => list.map(([kind, id]) => ({ kind, id }));
+
+  it('takes its flags from the units, not the staleness cascade', async () => {
+    // Everything reads fresh; the plan still owes a prompt and a first clip.
+    const result = await computePlan({
+      scopedDb: buildScopedDb(
+        [makeShot(), makeShot({ id: 'shot-2' })],
+        [makeFrame(), makeFrame({ id: 'frame-2', shotId: 'shot-2' })]
+      ),
+      sequenceId: 'seq-1',
+      units: units(['prompt:visual', 'shot-1'], ['clip', 'shot-1']),
+    });
+    expect(result.targets.map((t) => t.shotId)).toEqual(['shot-1']);
+    expect(result.targets[0]).toMatchObject({
+      regenVisual: true,
+      regenImage: false,
+      regenVideo: true,
+      // No video yet: the continue renders the first one.
+      createsVideo: true,
+      // shot-2 shares its scene: the clip renders alone, so it carries the
+      // scene header a packed clip would state once.
+      attachSceneHeader: true,
+    });
+  });
+
+  it('renders a first still at the sequence model, which Update all never does', async () => {
+    const result = await computePlan({
+      scopedDb: buildScopedDb(
+        [makeShot()],
+        [makeFrame({ selectedImageVersionId: null })],
+        { sequence: { imageModel: 'nano_banana_2_lite' } }
+      ),
+      sequenceId: 'seq-1',
+      units: units(['prompt:visual', 'shot-1'], ['still', 'shot-1']),
+    });
+    expect(result.targets[0]).toMatchObject({
+      regenVisual: true,
+      regenImage: true,
+      imageModel: 'nano_banana_2_lite',
+      // A one-shot scene keeps the LLM prompt path, byte-identical.
+      attachSceneHeader: false,
+    });
+  });
+
+  it('owes music from the units alone — a first prompt and track included', async () => {
+    const result = await computePlan({
+      scopedDb: buildScopedDb([makeShot()], [makeFrame()]),
+      sequenceId: 'seq-1',
+      units: units(['prompt:music', 'seq-1'], ['music', 'seq-1']),
+    });
+    expect(result.targets).toEqual([]);
+    expect(result.music).toMatchObject({
+      regenPrompt: true,
+      regenTrack: true,
+      promptSource: 'ai-generated',
+    });
+    expect(result.music?.sceneSummaries.length).toBeGreaterThan(0);
+  });
+});
+
 describe('claimTargets (#1085)', () => {
   type PendingRow = { id: string; workflowRunId: string | null };
 
@@ -698,6 +762,10 @@ describe('claimTargets (#1085)', () => {
       imageLiveHash: 'ih',
       imageModel: 'nano_banana_2',
       regenVideo: false,
+      createsVideo: false,
+      staleVideoVersionId: null,
+      referenceIds: [],
+      attachSceneHeader: false,
       dialogue: { presence: false, lines: [] },
       dialogueContext: [],
       ...overrides,

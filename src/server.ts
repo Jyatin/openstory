@@ -32,6 +32,7 @@ import { ensureLocalModelPricingSeeded } from '@/billing/server/seed-model-prici
 import { ensureSystemTemplatesSeeded } from '@/platform/server/db/seed-system-templates';
 
 import { getLogger, toErrorPayload } from '@/platform/logger';
+import { logIsolateStamp } from '@/platform/server/isolate-stamp';
 import {
   isStaleServerFnPath,
   rewriteStaleServerFnResponse,
@@ -144,6 +145,8 @@ interface WorkerEnv {
 
 const exportedHandler: ExportedHandler<WorkerEnv> = {
   async fetch(request, env) {
+    // Before any await, so the line is on this request when the isolate dies.
+    logIsolateStamp();
     const { pathname } = new URL(request.url);
 
     // Media serving (/r2/<key>) never needs templates — don't put the
@@ -173,6 +176,7 @@ const exportedHandler: ExportedHandler<WorkerEnv> = {
     return withDiscoveryLinkHeader(response, pathname);
   },
   scheduled(controller, _env, ctx) {
+    logIsolateStamp('cron');
     // Daily fal pricing refresh into the model_pricing table (#1069).
     if (controller.cron === FAL_PRICING_CRON) {
       ctx.waitUntil(

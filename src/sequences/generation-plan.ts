@@ -1,0 +1,308 @@
+/**
+ * The generation plan (#1816): what a sequence still owes, per entity, as a
+ * function of live D1 only. The footer, `continueGenerationFn` and the
+ * storyboard trigger read this one answer, so there is no second opinion to
+ * drift the way `pipelineStage` / `generationCheckpoint` did.
+ *
+ * This half is pure and client-safe: the unit vocabulary, the requires graph
+ * and the cascade over it. `server/generation-plan.ts` loads the live rows and
+ * the existing staleness verdicts and hands them to `planUnits`.
+ *
+ * Script is not a unit — it is the root that creates the structure. A
+ * sequence with no scenes has an empty plan.
+ */
+
+import {
+  includesStage,
+  stageIndex,
+  type GenerationStage,
+} from '@/sequences/pipeline';
+import type { ArtifactStaleness } from '@/shots/server/shot-staleness';
+
+/**
+ * Every kind with the stop that caps it — the cap `stopAt` puts on a run.
+ * Mirrors what the stage-shaped run does today: visual prompts and voices
+ * ride with References, motion and music prompts with Images. Key order is
+ * settle order: every upstream comes before its dependents.
+ */
+const PLAN_KIND_STAGE = {
+  'sheet:character': 'references',
+  'sheet:location': 'references',
+  'ref:element': 'references',
+  voice: 'references',
+  'prompt:visual': 'references',
+  still: 'images',
+  'prompt:motion': 'images',
+  dialogue: 'dialogue',
+  clip: 'motion',
+  'prompt:music': 'images',
+  music: 'music',
+} as const satisfies Record<string, GenerationStage>;
+
+type PlanUnitKind = keyof typeof PLAN_KIND_STAGE;
+
+const KIND_ORDER = Object.keys(PLAN_KIND_STAGE);
+
+type PlanUnitState = 'done' | 'missing' | 'stale' | 'blocked' | 'running';
+
+/** A unit's identity: the entity is a character, location, element, shot or the sequence. */
+type PlanUnitRef = { kind: PlanUnitKind; id: string };
+
+export type PlanUnit = PlanUnitRef & {
+  state: PlanUnitState;
+  /**
+   * Only on `blocked`: the upstream units that stop this one — running
+   * elsewhere, blocked themselves, or (empty) a verdict that could not be
+   * computed.
+   */
+  blockedBy?: PlanUnitRef[];
+};
+
+/**
+ * One artifact's live reading, before the graph is applied: the row's
+ * existence folded with the existing staleness verdict and claims.
+ * `unknown` is a comparison that failed — never read as fresh.
+ */
+export type ArtifactVerdict =
+  | 'done'
+  | 'missing'
+  | 'stale'
+  | 'running'
+  | 'unknown';
+
+/**
+ * One artifact: does it exist, what does its staleness verdict say, is a
+ * claim or status column saying someone is making it now. `'generating'` (the
+ * storyboard run holds the sequence) is not an opinion about the artifact —
+ * the plan's own processing overlay decides what that run owns.
+ */
+export function artifactVerdict(args: {
+  exists: boolean;
+  staleness?: ArtifactStaleness;
+  inFlight?: boolean;
+}): ArtifactVerdict {
+  const { exists, staleness, inFlight } = args;
+  if (staleness === 'updating' || inFlight) return 'running';
+  if (!exists) return 'missing';
+  if (staleness === 'stale') return 'stale';
+  if (staleness === 'unknown') return 'unknown';
+  return 'done';
+}
+
+export type PlanShot = {
+  id: string;
+  /** `usesStartFrame(shot, sequence)` — the mode is per shot. */
+  usesStartFrame: boolean;
+  /** Entities the shot's still (or reference-only clip) is rendered from. */
+  references: {
+    characterIds: readonly string[];
+    locationIds: readonly string[];
+    elementIds: readonly string[];
+  };
+  /** Characters whose lines in this shot are spoken by a voice. */
+  speakerIds: readonly string[];
+  /** Ignored on a reference-only shot. */
+  visualPrompt: ArtifactVerdict;
+  /** Ignored on a reference-only shot. */
+  still: ArtifactVerdict;
+  motionPrompt: ArtifactVerdict;
+  /** Null when the shot has no voiced lines and no recording. */
+  dialogue: ArtifactVerdict | null;
+  clip: ArtifactVerdict;
+};
+
+export type PlanInput = {
+  /** The storyboard run holds the sequence (`status === 'processing'`). */
+  processing: boolean;
+  /** The stop of the run in flight — its kinds read `running`. */
+  runStopAt: GenerationStage;
+  /** Characters that need a sheet (voice-only ones never do). */
+  characterSheets: ReadonlyArray<{ id: string; sheet: ArtifactVerdict }>;
+  locationSheets: ReadonlyArray<{ id: string; sheet: ArtifactVerdict }>;
+  elementRefs: ReadonlyArray<{ id: string; ref: ArtifactVerdict }>;
+  /** Speaking characters that use a voice. */
+  voices: ReadonlyArray<{ id: string; voice: ArtifactVerdict }>;
+  shots: readonly PlanShot[];
+  /** Null when the sequence has no scenes yet. */
+  music: { prompt: ArtifactVerdict; track: ArtifactVerdict } | null;
+};
+
+const key = (ref: PlanUnitRef) => `${ref.kind}:${ref.id}`;
+const ref = (kind: PlanUnitKind, id: string): PlanUnitRef => ({ kind, id });
+
+/** The sheets and element refs a shot is rendered from. */
+const sheetRefs = (shot: PlanShot): PlanUnitRef[] => [
+  ...shot.references.characterIds.map((id) => ref('sheet:character', id)),
+  ...shot.references.locationIds.map((id) => ref('sheet:location', id)),
+  ...shot.references.elementIds.map((id) => ref('ref:element', id)),
+];
+
+/**
+ * A shot's units and the requires graph over them: generation
+ * preconditions, distinct from the invalidation edges in
+ * `src/ui/docs/dependency-graph.ts` — what must exist before a unit can be
+ * generated. A null verdict means the shot has no such unit: a
+ * reference-only shot has no visual prompt or still, a silent one no
+ * dialogue. The rest of the graph is `music` ← `prompt:music`; sheets,
+ * element refs, voices and `prompt:music` hang off the root (the scenes).
+ */
+const SHOT_UNITS: ReadonlyArray<{
+  kind: PlanUnitKind;
+  verdict: (shot: PlanShot) => ArtifactVerdict | null;
+  requires: (shot: PlanShot) => PlanUnitRef[];
+}> = [
+  {
+    kind: 'prompt:visual',
+    verdict: (s) => (s.usesStartFrame ? s.visualPrompt : null),
+    requires: () => [],
+  },
+  {
+    kind: 'still',
+    verdict: (s) => (s.usesStartFrame ? s.still : null),
+    requires: (s) => [ref('prompt:visual', s.id), ...sheetRefs(s)],
+  },
+  {
+    kind: 'prompt:motion',
+    verdict: (s) => s.motionPrompt,
+    requires: (s) => (s.usesStartFrame ? [ref('still', s.id)] : []),
+  },
+  {
+    kind: 'dialogue',
+    verdict: (s) => s.dialogue,
+    requires: (s) => s.speakerIds.map((id) => ref('voice', id)),
+  },
+  {
+    kind: 'clip',
+    verdict: (s) => s.clip,
+    requires: (s) => [
+      ref('prompt:motion', s.id),
+      ...(s.usesStartFrame ? [ref('still', s.id)] : sheetRefs(s)),
+      ...(s.dialogue ? [ref('dialogue', s.id)] : []),
+    ],
+  },
+];
+
+type BaseUnit = PlanUnitRef & {
+  verdict: ArtifactVerdict;
+  upstream: PlanUnitRef[];
+};
+
+const rootUnit = (
+  kind: PlanUnitKind,
+  id: string,
+  verdict: ArtifactVerdict
+): BaseUnit => ({ kind, id, verdict, upstream: [] });
+
+/**
+ * Apply the requires graph to the live verdicts, in kind order so every
+ * upstream is settled before its dependents:
+ *
+ * - An upstream the plan will (re)make — `missing` / `stale` — turns a `done`
+ *   unit `stale`: a sheet in the plan puts its stills in the plan, the way
+ *   Update all's `cascadeFlags` does per shot.
+ * - An upstream that is `running` elsewhere or `blocked` turns a unit that
+ *   still has work (`missing` / `stale`) `blocked`: making it now would read
+ *   inputs that are about to move. A `done` unit keeps its artifact.
+ * - While the storyboard run holds the sequence, every unit with work up to
+ *   that run's stop is `running`.
+ */
+export function planUnits(input: PlanInput, sequenceId: string): PlanUnit[] {
+  const base: BaseUnit[] = [
+    ...input.characterSheets.map((c) =>
+      rootUnit('sheet:character', c.id, c.sheet)
+    ),
+    ...input.locationSheets.map((l) =>
+      rootUnit('sheet:location', l.id, l.sheet)
+    ),
+    ...input.elementRefs.map((e) => rootUnit('ref:element', e.id, e.ref)),
+    ...input.voices.map((v) => rootUnit('voice', v.id, v.voice)),
+    ...input.shots.flatMap((shot) =>
+      SHOT_UNITS.flatMap(({ kind, verdict, requires }) => {
+        const v = verdict(shot);
+        return v === null
+          ? []
+          : [{ kind, id: shot.id, verdict: v, upstream: requires(shot) }];
+      })
+    ),
+  ];
+  if (input.music) {
+    base.push(rootUnit('prompt:music', sequenceId, input.music.prompt), {
+      kind: 'music',
+      id: sequenceId,
+      verdict: input.music.track,
+      upstream: [ref('prompt:music', sequenceId)],
+    });
+  }
+  base.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+
+  const settled = new Map<string, PlanUnit>();
+  for (const unit of base) {
+    const self = ref(unit.kind, unit.id);
+    let result: PlanUnit;
+    if (unit.verdict === 'unknown') {
+      result = { ...self, state: 'blocked', blockedBy: [] };
+    } else {
+      let state: PlanUnitState = unit.verdict;
+      const upstream = unit.upstream.flatMap((up) => {
+        const found = settled.get(key(up));
+        return found ? [found] : [];
+      });
+      const holding = upstream.filter(
+        (up) => up.state === 'running' || up.state === 'blocked'
+      );
+      if ((state === 'missing' || state === 'stale') && holding.length > 0) {
+        result = {
+          ...self,
+          state: 'blocked',
+          blockedBy: holding.map((up) => ({ kind: up.kind, id: up.id })),
+        };
+      } else {
+        if (
+          state === 'done' &&
+          upstream.some((up) => up.state === 'missing' || up.state === 'stale')
+        ) {
+          state = 'stale';
+        }
+        result = { ...self, state };
+      }
+    }
+    // The run making the upstream is the run making this unit too: a
+    // cascade block inside its stop is its own work, not a wait. An
+    // uncomputable verdict (`blockedBy: []`) stays blocked.
+    const runBlocked =
+      result.state === 'blocked' && (result.blockedBy?.length ?? 0) > 0;
+    if (
+      input.processing &&
+      (result.state === 'missing' || result.state === 'stale' || runBlocked) &&
+      includesStage(input.runStopAt, PLAN_KIND_STAGE[result.kind])
+    ) {
+      result = { ...self, state: 'running' };
+    }
+    settled.set(key(self), result);
+  }
+  return [...settled.values()];
+}
+
+/** Units a run up to `stopAt` would make. */
+export function planWork(
+  plan: readonly PlanUnit[],
+  stopAt: GenerationStage
+): PlanUnit[] {
+  return plan.filter(
+    (unit) =>
+      (unit.state === 'missing' || unit.state === 'stale') &&
+      includesStage(stopAt, PLAN_KIND_STAGE[unit.kind])
+  );
+}
+
+/** The earliest stop with work, or null when the plan is finished. */
+export function firstStageWithWork(
+  plan: readonly PlanUnit[]
+): GenerationStage | null {
+  let first: GenerationStage | null = null;
+  for (const unit of planWork(plan, 'music')) {
+    const stage = PLAN_KIND_STAGE[unit.kind];
+    if (first === null || stageIndex(stage) < stageIndex(first)) first = stage;
+  }
+  return first;
+}

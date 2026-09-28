@@ -71,6 +71,7 @@ async function emitFundsUpdated(opts: {
   balance: Microdollars;
   reserved: Microdollars;
   available: Microdollars;
+  asOfMs: number;
   /** Signed ledger amount (negative for usage). Zero when only a hold changed. */
   amountMicros: Microdollars;
   transactionId?: string;
@@ -81,6 +82,7 @@ async function emitFundsUpdated(opts: {
     balanceUsd: microsToUsd(opts.balance),
     availableUsd: microsToUsd(opts.available),
     reservedUsd: microsToUsd(opts.reserved),
+    asOfMs: opts.asOfMs,
     amountUsd: microsToUsd(opts.amountMicros),
     ...(opts.transactionId != null && opts.type
       ? { transactionId: opts.transactionId, type: opts.type }
@@ -178,33 +180,51 @@ function createBillingReadMethods(db: Database, teamId: string) {
     return micros(row.balance);
   }
 
-  async function reservedSum(now = new Date()): Promise<Microdollars> {
-    const nowSeconds = Math.floor(now.getTime() / 1000);
-    const [row] = await db
-      .select({
-        total: sql<number>`coalesce(sum(${creditReservations.remainingAmount}), 0)`,
-      })
-      .from(creditReservations)
-      .where(
-        and(
-          eq(creditReservations.teamId, teamId),
-          sql`${creditReservations.remainingAmount} > 0`,
-          sql`${creditReservations.expiresAt} > ${nowSeconds}`
-        )
-      );
-    return micros(Number(row?.total ?? 0));
-  }
-
+  /**
+   * Posted balance, unexpired holds, and D1's clock at the read, in one
+   * batch so no write lands between them. `asOfMs` orders snapshots: D1
+   * serializes a database's statements, so a later read has a later clock
+   * whichever isolate took it (#1881).
+   */
   async function getAvailable(now = new Date()): Promise<{
     balance: Microdollars;
     reserved: Microdollars;
     available: Microdollars;
+    asOfMs: number;
   }> {
-    const balance = await getBalance();
-    const reserved = await reservedSum(now);
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    const [balanceRows, [held]] = await db.batch([
+      db
+        .select({ balance: credits.balance })
+        .from(credits)
+        .where(eq(credits.teamId, teamId))
+        .limit(1),
+      db
+        .select({
+          total: sql<number>`coalesce(sum(${creditReservations.remainingAmount}), 0)`,
+          asOfMs: sql<number>`cast(unixepoch('subsecond') * 1000 as integer)`,
+        })
+        .from(creditReservations)
+        .where(
+          and(
+            eq(creditReservations.teamId, teamId),
+            sql`${creditReservations.remainingAmount} > 0`,
+            sql`${creditReservations.expiresAt} > ${nowSeconds}`
+          )
+        ),
+    ]);
+    const balance = balanceRows[0]
+      ? micros(balanceRows[0].balance)
+      : await getBalance();
+    const reserved = micros(Number(held?.total ?? 0));
     const available =
       balance > reserved ? subtractMicros(balance, reserved) : ZERO_MICROS;
-    return { balance, reserved, available };
+    // A NaN would compare false both ways and turn ordering off unnoticed.
+    const asOfMs = Number(held?.asOfMs);
+    if (!Number.isFinite(asOfMs)) {
+      throw new Error(`D1 returned no clock for the balance read: ${asOfMs}`);
+    }
+    return { balance, reserved, available, asOfMs };
   }
 
   async function hasEnoughCredits(
@@ -295,6 +315,22 @@ function createBillingReadMethods(db: Database, teamId: string) {
     return existing;
   }
 
+  /** True once any credit_usage row exists (#1096). An existence check on
+   *  `idx_transactions_team_type_created` — never a `count(*)` (#1881). */
+  async function hasUsedCredits(): Promise<boolean> {
+    const [row] = await db
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.teamId, teamId),
+          eq(transactions.type, 'credit_usage')
+        )
+      )
+      .limit(1);
+    return !!row;
+  }
+
   /** True if this team already received the $20 welcome grant.
    *  Match idempotency key OR metadata.signupGrant: pre-#1516 rows have
    *  no key, so the key alone would miss them and double-pay. */
@@ -322,6 +358,7 @@ function createBillingReadMethods(db: Database, teamId: string) {
     hasEnoughCredits,
     getTransactionHistory,
     getBillingSettings,
+    hasUsedCredits,
     hasSignupGrant,
   };
 }

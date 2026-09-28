@@ -48,20 +48,23 @@ export const realtimeSchema = {
 
   // Team billing ledger updates (#1090). Channel `billing:${teamId}`; the
   // credit-balance pill subscribes only while visible so idle sessions pay no
-  // SSE cost. Payload is enough to patch the pill optimistically; clients also
-  // invalidate the balance + transactions queries.
+  // SSE cost. Payload is enough to patch the balance query; clients refetch it
+  // only when the payload cannot settle it (#1881), and always invalidate
+  // transactions.
   billing: {
     'balance:updated': z.object({
       teamId: z.string(),
       /** Posted ledger balance in USD. */
       balanceUsd: z.number(),
-      /**
-       * Spendable funds (posted minus unexpired holds). Additive so old
-       * clients keep using `balanceUsd` (#1310).
-       */
-      availableUsd: z.number().optional(),
+      /** Spendable funds (posted minus unexpired holds, #1310). */
+      availableUsd: z.number(),
       /** Sum of unexpired reservation remaining. */
-      reservedUsd: z.number().optional(),
+      reservedUsd: z.number(),
+      /**
+       * D1 clock (ms) when the snapshot was read. Events can arrive out of
+       * order; the client keeps the newest snapshot (#1881).
+       */
+      asOfMs: z.number(),
       /** Signed ledger amount in USD (negative for usage, positive for top-ups). */
       amountUsd: z.number(),
       /** Absent on hold-only snapshots (create/grow/zero). */
@@ -478,6 +481,10 @@ export type ReplaceElementCompletePayload = z.infer<
 >;
 export type ReplaceElementFailedPayload = z.infer<
   (typeof realtimeSchema.generation)['replace-element:failed']
+>;
+
+export type BalanceUpdatedPayload = z.infer<
+  (typeof realtimeSchema.billing)['balance:updated']
 >;
 
 /** Every dotted event path declared in `realtimeSchema`. */

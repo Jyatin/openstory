@@ -213,6 +213,51 @@ describe('deductCredits without an idempotencyKey (keyless path)', () => {
   });
 });
 
+describe('hasUsedCredits (#1881)', () => {
+  it('is false until a credit_usage row exists, for this team only', async () => {
+    const billing = createBillingMethods(db, teamId, userId);
+    await billing.addCredits(micros(1_000_000), {
+      type: 'credit_adjustment',
+      description: 'seed',
+    });
+    expect(await billing.hasUsedCredits()).toBe(false);
+
+    await billing.deductCredits(micros(1_000_000));
+    expect(await billing.hasUsedCredits()).toBe(true);
+
+    const otherTeamId = generateId();
+    await db.insert(teams).values({ id: otherTeamId, name: 'O', slug: 'o' });
+    expect(
+      await createBillingMethods(db, otherTeamId, userId).hasUsedCredits()
+    ).toBe(false);
+  });
+});
+
+describe('getAvailable asOfMs (#1881)', () => {
+  it('stamps each snapshot with the database clock, never going back', async () => {
+    const billing = createBillingMethods(db, teamId, userId);
+    const first = await billing.getAvailable();
+    await billing.deductCredits(micros(1_000_000));
+    const second = await billing.getAvailable();
+    // The database clock, not a constant: within a minute of now.
+    expect(Math.abs(first.asOfMs - Date.now())).toBeLessThan(60_000);
+    expect(second.asOfMs).toBeGreaterThanOrEqual(first.asOfMs);
+    expect(second.balance).toBe(STARTING_BALANCE - 1_000_000);
+  });
+
+  it('reads a team with no credits row as zero', async () => {
+    const otherTeamId = generateId();
+    await db.insert(teams).values({ id: otherTeamId, name: 'O', slug: 'o' });
+    const funds = await createBillingMethods(
+      db,
+      otherTeamId,
+      userId
+    ).getAvailable();
+    expect(funds.balance).toBe(0);
+    expect(funds.available).toBe(0);
+  });
+});
+
 describe('createReservation / captureReservation / zeroReservation (#1310)', () => {
   const cost = micros(1_000_000); // $1
 

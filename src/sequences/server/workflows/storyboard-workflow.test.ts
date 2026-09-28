@@ -315,15 +315,13 @@ describe('StoryboardWorkflow stop-at + resume (#1408)', () => {
     return { ...db, names };
   };
 
-  test('a fresh run wipes shots and the stale checkpoint', async () => {
+  test('a fresh run wipes shots', async () => {
     const { deleteBySequence, update, names } = await run({ stopAt: 'music' });
 
     expect(deleteBySequence).toHaveBeenCalledWith('seq_1');
     expect(update).toHaveBeenCalledWith({
       id: 'seq_1',
       generationStopAt: 'music',
-      pipelineStage: null,
-      generationCheckpoint: null,
     });
     expect(names).toContain('generate-poster');
   });
@@ -340,7 +338,7 @@ describe('StoryboardWorkflow stop-at + resume (#1408)', () => {
     );
   });
 
-  test('a resume keeps shots, checkpoint and poster', async () => {
+  test('a resume keeps shots and poster', async () => {
     const { deleteBySequence, update, names } = await run({
       stopAt: 'images',
       resume: true,

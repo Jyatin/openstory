@@ -40,10 +40,7 @@ import type {
   MusicStatus,
   SequenceStatus,
 } from '@/platform/server/db/schema/sequences';
-import type {
-  GenerationCheckpoint,
-  GenerationStage,
-} from '@/sequences/pipeline';
+import type { GenerationStage } from '@/sequences/pipeline';
 import { parseStyleConfig } from '@/look/style-config';
 import type { ShotReadiness, ShotView } from '@/shots/shot-view';
 import { getLatestPreviewByFrameIds } from '@/stills/server/db/frame-variants';
@@ -88,8 +85,15 @@ import {
 import { generateId } from '@/platform/id';
 
 // The row's own columns: the legacy snapshot is read only through the fallback.
-const { legacyStyleConfig: _legacyStyleConfig, ...sequenceRecordColumns } =
-  getTableColumns(sequences);
+// `pipelineStage` / `generationCheckpoint` are never selected (#1819): the
+// follow-up drop migration runs before its worker deploys, so this worker must
+// not name them.
+const {
+  legacyStyleConfig: _legacyStyleConfig,
+  pipelineStage: _pipelineStage,
+  generationCheckpoint: _generationCheckpoint,
+  ...sequenceRecordColumns
+} = getTableColumns(sequences);
 
 /**
  * Sequence columns with the style snapshot resolved from the selected
@@ -605,8 +609,6 @@ export function createSequencesMethods(
       autoGenerateMotion?: boolean;
       autoGenerateMusic?: boolean;
       generationStopAt?: GenerationStage | null;
-      pipelineStage?: GenerationStage | null;
-      generationCheckpoint?: GenerationCheckpoint | null;
       /**
        * Continue-from before Images (#1698): the create-time default can
        * still change because no stills exist yet. The general

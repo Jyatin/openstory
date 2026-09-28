@@ -13,10 +13,7 @@ import { user } from './auth';
 // shots.ts imports sequences for foreign key reference
 import { styles } from './libraries';
 import { teams } from './teams';
-import type {
-  GenerationCheckpoint,
-  GenerationStage,
-} from '@/sequences/pipeline';
+import type { GenerationStage } from '@/sequences/pipeline';
 import type { StoredStyleConfig } from '@/look/style-config';
 
 // Enum values as constants (SQLite doesn't have native enums)
@@ -208,12 +205,18 @@ export const sequences = snakeCase.table(
     autoGenerateMotion: integer({ mode: 'boolean' }).default(false).notNull(),
     autoGenerateMusic: integer({ mode: 'boolean' }).default(false).notNull(),
 
-    // How far the current/last run was asked to go, and how far it actually
-    // got. Checkpoint holds in-memory DAG state (bibles, matches) that is
-    // not yet in character/location rows, so a stopped run can resume.
+    // How far the current/last run was asked to go. How far it got is not
+    // stored: what is left is the generation plan, derived from live rows
+    // (#1816, #1819).
     generationStopAt: text().$type<GenerationStage>(),
+    // Unread and unwritten since #1819, and left out of every select
+    // (`sequenceColumns`) so the follow-up drop migration, which runs before
+    // its deploy, does not break this worker's reads. They stay here only
+    // because schema and snapshot must agree. Inserts still name them, so a
+    // sequence created in the seconds between that migration and that deploy
+    // fails.
     pipelineStage: text().$type<GenerationStage>(),
-    generationCheckpoint: text({ mode: 'json' }).$type<GenerationCheckpoint>(),
+    generationCheckpoint: text(),
 
     // Suggested talent/location IDs used during generation (for pre-populating the UI)
     suggestedTalentIds: text({
@@ -239,7 +242,10 @@ export type SequenceRecord = InferSelectModel<typeof sequences>;
  * A sequence with its style snapshot resolved from the selected
  * `sequence_style_versions` row (#1600). What every scoped read returns.
  */
-export type Sequence = Omit<SequenceRecord, 'legacyStyleConfig'> & {
+export type Sequence = Omit<
+  SequenceRecord,
+  'legacyStyleConfig' | 'pipelineStage' | 'generationCheckpoint'
+> & {
   styleConfig: StoredStyleConfig | null;
 };
 

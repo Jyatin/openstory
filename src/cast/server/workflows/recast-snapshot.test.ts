@@ -116,6 +116,7 @@ const SHOT: Shot = {
   durationMs: 3000,
   useStartFrame: null,
   selectedMotionPromptVersionId: null,
+  selectedSpecVersionId: null,
   audioClips: null,
   renderSegmentId: null,
   deletedAt: null,

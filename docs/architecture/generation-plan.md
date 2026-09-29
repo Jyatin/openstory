@@ -117,9 +117,9 @@ generateVoices, draftMotion }` — no `startFrom`.
    references wave first (sheets, element references, voices — each claimed
    in the run), then the per-shot jobs (prompts, stills, dialogue, clips)
    and music. A reference that fails holds the stills and clips made from it
-   (`PlanTarget.referenceIds`) and fails nothing else. Multi-shot shots that
-   owe a prompt get the per-shot LLM prompt: the shot-list specs a fresh run
-   derives from are not stored.
+   (`PlanTarget.referenceIds`) and fails nothing else. A shot that owes a
+   prompt still gets the per-shot LLM prompt until Rewrite shot lands
+   (#1915 part 2); its saved spec is not read yet.
 
 Scenes and shots edited, added or deleted during a stop reach the continue:
 every unit is materialised per shot from D1 at the click.
@@ -286,8 +286,11 @@ rendering. Missing first character sheets reuse a compatible matched talent
 sheet, with zero generation cost; explicit regeneration still renders the edit.
 Voice-only cast never owes a sheet.
 
-The shot-list specification remains ephemeral. Analysis persists its derived
-visual and motion directions as ordinary first prompt versions. Motion source
+Analysis persists each shot's spec as its first `shot_spec_versions` row
+(#1915), and the visual and motion directions derived from it as ordinary
+first prompt versions that record its `specVersionId`. Every shot takes this
+path, one-shot scenes included (#1919): a fresh run makes no per-shot prompt
+LLM call. Motion source
 `derived` hashes the inputs derivation consumed, excluding a starting still;
 the first still therefore does not invalidate it or add a still prerequisite.
 Scene and style changes still invalidate it. Later LLM regeneration uses saved

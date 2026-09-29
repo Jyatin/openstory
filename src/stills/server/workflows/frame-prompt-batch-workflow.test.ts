@@ -40,6 +40,7 @@ function spec(shotNumber: number, action: string): ShotSpec {
     },
     action,
     cameraMovement: { move: 'static', pacing: 'slow' },
+    direction: '',
     soundCue: '',
     dialogue: [],
     durationSeconds: 5,
@@ -80,7 +81,7 @@ class Probe extends FramePromptBatchWorkflow {
 }
 
 describe('FramePromptBatchWorkflow multi-shot scenes (#1517)', () => {
-  test('LLM-authors the 1-shot scene only', async () => {
+  test('LLM-authors only the scene with no shot list (#1919)', async () => {
     spawnAndAwaitChild.mockReset();
     spawnAndAwaitChild.mockImplementation(
       (_step: unknown, args: { childId: string }) =>
@@ -95,7 +96,7 @@ describe('FramePromptBatchWorkflow multi-shot scenes (#1517)', () => {
       teamId: 't1',
       sequenceId: 'seq_1',
       scenes: [
-        scene('scene_1', [spec(1, 'looks up')]),
+        scene('scene_1'),
         scene('scene_2', [spec(1, 'opens the door'), spec(2, 'walks in')]),
       ],
       aspectRatio: '16:9',

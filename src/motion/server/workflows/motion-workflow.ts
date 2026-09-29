@@ -788,7 +788,10 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
           promptType: 'motion',
           text,
           audio,
-          source: provenance.derived ? 'derived' : source,
+          // A rescue rewrote the text, so it is no longer built from a spec.
+          ...(provenance.derived
+            ? { source: 'derived' as const, specVersionId: null }
+            : { source }),
           usesStartFrame: !input.referenceOnly,
           inputHash: provenance.inputHash,
           analysisModel: provenance.analysisModel,

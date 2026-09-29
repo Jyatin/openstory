@@ -32,9 +32,9 @@
  *
  * ## Model-agnostic
  *
- * The analysis annotates a shot list with framing, one action, exactly one
- * camera move (paired with a pacing adverb), a sound cue, the lines spoken
- * in the shot (#1585) and a duration. It
+ * The analysis annotates a shot list with framing, one action, a camera
+ * move (which may chain motions) with its pacing, a direction note, a sound
+ * cue, the lines spoken in the shot (#1585) and a duration. It
  * never emits vendor-specific syntax (Seedance/Kling/etc.) — the render layer
  * (#910 / #953) adapts per model capability.
  *
@@ -118,12 +118,13 @@ const shotFramingSchema = z.object({
 });
 
 /**
- * Camera movement — EXACTLY ONE move, paired with a pacing adverb. Never
- * stacked (no "pan then dolly"). Feeds the motion prompt.
+ * Camera movement (#1915). Free text: a move may combine or chain motions
+ * ("arc around the actor, then follow as she runs"), which video models
+ * follow in order within one clip. Feeds the motion prompt.
  */
 const shotCameraMovementSchema = z.object({
-  move: z.string().meta({ description: 'The single camera move' }),
-  pacing: z.enum(['slow', 'smooth', 'gradual']),
+  move: z.string().meta({ description: 'Camera move, in order' }),
+  pacing: z.string().meta({ description: 'Pace of the move' }),
 });
 
 /**
@@ -140,8 +141,8 @@ const shotDialogueLineSchema = z.object({
 
 /**
  * One structured shot. Carries exactly what a real shot-list entry has:
- * framing/start-state, one primary action, one camera move, a sound cue, the
- * lines spoken in it and a duration. Visual + motion prompts are DERIVED from
+ * framing/start-state, one primary action, a camera move, a direction note, a
+ * sound cue, the lines spoken in it and a duration. Visual + motion prompts are DERIVED from
  * these fields plus the parent scene's shared context (see
  * `shot-list.derive.ts`).
  */
@@ -150,6 +151,7 @@ export const shotSpecSchema = z.object({
   framing: shotFramingSchema,
   action: z.string().meta({ description: 'The ONE primary action' }),
   cameraMovement: shotCameraMovementSchema,
+  direction: z.string().meta({ description: 'Direction note, empty if none' }),
   soundCue: z.string().meta({ description: 'SFX/ambience, empty if none' }),
   dialogue: z.array(shotDialogueLineSchema).meta({
     description: 'Lines spoken in this shot, in order',
@@ -160,6 +162,27 @@ export const shotSpecSchema = z.object({
 });
 
 export type ShotSpec = z.infer<typeof shotSpecSchema>;
+
+/**
+ * The part of a spec stored on `shot_spec_versions` (#1915). Shot number,
+ * duration and lines already have one home each (`shots.shotNumber`,
+ * `shots.durationMs`, `shot_dialogue_versions`), so they are not copied here.
+ */
+export type StoredShotSpec = Omit<
+  ShotSpec,
+  'shotNumber' | 'durationSeconds' | 'dialogue'
+>;
+
+/** Drop the fields that live elsewhere; the rest is what a version stores. */
+export function storedShotSpec(spec: ShotSpec): StoredShotSpec {
+  return {
+    framing: spec.framing,
+    action: spec.action,
+    cameraMovement: spec.cameraMovement,
+    direction: spec.direction,
+    soundCue: spec.soundCue,
+  };
+}
 
 // ============================================================================
 // Scene with shots

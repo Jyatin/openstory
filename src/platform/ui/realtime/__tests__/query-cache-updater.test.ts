@@ -60,6 +60,7 @@ function makeShot(
     durationMs: 3000,
     useStartFrame: null,
     selectedMotionPromptVersionId: null,
+    selectedSpecVersionId: null,
     audioClips: null,
     renderSegmentId: 'seg-1',
     deletedAt: null,

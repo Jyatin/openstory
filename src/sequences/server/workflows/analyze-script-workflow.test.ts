@@ -180,6 +180,10 @@ const writeVisualPrompt = vi.fn(
   })
 );
 
+const writeSpec = vi.fn(async (input: { shotId: string }) => ({
+  id: `spec-${input.shotId}`,
+}));
+
 const writeMotionPrompt = vi.fn(
   async (_input: {
     shotId: string;
@@ -197,7 +201,8 @@ function makeScopedDb(update: UpdateMock): WorkflowScopedDb {
       updateAnalysisDurationMs: vi.fn(async () => undefined),
     },
     liveRead: { sequenceElements: { listByIds: vi.fn(async () => []) } },
-    framePromptVersions: { writeAiVersion: writeVisualPrompt },
+    shotSpecVersions: { write: writeSpec },
+    framePromptVersions: { write: writeVisualPrompt },
     shotPromptVersions: { write: writeMotionPrompt },
   } as unknown as WorkflowScopedDb;
 }
@@ -310,7 +315,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
     }
   );
 
-  test('derived visual prompts stamp the verify hash, not the prompt text', async () => {
+  test('derived prompts record their spec and stamp the verify hash, not the text', async () => {
     const twoShot: Scene = {
       sceneId: 'as_1',
       sceneNumber: 1,
@@ -340,6 +345,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
           },
           action: 'opens the door',
           cameraMovement: { move: 'static', pacing: 'slow' },
+          direction: '',
           soundCue: '',
           dialogue: [],
           durationSeconds: 7,
@@ -354,6 +360,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
           },
           action: 'cut to the hallway',
           cameraMovement: { move: 'truck', pacing: 'smooth' },
+          direction: '',
           soundCue: '',
           dialogue: [],
           durationSeconds: 6,
@@ -430,9 +437,14 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
       });
       expect(written.inputHash).toBe(verifyHash);
       expect(written.inputHash).not.toBe(textDigest);
+      expect(written).toMatchObject({
+        source: 'derived',
+        specVersionId: `spec-${item.mapping.shotId}`,
+      });
       expect(writeMotionPrompt.mock.calls[index]?.[0]).toMatchObject({
         shotId: item.mapping.shotId,
         source: 'derived',
+        specVersionId: `spec-${item.mapping.shotId}`,
         inputHash: await hashMotionPromptInput(
           narrowShotPromptContext({
             scene: item.scene,

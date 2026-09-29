@@ -985,7 +985,7 @@ In framing.subjectStartState and framing.composition, name every character actua
 ## Rules
 
 1. Each scene's \`shots:\` line is its budget. "exactly N" means the scene's length only fits N shots on this model's clip grid — emit exactly N. "up to N" means 1..N; prefer fewer, and a short scene with one action is usually one shot. "N to M" means at least N: the scene is longer than N-1 clips can hold, so cover it in N or more setups — never fewer.
-2. Each shot has: one primary action, exactly one camera move (never stacked), a pacing adverb (slow, smooth, or gradual), framing and subject start-state, an optional sound cue (empty string when none), and durationSeconds as a relative pacing hint (longer take = larger number). A scene's running time is its \`duration:\` line; the system divides it across the scene's shots — do not try to make the seconds add up.
+2. Each shot has: one primary action, a camera move with its pacing, framing and subject start-state, an optional direction note and sound cue (empty string when none), and durationSeconds as a relative pacing hint (longer take = larger number). A scene's running time is its \`duration:\` line; the system divides it across the scene's shots — do not try to make the seconds add up.
 3. Match camera move and framing to the style (handheld vs locked, wide vs insert, slow push vs static).
 4. sceneNumber MUST match the "## Scene N" heading you were given. Shot 1 is the opening take; later shots follow in story order.
 5. Do not invent vendor syntax (no Seedance/Kling tokens). Do not invent scenes that were not in the input.
@@ -1010,8 +1010,9 @@ The schema is terse; this is what each field holds.
 - framing.composition — how the frame is built: rule-of-thirds placement, depth, foreground/background, focal point.
 - framing.subjectStartState — the subject at the START of the shot: pose, position, expression, what they hold. This is the still the start frame captures.
 - action — the ONE thing that happens during the shot (e.g. "she turns and reaches for the door handle"). One action per shot.
-- cameraMovement.move — the single primary move: static, pan, tilt, dolly, truck, pedestal, zoom, push-in, pull-out, orbit. Never stacked ("pan then dolly" is two shots or one move).
-- cameraMovement.pacing — slow, smooth, or gradual. Fast moves make video models chaotic; keep it calm.
+- cameraMovement.move — the camera's move through the take, in order. Usually one of: static, pan, tilt, dolly, truck, pedestal, zoom, push-in, pull-out, orbit, arc, follow, handheld drift. A take may combine or chain motions when the action calls for it ("arc around her, then follow as she runs") — video models follow ordered moves within one clip.
+- cameraMovement.pacing — the pace of the move, in a few words ("slow", "smooth", "accelerating into the turn"). Match the style's energy.
+- direction — a short director's note on intent or performance for this take (e.g. "hold on her silence before she answers"). Empty string when none.
 - soundCue — the on-screen SFX / ambience hook for audio-capable models (e.g. "door creak, distant traffic"). Empty string when none.
 - dialogue — the lines spoken during this shot, in order, as described above. Empty array when none.
 - durationSeconds — a relative pacing hint in seconds. Longer take = larger number; the system divides the scene's duration across its shots on the video model's clip grid.`,

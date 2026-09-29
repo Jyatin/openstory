@@ -212,10 +212,12 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
         frameId: context.frame.id,
         text: frameChosen.text,
         components: frameChosen.components,
-        source: 'restored',
         inputHash: frameChosen.inputHash,
         analysisModel: frameChosen.analysisModel,
         createdBy: context.user.id,
+        ...(frameChosen.source === 'derived'
+          ? { source: 'derived', specVersionId: frameChosen.specVersionId }
+          : { source: 'restored' }),
       });
       return { variantId: inserted.id };
     }
@@ -238,11 +240,13 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
       components: chosen.components,
       parameters: chosen.parameters,
       audio: chosen.audio,
-      source: chosen.source === 'derived' ? 'derived' : 'restored',
       usesStartFrame: chosen.usesStartFrame,
       inputHash: chosen.inputHash,
       analysisModel: chosen.analysisModel,
       createdBy: context.user.id,
+      ...(chosen.source === 'derived'
+        ? { source: 'derived', specVersionId: chosen.specVersionId }
+        : { source: 'restored' }),
     });
     return { variantId: inserted.id };
   });

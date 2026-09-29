@@ -73,6 +73,9 @@ export const framePromptVersions = snakeCase.table(
     components: text({ mode: 'json' }).$type<VisualPromptComponents>(),
 
     source: text().$type<PromptVersionSource>().notNull(),
+    // The `shot_spec_versions` row this text was derived from (#1915). Null
+    // for text that was not derived from a spec (an LLM or a user wrote it).
+    specVersionId: text(),
 
     // SHA-256 of the upstream context that produced an AI prompt; null for
     // user-edits since they have no upstream input surface.

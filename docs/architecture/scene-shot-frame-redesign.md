@@ -142,6 +142,21 @@ Symmetry that justifies keeping the motion prompt here (not "shot versions"):
 A shot is a structural container, not a generated artifact — so we version its
 _inputs_ (prompt) and _outputs_ (video) separately, never the container.
 
+### Shot specs (#1915)
+
+`shot_spec_versions` holds a shot's structured spec — framing (shot size,
+angle, composition, subject start state), action, camera move, pacing,
+direction and sound cue — append-only, selected by
+`shots.selectedSpecVersionId`. Shot number, duration and lines are not in it:
+they already live on `shots` and `shot_dialogue_versions`. Analysis writes
+v1 for every shot. A still or motion prompt version derived from a spec
+(`source: 'derived'`) records `specVersionId`, so framing is stored once.
+Text is derived when the version is written (`deriveStillPrompt`,
+`deriveMotionPrompt` in `src/shots/shot-list.derive.ts`), never at render
+time. `move` and `pacing` are free text: a move may chain motions ("arc
+around the actor, then follow as she runs"). A shot from before specs has no
+row and keeps its text as written.
+
 ### Video variants + the 15s constraint _(Phase 3)_
 
 Render models cap a single render at **15s** (multi-shot included). Scenes are

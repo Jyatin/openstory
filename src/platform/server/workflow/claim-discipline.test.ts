@@ -160,6 +160,9 @@ const EXCEPTIONS: Record<string, string> = {
   // selection by design — its output IS the new source. User edits append.
   scene_script_versions: 'authored; re-analysis replaces by design',
   shot_dialogue_versions: 'authored; re-analysis replaces by design',
+  // Shot specs (#1915): analysis seeds v1 in the run that creates the shot.
+  // Rewrite shot, the async generation into it, takes a claim when it lands.
+  shot_spec_versions: 'authored; analysis seeds v1, re-analysis replaces',
   // Bible history (#1600): authored, not generated. Analysis, a person's
   // edit and a recast each append; nothing is generated into it async.
   character_bible_versions: 'authored; analysis and edits append',
@@ -180,20 +183,24 @@ const UNCLAIMED_WRITERS: readonly ScopedMethod[] = [
   'framePromptVersions.writeAiVersion',
   'shotPromptVersions.write',
   'shotPromptVersions.writeAiVersion',
+  'shotSpecVersions.write',
   'characters.updateVoice',
   'locations.updateReference',
 ];
 const UNCLAIMED_CALL_SITES: Record<string, string> = {
   // The pipeline's prompt passes take no claim: their output is selected,
   // superseding a user override (which stays in history).
-  'src/sequences/server/workflows/analyze-script-workflow.ts: framePromptVersions.writeAiVersion':
-    'pipeline: derived prompts selected, no claim',
   'src/stills/server/workflows/frame-prompt-workflow.ts: framePromptVersions.writeAiVersion':
     'run with no targetVersionId (pipeline) selects, no claim',
   'src/motion/server/workflows/motion-prompt-workflow.ts: shotPromptVersions.writeAiVersion':
     'run with no targetVersionId (pipeline) selects, no claim',
-  'src/sequences/server/workflows/analyze-script-workflow.ts: shotPromptVersions.write':
-    'analysis persists first derived directions, no claim',
+  // Analysis seeds each new shot's spec and the prompts derived from it.
+  'src/shots/server/persist-shot-spec.ts: shotSpecVersions.write':
+    'analysis seeds spec v1, no claim',
+  'src/shots/server/persist-shot-spec.ts: framePromptVersions.write':
+    'analysis persists first derived still prompt, no claim',
+  'src/shots/server/persist-shot-spec.ts: shotPromptVersions.write':
+    'analysis persists first derived motion prompt, no claim',
   // A run queued before #1786 carries the user's typed edit (drain path);
   // the other write in motion-workflow passes `select: false`.
   'src/stills/server/workflows/image-workflow.ts: framePromptVersions.write':
@@ -233,6 +240,8 @@ const WORKFLOW_SOURCES = [
   ),
   // A workflow-step helper, not a workflow (#1651, #1657).
   'src/motion/server/record-dialogue.ts',
+  // Analysis's spec-and-prompts step (#1915).
+  'src/shots/server/persist-shot-spec.ts',
 ].sort();
 
 describe('claim discipline (#1130)', () => {

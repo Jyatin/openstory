@@ -86,6 +86,7 @@ function makeShot(overrides: Partial<Shot> = {}): Shot {
     shotNumber: 1,
     durationMs: 3000,
     selectedMotionPromptVersionId: null,
+    selectedSpecVersionId: null,
     audioClips: null,
     useStartFrame: null,
     renderSegmentId: null,

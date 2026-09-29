@@ -15,7 +15,7 @@
 import { contentRejectionSummary } from '@/models/content-rejection';
 import type { Scene, VisualPrompt } from '@/shots/scene-analysis.schema';
 import {
-  derivedShotForItem,
+  shotSpecForItem,
   sceneForShot,
   shotWorkItems,
 } from '@/shots/server/shot-work-items';
@@ -66,12 +66,12 @@ export class FramePromptBatchWorkflow extends OpenStoryWorkflowEntrypoint<FrameP
 
     const visualPromptSceneBinding = this.env.FRAME_PROMPT_WORKFLOW;
 
-    // A 2+ shot scene assembles every clip's prompt from its shot-list spec
-    // (#1517) — analyze-script persists those; the LLM only authors 1-shot
-    // scenes, so those stay byte-identical.
+    // A shot with a shot-list spec takes its prompts from it (#1915, #1919);
+    // analyze-script persists those. The LLM authors only scenes composed
+    // from D1, which carry no spec.
     const derivedSceneIds = new Set(
       shotWorkItems(scenes, shotMapping)
-        .filter((item) => derivedShotForItem(item, styleConfig))
+        .filter((item) => shotSpecForItem(item))
         .map((item) => item.scene.sceneId)
     );
     const llmScenes = scenes.filter(

@@ -115,11 +115,11 @@ flowchart TD
     locmatch --> lbib["location-bible-workflow<br/>persists locations<br/>→ location-sheet ⊟"]
     split --> elem["element-sheet-workflow ⊟<br/>auto-detected elements"]
 
-    split --> vprompt["frame-prompt-batch-workflow ⊟<br/>per 1-shot scene → prompts.visual<br/>(narrows bible by scene continuity)"]
-    split --> dvprompt["persist-derived-visual-prompts ⊟<br/>every clip of a 2+ shot scene (#1517)<br/>assembled, no LLM child"]
+    split --> vprompt["frame-prompt-batch-workflow ⊟<br/>regenerate of a scene with no spec → prompts.visual<br/>(narrows bible by scene continuity)"]
+    split --> dvprompt["persist-shot-specs ⊟<br/>every shot's spec v1 + derived prompts (#1915, #1919)<br/>assembled, no LLM child"]
 
     vprompt --> mmprompt["motion-music-prompts-workflow<br/>snaps duration"]
-    mmprompt --> mprompt["motion-prompt-workflow ⊟<br/>→ prompts.motion (1-shot)"]
+    mmprompt --> mprompt["motion-prompt-workflow ⊟<br/>→ prompts.motion (regenerate)"]
     mmprompt --> dmprompt["motion-prompt-batch-workflow ⊟<br/>derived-shot motion (2+ shots)"]
     mmprompt --> musicp["music-prompt-workflow<br/>→ sequence musicDesign + prompt"]
 
@@ -143,8 +143,11 @@ flowchart TD
 
 The two prompt artifacts this issue is about — **`prompts.visual`** and
 **`prompts.motion`** — sit in the middle. Each has **two** stamp sites: the LLM
-child for a 1-shot scene, and the assembled derived path for every clip of a 2+
-shot scene (#1517). Both must hash the same bible (#1732).
+child used by regenerate, and the derived path analysis writes for every shot
+from its spec (#1517, #1915, #1919). Both must hash the same bible (#1732). A
+derived version records the `shot_spec_versions` row it was built from; the
+spec is not a hash input yet — it gains one when a spec can change after
+analysis (#1915 part 2).
 
 > **Ordering detail (inconsistency C below):** the frame-prompt batch and
 > `character-bible-workflow` are still spawned **in parallel** in Phase 3 of
@@ -306,17 +309,17 @@ Source of truth: [`src/shots/input-hash.ts`](../../src/shots/input-hash.ts).
 
 Listed in generation order (matching §4.1):
 
-| Artifact                      | Stamp site                                                                                                               | Verify site                                              | Hashed inputs                                                                                                                                         |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Talent sheet** (library)    | `library-talent-sheet-workflow`                                                                                          | none (no talent staleness check)                         | talent description, referenceMediaHashes (sorted set), imageModel                                                                                     |
-| **Character sheet**           | `character-sheet-workflow`                                                                                               | `readReferenceStaleness`                                 | character bible fields, talentSheetHash, cast talent (description, default sheet image + look), styleConfigHash, imageModel                           |
-| **Location sheet**            | `location-sheet-workflow`                                                                                                | `readReferenceStaleness`                                 | every location bible field the sheet prompt reads, libraryLocationReferenceHash, styleConfigHash, imageModel                                          |
-| **Visual prompt**             | `frame-prompt-workflow.ts` (1-shot) · `persist-derived-visual-prompts` in `analyze-script-workflow.ts` (2+ shots, #1517) | `computeShotStaleness`                                   | scene input surface, styleConfig, character/location/element bibles (narrowed, **cast**), aspectRatio, analysisModel, `PROMPT_INPUT_HASH_VERSION`     |
-| **Motion prompt**             | `motion-prompt-workflow.ts` · `motion-prompt-batch-workflow.ts` (derived)                                                | `computeShotStaleness`                                   | _same as visual_, plus starting-frame URL and `referenceOnly`. Voice ids are **not** a prompt channel.                                                |
-| **Sequence music prompt**     | `music-prompt-workflow`                                                                                                  | `readMusicPromptStaleness`                               | sceneSummaries, analysisModel                                                                                                                         |
-| **Thumbnail / variant image** | `shot-images-workflow.ts` / `image-workflow-snapshot.ts`                                                                 | `computeShotStaleness` via the regenerate-shots snapshot | effective visual prompt text, imageModel, aspectRatio, size, seed, characterSheetHashes, locationSheetHashes, elementReferenceHashes                  |
-| **Shot video**                | `motion-workflow*`                                                                                                       | pointer compare in `src/shots/scene-segments.ts`         | manifest pointers (motion-prompt / frame version ids, `usesStartFrame`, durationMs, `audioClipIds`, `audioSourceKey`, `dialogueKey`, `referenceKeys`) |
-| **Sequence music track**      | `music-workflow`                                                                                                         | `musicTrackStaleness`                                    | music prompt text, tags, durationSeconds (clamped), audioModel                                                                                        |
+| Artifact                      | Stamp site                                                                                                         | Verify site                                              | Hashed inputs                                                                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Talent sheet** (library)    | `library-talent-sheet-workflow`                                                                                    | none (no talent staleness check)                         | talent description, referenceMediaHashes (sorted set), imageModel                                                                                     |
+| **Character sheet**           | `character-sheet-workflow`                                                                                         | `readReferenceStaleness`                                 | character bible fields, talentSheetHash, cast talent (description, default sheet image + look), styleConfigHash, imageModel                           |
+| **Location sheet**            | `location-sheet-workflow`                                                                                          | `readReferenceStaleness`                                 | every location bible field the sheet prompt reads, libraryLocationReferenceHash, styleConfigHash, imageModel                                          |
+| **Visual prompt**             | `frame-prompt-workflow.ts` (regenerate) · `persist-shot-specs` in `analyze-script-workflow.ts` (every shot, #1915) | `computeShotStaleness`                                   | scene input surface, styleConfig, character/location/element bibles (narrowed, **cast**), aspectRatio, analysisModel, `PROMPT_INPUT_HASH_VERSION`     |
+| **Motion prompt**             | `motion-prompt-workflow.ts` · `motion-prompt-batch-workflow.ts` (derived)                                          | `computeShotStaleness`                                   | _same as visual_, plus starting-frame URL and `referenceOnly`. Voice ids are **not** a prompt channel.                                                |
+| **Sequence music prompt**     | `music-prompt-workflow`                                                                                            | `readMusicPromptStaleness`                               | sceneSummaries, analysisModel                                                                                                                         |
+| **Thumbnail / variant image** | `shot-images-workflow.ts` / `image-workflow-snapshot.ts`                                                           | `computeShotStaleness` via the regenerate-shots snapshot | effective visual prompt text, imageModel, aspectRatio, size, seed, characterSheetHashes, locationSheetHashes, elementReferenceHashes                  |
+| **Shot video**                | `motion-workflow*`                                                                                                 | pointer compare in `src/shots/scene-segments.ts`         | manifest pointers (motion-prompt / frame version ids, `usesStartFrame`, durationMs, `audioClipIds`, `audioSourceKey`, `dialogueKey`, `referenceKeys`) |
+| **Sequence music track**      | `music-workflow`                                                                                                   | `musicTrackStaleness`                                    | music prompt text, tags, durationSeconds (clamped), audioModel                                                                                        |
 
 Two cross-cutting normalizations make the hash order-insensitive and
 default-stable:
@@ -922,8 +925,8 @@ Ordered by value / risk. **1, 2, 4 and 5 shipped; 3 is still open** (see C).
 | Prompt context load + narrowing          | `src/shots/server/prompt-context.ts`                                                                                |
 | Bible builders (DB → bible, verify side) | `src/cast/server/bibles-from-scoped.ts`                                                                             |
 | Casting transform                        | `src/cast/character-prompt.ts` (`buildCastingAttributes`, `buildCastCharacterBible`)                                |
-| Visual prompt stamp — 1-shot scene       | `src/stills/server/workflows/frame-prompt-workflow.ts` (fanned out by `frame-prompt-batch-workflow.ts`)             |
-| Visual prompt stamp — derived (2+ shots) | `src/sequences/server/workflows/analyze-script-workflow.ts` (`persist-derived-visual-prompts`)                      |
+| Visual prompt stamp — regenerate         | `src/stills/server/workflows/frame-prompt-workflow.ts` (fanned out by `frame-prompt-batch-workflow.ts`)             |
+| Prompt stamp — derived (every shot)      | `src/shots/server/persist-shot-spec.ts` (analyze-script's `persist-shot-specs` step)                                |
 | Motion prompt stamp                      | `src/motion/server/workflows/motion-prompt-workflow.ts`, `motion-prompt-batch-workflow.ts` (derived)                |
 | Bible persistence (cast)                 | `src/cast/server/workflows/character-bible-workflow.ts`, `location-bible-workflow.ts`                               |
 | Pipeline orchestration                   | `src/sequences/server/workflows/analyze-script-workflow.ts`                                                         |

@@ -5,7 +5,16 @@ import { migrate } from 'drizzle-orm/libsql/migrator';
 import { eq } from 'drizzle-orm';
 import type { Database } from '@/platform/server/db/client';
 import { relations } from '@/platform/server/db/schema/relations';
-import { sequences, styles, teams, user } from '@/platform/server/db/schema';
+import {
+  framePromptVersions,
+  sequences,
+  shotPromptVersions,
+  shotSpecVersions,
+  shots,
+  styles,
+  teams,
+  user,
+} from '@/platform/server/db/schema';
 import { generateId } from '@/platform/id';
 import type { StyleConfig } from '@/look/style-config';
 import type {
@@ -16,15 +25,8 @@ import type {
 import { DEFAULT_ANALYSIS_MODEL } from '@/models/models.config';
 import { createCastRecords } from '@/cast/server/workflows/cast-records';
 import { toWorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
-import {
-  hashMotionPromptInput,
-  hashVisualPromptInput,
-} from '@/shots/input-hash';
-import { narrowShotPromptContext } from '@/shots/server/prompt-context';
-import {
-  shotWorkItems,
-  derivedShotForItem,
-} from '@/shots/server/shot-work-items';
+import { shotWorkItems } from '@/shots/server/shot-work-items';
+import { persistShotSpec } from '@/shots/server/persist-shot-spec';
 
 let client: Client;
 let db: Database;
@@ -100,6 +102,7 @@ const scene: Scene = {
     },
     action: 'Maya walks',
     cameraMovement: { move: 'static', pacing: 'slow' },
+    direction: '',
     soundCue: '',
     dialogue: [],
     durationSeconds: 3,
@@ -185,38 +188,45 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
     locationMatches: [],
     existingElements: [],
   });
-  for (const item of shotWorkItems([scene], mapping)) {
-    const derived = derivedShotForItem(item, styleConfig);
-    if (!derived || !item.mapping.frameId)
-      throw new Error('Expected derived prompt');
-    const context = narrowShotPromptContext({
-      scene: item.scene,
-      styleConfig,
-      characterBible: [character],
-      locationBible: [location],
-      elementBible: [],
-      aspectRatio: '16:9',
-      analysisModel: DEFAULT_ANALYSIS_MODEL,
-      referenceOnly: false,
-      startingFrameImageUrl: null,
-      dialogue: { presence: false, lines: [] },
-    });
-    await scopedDb.framePromptVersions.writeAiVersion({
-      frameId: item.mapping.frameId,
-      text: derived.visualPrompt.fullPrompt,
-      inputHash: await hashVisualPromptInput(context),
-      analysisModel: DEFAULT_ANALYSIS_MODEL,
-    });
-    await scopedDb.shotPromptVersions.write({
-      shotId: item.mapping.shotId,
-      promptType: 'motion',
-      source: 'derived',
-      text: derived.motionPrompt.fullPrompt,
-      audio: derived.motionPrompt.audio,
-      usesStartFrame: true,
-      inputHash: await hashMotionPromptInput(context),
-      analysisModel: DEFAULT_ANALYSIS_MODEL,
-    });
+  // Twice: a replayed step must not append a second spec or prompt.
+  for (const _replay of [1, 2]) {
+    for (const item of shotWorkItems([scene], mapping)) {
+      const written = await persistShotSpec(
+        toWorkflowScopedDb(scopedDb),
+        item,
+        {
+          styleConfig,
+          characterBible: [character],
+          locationBible: [location],
+          elementBible: [],
+          aspectRatio: '16:9',
+          analysisModel: DEFAULT_ANALYSIS_MODEL,
+          referenceOnly: false,
+        }
+      );
+      expect(written).toEqual({ stillPrompt: true });
+    }
+  }
+  const specRows = await db.select().from(shotSpecVersions);
+  expect(specRows).toHaveLength(2);
+  for (const m of mapping) {
+    const [shot] = await db.select().from(shots).where(eq(shots.id, m.shotId));
+    const spec = specRows.find((row) => row.shotId === m.shotId);
+    expect(shot?.selectedSpecVersionId).toBe(spec?.id);
+    const motion = await db
+      .select()
+      .from(shotPromptVersions)
+      .where(eq(shotPromptVersions.shotId, m.shotId));
+    expect(motion.map((row) => [row.source, row.specVersionId])).toEqual([
+      ['derived', spec?.id],
+    ]);
+    const still = await db
+      .select()
+      .from(framePromptVersions)
+      .where(eq(framePromptVersions.frameId, m.frameId));
+    expect(still.map((row) => [row.source, row.specVersionId])).toEqual([
+      ['derived', spec?.id],
+    ]);
   }
   const units = await computeGenerationPlan(scopedDb, sequenceId);
   expect(

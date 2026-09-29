@@ -68,6 +68,14 @@ export type WriteFramePromptVersionInput = WriteFramePromptVersionBase &
         inputHash: string | null;
         analysisModel: string | null;
       }
+    | {
+        // Built from a shot spec (#1915); a restore of such a row stays
+        // derived and copies its spec. Null on rows from before specs.
+        source: 'derived';
+        inputHash: string | null;
+        analysisModel: string | null;
+        specVersionId: string | null;
+      }
   );
 
 // One bound param per frame id; 90 keeps each query under D1's 100-bound-
@@ -241,6 +249,8 @@ export function createFramePromptVersionsMethods(db: Database) {
             text: input.text,
             components: input.components,
             source: input.source,
+            specVersionId:
+              input.source === 'derived' ? input.specVersionId : null,
             inputHash: nextHash,
             analysisModel,
             createdBy: input.createdBy ?? null,

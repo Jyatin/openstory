@@ -157,9 +157,17 @@ export type WriteShotPromptVersionInput = WriteShotPromptVersionBase &
         // length rewrite a hard-capped via forced (#1754). All three carry
         // the original version's hash + model verbatim so staleness stays
         // detectable.
-        source: 'restored' | 'softened' | 'shortened' | 'derived';
+        source: 'restored' | 'softened' | 'shortened';
         inputHash: string | null;
         analysisModel: string | null;
+      }
+    | {
+        // Built from a shot spec (#1915); a restore of such a row stays
+        // derived and copies its spec. Null on rows from before specs.
+        source: 'derived';
+        inputHash: string | null;
+        analysisModel: string | null;
+        specVersionId: string | null;
       }
   );
 
@@ -338,6 +346,8 @@ export function createShotPromptVersionsMethods(db: Database) {
             audio: input.audio,
             usesStartFrame: input.usesStartFrame,
             source: input.source,
+            specVersionId:
+              input.source === 'derived' ? input.specVersionId : null,
             inputHash: nextHash,
             analysisModel,
             createdBy: input.createdBy ?? null,

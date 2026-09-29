@@ -15,6 +15,7 @@ import {
   firstStageWithWork,
   planWork,
   planWorkLabel,
+  planWorkLine,
   switchLocks,
   switchStopAt,
   type PlanUnitRef,
@@ -66,17 +67,7 @@ import {
   type ShotView,
 } from '@/shots/shot-view';
 import { cn } from '@/ui/utils';
-import {
-  CirclePlay,
-  FileText,
-  Images,
-  Loader2,
-  Mic,
-  Music,
-  PanelLeftClose,
-  Plus,
-  Video,
-} from 'lucide-react';
+import { CirclePlay, PanelLeftClose } from 'lucide-react';
 import {
   memo,
   useCallback,
@@ -90,15 +81,6 @@ import { toast } from 'sonner';
 import { SceneGroup, sumShotSeconds } from './scene-group';
 import { TargetDurationChip } from '@/sequences/ui/target-duration-chip';
 import { SceneListItem } from './scene-list-item';
-
-const CONTINUE_ICON = {
-  script: FileText,
-  references: Images,
-  images: Images,
-  dialogue: Mic,
-  motion: Video,
-  music: Music,
-} as const;
 
 /**
  * Center `el` in the nearest Radix ScrollArea viewport. Returns false when
@@ -501,7 +483,6 @@ const SceneListComponent: React.FC<SceneListProps> = ({
     minStage && stageIndex(cappedStopAt) < stageIndex(minStage)
       ? minStage
       : cappedStopAt;
-  const ContinueIcon = CONTINUE_ICON[continueStopAtClamped];
   const showButton = showMotionFooter;
   const continueWork = planWork(footerPlan, continueStopAtClamped);
   const continueLabel = planWorkLabel(continueWork);
@@ -719,7 +700,6 @@ const SceneListComponent: React.FC<SceneListProps> = ({
         onChange={setContinueStopAt}
         minStage={minStage ?? undefined}
         maxStage={maxStage}
-        startFramesLocked={locks.startFrames}
         voicesLocked={locks.voices}
         generateStartFrames={draftStartFrames}
         onGenerateStartFramesChange={setDraftStartFrames}
@@ -740,24 +720,24 @@ const SceneListComponent: React.FC<SceneListProps> = ({
             onClick={() => void handleContinue()}
             disabled={isGenerating || planLoading || continueWork.length === 0}
           >
-            {isGenerating ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Generating…
-              </>
-            ) : (
-              <>
-                <ContinueIcon className="mr-2 h-4 w-4" />
-                {continueLabel}
-              </>
-            )}
+            <span className="relative">
+              {isGenerating ? 'Generating…' : continueLabel}
+              <ActionCost
+                estimate={continueCostEstimate}
+                className="absolute top-1/2 left-full ml-2 -translate-y-1/2"
+              />
+            </span>
           </Button>
+          {continueWork.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {planWorkLine(continueWork)}
+            </p>
+          )}
           {continueBlocked.map((line) => (
             <p key={line} className="text-xs text-muted-foreground">
               {line}
             </p>
           ))}
-          <ActionCost estimate={continueCostEstimate} />
         </>
       )}
     </>
@@ -978,11 +958,6 @@ const SceneListComponent: React.FC<SceneListProps> = ({
               onClick={handleAddScene}
               disabled={!isHydrated || createScene.isPending}
             >
-              {createScene.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="mr-2 h-4 w-4" />
-              )}
               {createScene.isPending ? 'Adding scene…' : 'Add scene'}
             </Button>
           )}
@@ -1028,32 +1003,23 @@ const SceneListComponent: React.FC<SceneListProps> = ({
                   onClick={() => void handleGenerateMotion()}
                   disabled={isButtonDisabled}
                 >
-                  {isGenerating ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Generating…
-                    </>
-                  ) : !motionPromptsReady ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Writing motion prompts…
-                    </>
-                  ) : includeMusic && !musicPromptsReady ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Composing music…
-                    </>
-                  ) : (
-                    <>
-                      <Video className="mr-2 h-4 w-4" />
-                      Generate {notStartedShots.length} / {totalShots}{' '}
-                      {totalShots === 1 ? 'shot' : 'shots'}
-                    </>
-                  )}
+                  <span className="relative">
+                    {isGenerating
+                      ? 'Generating…'
+                      : !motionPromptsReady
+                        ? 'Writing motion prompts…'
+                        : includeMusic && !musicPromptsReady
+                          ? 'Composing music…'
+                          : `Generate ${notStartedShots.length} / ${totalShots} ${totalShots === 1 ? 'shot' : 'shots'}`}
+                    <ActionCost
+                      estimate={batchCostEstimate}
+                      className="absolute top-1/2 left-full ml-2 -translate-y-1/2"
+                    />
+                  </span>
                 </Button>
-                <ActionCost estimate={batchCostEstimate} />
               </div>
-              {offerDraftFirst && (
+              {/* The steps carry the Draft first switch; one control at a time. */}
+              {offerDraftFirst && !showSteps && (
                 <label
                   htmlFor="batch-draft-motion"
                   className="flex items-center gap-2 text-sm text-muted-foreground"
@@ -1091,22 +1057,11 @@ const SceneListComponent: React.FC<SceneListProps> = ({
                 onClick={() => void handleGenerateMusicClick()}
                 disabled={isGenerating || !musicPromptsReady}
               >
-                {isGenerating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Generating…
-                  </>
-                ) : !musicPromptsReady ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Composing music…
-                  </>
-                ) : (
-                  <>
-                    <Music className="mr-2 h-4 w-4" />
-                    Generate Music
-                  </>
-                )}
+                {isGenerating
+                  ? 'Generating…'
+                  : !musicPromptsReady
+                    ? 'Composing music…'
+                    : 'Generate Music'}
               </Button>
               {renderDraftsButton}
             </div>

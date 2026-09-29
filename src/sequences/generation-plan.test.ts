@@ -5,6 +5,8 @@ import {
   firstStageWithWork,
   planCounts,
   planWorkLabel,
+  planWorkLine,
+  planWorkSummary,
   switchLocks,
   updateAllUnits,
   planUnits,
@@ -387,10 +389,35 @@ describe('footer helpers', () => {
   ];
 
   it('names the count and the noun', () => {
-    expect(planWorkLabel(planWork(plan, 'images'))).toBe(
-      'Generate 1 reference, 2 prompts'
+    expect(planWorkLabel(planWork(plan, 'images'))).toBe('Generate');
+    expect(planWorkSummary(planWork(plan, 'images'))).toBe(
+      '1 reference, 2 prompts'
     );
     expect(planWorkLabel([])).toBe('Nothing to generate');
+    expect(
+      planWorkLabel([
+        {
+          kind: 'still',
+          id: 's1',
+          state: 'stale',
+          requires: [],
+          cascaded: false,
+        },
+      ])
+    ).toBe('Regenerate');
+  });
+
+  it('names redone work apart only when new work rides with it', () => {
+    const unit = (
+      kind: PlanUnit['kind'],
+      id: string,
+      state: PlanUnit['state']
+    ): PlanUnit => ({ kind, id, state, requires: [], cascaded: false });
+    const stale = [unit('still', 's1', 'stale'), unit('still', 's2', 'stale')];
+    const fresh = [unit('clip', 's1', 'missing')];
+    expect(planWorkLine([...stale, ...fresh])).toBe('1 video · redo 2 images');
+    expect(planWorkLine(stale)).toBe('2 images');
+    expect(planWorkLine(fresh)).toBe('1 video');
   });
 
   it('says what a blocked unit waits on', () => {
@@ -405,7 +432,6 @@ describe('footer helpers', () => {
 
   it('locks a switch once its units exist', () => {
     expect(switchLocks(plan)).toEqual({
-      startFrames: false,
       voices: true,
       // s1's clip is blocked, so it may not exist yet: Draft first stays open.
       draft: false,
@@ -420,17 +446,6 @@ describe('footer helpers', () => {
           cascaded: false,
         },
       ]).draft
-    ).toBe(true);
-    expect(
-      switchLocks([
-        {
-          kind: 'still',
-          id: 's1',
-          state: 'stale',
-          requires: [],
-          cascaded: false,
-        },
-      ]).startFrames
     ).toBe(true);
   });
 

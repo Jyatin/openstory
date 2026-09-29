@@ -360,9 +360,14 @@ day and night scenes share a location. The original heading stays in the
 scene and first mention; existing names and real names such as Night Owl Cafe
 are not mechanically stripped. The columns remain until the separately deployed #1890 migration.
 
-The scene owns location, time of day and lighting. Scene setting in the scene
-header edits these through `updateSceneFn`, which appends the same narrative
-version as a script edit. Empty lighting defaults from time of day. The style
+The scene owns location, time of day and lighting. At scene scope the
+inspector edits them through `updateSceneFn`, which appends the same narrative
+version as a script edit: time of day, lighting and the palette override on
+the Script tab, the location on the Locations tab (#1929). The location is
+picked from the sequence's locations, never typed: the pick writes the
+location's tag (`canonicalBibleTag`) to `continuity.environmentTag` and its
+name to the scene's location text, so the sheet match has one answer. A pick is
+scene-owned, so shot scope does not offer it. Empty lighting defaults from time of day. The style
 owns medium, art style, grading and palette; an optional scene palette override
 wins when nonempty. Clearing it restores the style. Legacy scene `styleTag`
 is not a source of look. Location sheets use style art direction but always

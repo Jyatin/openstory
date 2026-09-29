@@ -161,6 +161,17 @@ are free text: a move may chain motions ("arc around the actor, then follow
 as she runs"). A shot from before specs has no row and keeps its text as
 written until Rewrite shot.
 
+The shot inspector edits the spec above each prompt (#1929): framing and
+action on the Start Frame tab; action, camera move, pacing, direction and
+sound on the Video tab. Suggestions come from `shot-spec-vocabulary.ts`, the
+same lists the shot-list prompt names; every field stays free text. A save
+appends a `source: 'edit'` version stamped current, then rebuilds the
+prompts from it (`saveShotSpecFn` → `regenerateShotPrompt`). When a prompt
+is written, the save asks first: replace it with the rebuilt text, or keep
+it. The Rebuild prompt button reads Rewrite shot when the spec is stale or
+missing, and asks the same question before it touches written text. A save
+while a rewrite is in flight is refused.
+
 ### Video variants + the 15s constraint _(Phase 3)_
 
 Render models cap a single render at **15s** (multi-shot included). Scenes are

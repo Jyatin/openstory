@@ -185,6 +185,22 @@ export const storedShotSpecSchema = z.object({
   soundCue: z.string().meta({ description: 'SFX/ambience, empty if none' }),
 });
 
+const specEditField = z.string().trim().max(2000);
+
+/** A spec the user edited in the shot inspector (#1929). Every field bounded. */
+export const shotSpecEditSchema = z.object({
+  framing: z.object({
+    shotSize: specEditField,
+    angle: specEditField,
+    composition: specEditField,
+    subjectStartState: specEditField,
+  }),
+  action: specEditField,
+  cameraMovement: z.object({ move: specEditField, pacing: specEditField }),
+  direction: specEditField,
+  soundCue: specEditField,
+});
+
 /** Drop the fields that live elsewhere; the rest is what a version stores. */
 export function storedShotSpec(spec: ShotSpec): StoredShotSpec {
   return canonicalStoredShotSpec(spec);

@@ -20,8 +20,9 @@ import { shots } from './shots';
  * `analysis`: the shot-list pass wrote it.
  * `rewrite`: Rewrite shot refilled it (#1923).
  * `rename`: an element-token rename rewrote its strings.
+ * `edit`: the user edited it in the shot inspector (#1929).
  */
-const SHOT_SPEC_SOURCES = ['analysis', 'rewrite', 'rename'] as const;
+const SHOT_SPEC_SOURCES = ['analysis', 'rewrite', 'rename', 'edit'] as const;
 export type ShotSpecSource = (typeof SHOT_SPEC_SOURCES)[number];
 
 export const shotSpecVersions = snakeCase.table(

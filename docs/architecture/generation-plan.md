@@ -118,11 +118,35 @@ generateVoices, draftMotion }` — no `startFrom`.
    in the run), then the per-shot jobs (prompts, stills, dialogue, clips)
    and music. A reference that fails holds the stills and clips made from it
    (`PlanTarget.referenceIds`) and fails nothing else. A shot that owes a
-   prompt still gets the per-shot LLM prompt until Rewrite shot lands
-   (#1915 part 2); its saved spec is not read yet.
+   prompt follows the spec rule below: Rebuild when its spec is current,
+   Rewrite shot when it is stale or missing.
 
 Scenes and shots edited, added or deleted during a stop reach the continue:
 every unit is materialised per shot from D1 at the click.
+
+## Shot specs and prompts (#1923, #1929)
+
+A shot's still and motion prompts are built from its selected spec. The plan
+has a `spec` unit per shot, and both prompt units require it unless the prompt
+is written (`user-edit`). One rule decides what a prompt costs, and a fresh
+run, Continue, Update all and the inspector all apply it:
+
+- **Spec current, prompt stale: Rebuild.** The prompt digest includes the
+  spec's content, so editing the spec, or anything else the prompt reads,
+  makes the derived prompt stale. Rebuild re-derives it. No LLM, no cost.
+- **Spec stale or missing: Rewrite shot.** A spec is stale when what it was
+  written from moved: the shot's script slice, its lines, or the scene's
+  cast / continuity tags (`shot-spec-currency.ts`). Missing means the shot
+  predates specs. One LLM call refills the spec, then its prompts rebuild.
+  Every pre-spec shot owes one rewrite on its first Continue or Update all.
+- **A written prompt is never replaced without the user.** It reads fresh
+  and the plan leaves it. In the inspector, saving a spec or clicking
+  Rebuild / Rewrite shot asks whether to replace written text or keep it.
+- **A user's spec edit is current.** Saving stamps it with the live currency
+  hash, so it never turns into a paid rewrite on its own. Saving a stale spec
+  unchanged says it still fits and stamps it current too.
+
+Cost quotes count only the rewrites: a rebuild is free.
 
 ## What Update all does
 

@@ -1053,7 +1053,8 @@ const SceneListComponent: React.FC<SceneListProps> = ({
                 </Button>
                 <ActionCost estimate={batchCostEstimate} />
               </div>
-              {offerDraftFirst && (
+              {/* The steps carry the Draft first switch; one control at a time. */}
+              {offerDraftFirst && !showSteps && (
                 <label
                   htmlFor="batch-draft-motion"
                   className="flex items-center gap-2 text-sm text-muted-foreground"

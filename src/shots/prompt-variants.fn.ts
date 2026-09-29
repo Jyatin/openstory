@@ -1,51 +1,26 @@
 import { saveShotPrompt } from '@/shots/server/save-shot-prompt';
+import { regenerateShotPrompt } from '@/shots/server/regenerate-shot-prompt';
 import { readMusicPromptStaleness } from '@/audio/server/music-staleness';
-import {
-  rendersReferenceOnly,
-  shotPromptSequence,
-  usesStartFrame,
-} from './use-start-frame';
-import {
-  hashMotionPromptInput,
-  computeMusicPromptInputHash,
-  hashVisualPromptInput,
-  motionPromptInputHashMatches,
-  musicPromptInputHashMatches,
-  visualPromptInputHashMatches,
-  voiceOnlyMovedSince,
-} from './input-hash';
 import {
   DEFAULT_ANALYSIS_MODEL,
   getAnalysisModelById,
 } from '@/models/models.config';
 import {
-  loadShotPromptContext,
-  narrowShotPromptContext,
-} from '@/shots/server/prompt-context';
+  computeMusicPromptInputHash,
+  musicPromptInputHashMatches,
+} from './input-hash';
 import {
   SHOT_PROMPT_TYPES,
   type ShotPromptVersion,
   type SequenceMusicPromptVersion,
 } from '@/platform/server/db/schema';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
-import { loadShotPromptDialogue } from '@/shots/server/shot-dialogue';
 import { simpleHash } from '@/platform/hash';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
 import { terminateSingleArtifactRun } from '@/platform/server/workflow/run-outcome';
 import { storedMotionDialogueSchema } from './scene-analysis.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
-import type {
-  MusicPromptWorkflowInput,
-  ShotSpecRewriteWorkflowInput,
-} from '@/platform/server/workflow/types';
-import {
-  deriveMotionPrompt,
-  deriveStillPrompt,
-} from '@/shots/shot-list.derive';
-import {
-  hashShotSpecInput,
-  specCurrencyFromScene,
-} from '@/shots/shot-spec-currency';
+import type { MusicPromptWorkflowInput } from '@/platform/server/workflow/types';
 import { musicSceneSummariesFromRows } from '@/audio/server/workflows/music-scene-summaries';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
@@ -442,277 +417,28 @@ const shotRegenerateInput = z.object({
   sequenceId: ulidSchema,
   shotId: ulidSchema,
   promptType: promptTypeSchema,
-  // `force: true` bypasses the up-to-date short-circuit so the user can roll
-  // the dice on a fresh non-deterministic LLM completion even when no upstream
-  // inputs have changed. The staleness-banner path leaves this unset.
+  // `force: true` rebuilds even when the prompts read fresh. The
+  // staleness-banner path leaves this unset.
   force: z.boolean().optional(),
+  /** Replace this prompt even though the user wrote it (confirmed in the UI). */
+  replaceWritten: z.boolean().optional(),
 });
 
 export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
   .middleware([shotAccessMiddleware])
   .validator(zodValidator(shotRegenerateInput))
   .handler(async ({ context, data }) => {
-    const { shot, frame, sequence, scopedDb, user, teamId, scene } = context;
-
-    if (!scene) {
+    if (!context.scene) {
       throw new Error('Shot has no scene metadata to regenerate from');
     }
-
-    const shotReferenceOnly = rendersReferenceOnly(shot, sequence);
-    if (shot.pendingSpecVersionId) {
-      return {
-        workflowRunId: null,
-        alreadyUpToDate: false,
-        alreadyInFlight: true,
-        rebuilt: false,
-      } as const;
-    }
-
-    const promptDialogue = await loadShotPromptDialogue(
-      scopedDb,
-      sequence.id,
-      shot
-    );
-    const currencyHash = await hashShotSpecInput(
-      specCurrencyFromScene(scene, promptDialogue.dialogue.lines)
-    );
-    const selectedSpec = await scopedDb.shotSpecVersions.getSelected(shot.id);
-    const specMissing = selectedSpec === null;
-    const specStale =
-      selectedSpec !== null &&
-      selectedSpec.inputHash !== null &&
-      selectedSpec.inputHash !== currencyHash;
-    const specCurrent = !specMissing && !specStale;
-
-    const ctx = await loadShotPromptContext({
-      scopedDb,
-      sequence: shotPromptSequence(sequence, shot),
-      scene,
-      startingFrameImageUrl: null,
+    const replace = data.replaceWritten === true;
+    return regenerateShotPrompt(context, context.scene, {
+      force: data.force === true,
+      replace: {
+        visual: replace && data.promptType === 'visual',
+        motion: replace && data.promptType === 'motion',
+      },
     });
-    const narrowed = narrowShotPromptContext({
-      ...ctx,
-      startingFrameImageUrl: null,
-      dialogue: promptDialogue.dialogue,
-      referenceOnly: shotReferenceOnly,
-      spec: selectedSpec?.spec ?? null,
-    });
-    const analysisModel =
-      getAnalysisModelById(ctx.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL;
-    const visualSelected = await scopedDb.framePromptVersions.getSelected(
-      frame.id
-    );
-    const motionSelected = await scopedDb.shotPromptVersions.getSelectedMotion(
-      shot.id
-    );
-
-    if (specCurrent && selectedSpec) {
-      await scopedDb.shotSpecVersions.stampInputHashIfEmpty(
-        selectedSpec.id,
-        currencyHash
-      );
-      const visualHash = await hashVisualPromptInput(narrowed);
-      const motionHash = await hashMotionPromptInput(narrowed);
-      const voiceHistory =
-        await scopedDb.characters.listBibleVersionsBySequence(sequence.id);
-      const visualFresh =
-        visualSelected?.source === 'user-edit' ||
-        shotReferenceOnly ||
-        (await visualPromptInputHashMatches(
-          visualSelected?.inputHash ?? null,
-          narrowed,
-          {
-            voiceOnlyMoved: voiceOnlyMovedSince(
-              voiceHistory,
-              visualSelected?.createdAt ?? new Date(0)
-            ),
-            acceptLegacy:
-              (visualSelected?.specVersionId ?? null) === selectedSpec.id,
-          }
-        ));
-      const motionFresh =
-        motionSelected?.source === 'user-edit' ||
-        (await motionPromptInputHashMatches(
-          motionSelected?.inputHash ?? null,
-          narrowed,
-          {
-            legacyScriptDialogue: !promptDialogue.onNode,
-            voiceOnlyMoved: voiceOnlyMovedSince(
-              voiceHistory,
-              motionSelected?.createdAt ?? new Date(0)
-            ),
-            acceptLegacy:
-              (motionSelected?.specVersionId ?? null) === selectedSpec.id,
-          }
-        ));
-      const writeVisual =
-        !shotReferenceOnly && visualSelected?.source !== 'user-edit';
-      const writeMotion = motionSelected?.source !== 'user-edit';
-      if (!data.force && visualFresh && motionFresh) {
-        return {
-          workflowRunId: null,
-          alreadyUpToDate: true,
-          alreadyInFlight: false,
-          rebuilt: false,
-        } as const;
-      }
-      if (writeVisual) {
-        await scopedDb.framePromptVersions.write({
-          frameId: frame.id,
-          source: 'derived',
-          specVersionId: selectedSpec.id,
-          text: deriveStillPrompt(selectedSpec.spec, scene, ctx.styleConfig),
-          inputHash: visualHash,
-          analysisModel,
-          createdBy: user.id,
-        });
-      }
-      if (writeMotion) {
-        const motion = deriveMotionPrompt(selectedSpec.spec, {
-          referenceOnly: shotReferenceOnly,
-        });
-        await scopedDb.shotPromptVersions.write({
-          shotId: shot.id,
-          promptType: 'motion',
-          source: 'derived',
-          specVersionId: selectedSpec.id,
-          text: motion.text,
-          audio: motion.audio,
-          usesStartFrame: !shotReferenceOnly,
-          inputHash: motionHash,
-          analysisModel,
-          createdBy: user.id,
-        });
-      }
-      if (!writeVisual && !writeMotion) {
-        return {
-          workflowRunId: null,
-          alreadyUpToDate: true,
-          alreadyInFlight: false,
-          rebuilt: false,
-        } as const;
-      }
-      return {
-        workflowRunId: null,
-        alreadyUpToDate: false,
-        alreadyInFlight: false,
-        rebuilt: true,
-      } as const;
-    }
-
-    const visualHash = await hashVisualPromptInput(narrowed);
-    const motionHash = await hashMotionPromptInput(narrowed);
-    const claimId = await scopedDb.shotSpecVersions.claim(shot.id);
-    let visualClaimId: string | null = null;
-    let motionClaimId: string | null = null;
-    try {
-      if (!shotReferenceOnly && visualSelected?.source !== 'user-edit') {
-        const row = await scopedDb.framePromptVersions.createPending({
-          frameId: frame.id,
-          pendingInputHash: visualHash,
-          createdBy: user.id,
-        });
-        visualClaimId = row.id;
-      }
-      if (motionSelected?.source !== 'user-edit') {
-        const row = await scopedDb.shotPromptVersions.createPending({
-          shotId: shot.id,
-          pendingInputHash: motionHash,
-          usesStartFrame: usesStartFrame(shot, sequence),
-          createdBy: user.id,
-        });
-        motionClaimId = row.id;
-      }
-      const shotsInSeq = await scopedDb.shots.listBySequence(sequence.id);
-      const siblingIds = shotsInSeq
-        .filter(
-          (sibling) =>
-            shot.sceneId &&
-            sibling.sceneId === shot.sceneId &&
-            sibling.id !== shot.id &&
-            !sibling.deletedAt
-        )
-        .map((sibling) => sibling.id);
-      const specs = await scopedDb.shotSpecVersions.getSelectedByShotIds([
-        ...siblingIds,
-        shot.id,
-      ]);
-      const siblingSpecs = siblingIds.flatMap((id) => {
-        const version = specs.get(id);
-        const sibling = shotsInSeq.find((row) => row.id === id);
-        return version
-          ? [{ shotNumber: sibling?.shotNumber ?? null, spec: version.spec }]
-          : [];
-      });
-      const workflowRunId = await triggerWorkflow<ShotSpecRewriteWorkflowInput>(
-        '/shot-spec-rewrite',
-        {
-          userId: user.id,
-          teamId,
-          sequenceId: sequence.id,
-          shotId: shot.id,
-          frameId: frame.id,
-          claimId,
-          visualClaimId,
-          motionClaimId,
-          visualWritten: visualSelected?.source === 'user-edit',
-          motionWritten: motionSelected?.source === 'user-edit',
-          referenceOnly: shotReferenceOnly,
-          scene,
-          siblingSpecs,
-          characterBible: [...ctx.characterBible],
-          locationBible: [...ctx.locationBible],
-          elementBible: [...ctx.elementBible],
-          styleConfig: ctx.styleConfig,
-          aspectRatio: sequence.aspectRatio,
-          analysisModelId: analysisModel,
-          lines: promptDialogue.dialogue.lines.map(
-            ({ character, line, tone }) => ({
-              character,
-              line,
-              tone,
-            })
-          ),
-          specInputHash: currencyHash,
-          currentSpec: selectedSpec?.spec ?? null,
-          dialogue: promptDialogue.dialogue,
-          emitStreaming: true,
-        }
-      );
-      if (visualClaimId) {
-        await scopedDb.framePromptVersions.markGenerating(
-          visualClaimId,
-          workflowRunId
-        );
-      }
-      if (motionClaimId) {
-        await scopedDb.shotPromptVersions.markGenerating(
-          motionClaimId,
-          workflowRunId
-        );
-      }
-      return {
-        workflowRunId,
-        alreadyUpToDate: false,
-        alreadyInFlight: false,
-        rebuilt: false,
-      } as const;
-    } catch (error) {
-      await scopedDb.shotSpecVersions.clearClaimIf({
-        shotId: shot.id,
-        claimId,
-      });
-      if (visualClaimId) {
-        await scopedDb.framePromptVersions.markTerminal(
-          visualClaimId,
-          'failed'
-        );
-      }
-      if (motionClaimId) {
-        await scopedDb.shotPromptVersions.markTerminal(motionClaimId, 'failed');
-      }
-      throw error;
-    }
   });
 
 const saveMusicPromptInput = z.object({

@@ -89,15 +89,12 @@ export const locationBibleEntrySchema = z.object({
   locationId: z.string(),
   name: z.string().meta({
     description:
-      'As written in the script, or a participant-named physical setting for an unspecified remote video-call location',
+      'Physical place name without slugline markers or a time-of-day suffix (INT. OFFICE - DAY and INT. OFFICE - NIGHT both become OFFICE); time of day belongs to the scene. Preserve genuine place-name words such as Night Owl Cafe. For an unspecified remote video-call location, use a participant-named physical setting',
   }),
   type: z.enum(['interior', 'exterior', 'both']),
-  timeOfDay: z.string(),
   description: z.string(),
   architecturalStyle: z.string(),
   keyFeatures: z.string(),
-  colorPalette: z.string(),
-  lightingSetup: z.string(),
   ambiance: z.string(),
   consistencyTag: z.string().meta({ description: 'snake_case name slug' }),
   firstMention: firstMentionSchema,
@@ -413,7 +410,10 @@ const continuitySchema = z.object({
     description:
       'UPPERCASE element tokens referenced in this scene (null when none)',
   }),
-  colorPalette: z.string(),
+  colorPalette: z.string().optional().meta({
+    description:
+      'Optional user-authored palette override; leave empty during analysis. The sequence style owns palette.',
+  }),
   lightingSetup: z.string(),
   styleTag: z.string(),
 });

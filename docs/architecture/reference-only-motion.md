@@ -350,3 +350,43 @@ a sequence back into the frame-based workflow. Every sequence and shot that
 existed before the default flipped was stamped onto start frames by migration
 `20260903000946_backfill_generate_start_frames`, so the flip changed nothing
 already made.
+
+## Scene direction ownership (#1889)
+
+`sceneDirection` (`src/shots/scene-direction.ts`) resolves the inputs shared by
+visual prompts, derived shot stills and motion headers. The location is only
+the physical place: layout, architecture, materials, surface colours and fixed
+features such as practical light fixtures. Its sheet is rendered in neutral,
+even light, and its bible no longer reads or writes time of day, lighting or
+palette. Extraction names the physical place without slugline time suffixes, so
+day and night scenes share a location. The original heading stays in the
+scene and first mention; existing names and real names such as Night Owl Cafe
+are not mechanically stripped. The columns remain until the separately deployed #1890 migration.
+
+The scene owns location, time of day and lighting. Scene setting in the scene
+header edits these through `updateSceneFn`, which appends the same narrative
+version as a script edit. Empty lighting defaults from time of day. The style
+owns medium, art style, grading and palette; an optional scene palette override
+wins when nonempty. Clearing it restores the style. Legacy scene `styleTag`
+is not a source of look. Location sheets use style art direction but always
+neutral illumination.
+
+The #1889 generated custom data repair clears analysis-authored scene palettes
+from both scene narrative stores before these values become user overrides.
+Pre-implementation production inspection found zero location bible versions
+with source `edit` or `user-edit` containing the retired fields, so no authored
+location values needed copying into description. This was an aggregate read
+with zero writes.
+
+Location sheet hashes are explicitly version 2 for the neutral-place prompt.
+Scene lighting and palette overrides participate in both prompt hashes, so
+a scene-setting edit marks the downstream prompt stale.
+
+Every `packedSceneFromScene` call requires the resolved style, including
+previews and retries. Request handlers load the saved sequence style first;
+only legacy rows without a snapshot fall back to the live library style.
+The executor freezes the resolved header at plan time, and fresh analysis
+passes its existing style snapshot. The render builder includes this header
+for standalone shots as well as packed siblings; dialogue reassembly retains
+the same header. Prompt-authoring workflows share `scenePromptContext`, which
+removes legacy `styleTag` and supplies the resolved scene direction.

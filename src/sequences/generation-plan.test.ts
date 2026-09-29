@@ -100,7 +100,8 @@ describe('planUnits — scenario table (#1816)', () => {
       'still:s1': 'stale',
       'still:s2': 'stale',
       'still:s3': 'done',
-      'prompt:motion:s1': 'stale',
+      // Motion is built from the spec, not the still (#1923).
+      'prompt:motion:s1': 'done',
       'clip:s1': 'stale',
       'clip:s3': 'done',
     });
@@ -305,7 +306,6 @@ describe('planWork', () => {
     expect(planWork(plan, 'motion').map((u) => u.kind)).toEqual([
       'sheet:character',
       'still',
-      'prompt:motion',
       'clip',
     ]);
   });

@@ -16,7 +16,8 @@ import {
   sha256Hex,
 } from '@/shots/input-hash';
 import { narrowShotPromptContext } from '@/shots/server/prompt-context';
-import { shotWorkItems } from '@/shots/server/shot-work-items';
+import { shotSpecForItem, shotWorkItems } from '@/shots/server/shot-work-items';
+import { storedShotSpec } from '@/shots/shot-list.schema';
 import type { CharacterBibleEntry, Scene } from '@/shots/scene-analysis.schema';
 import { buildCastCharacterBible } from '@/cast/character-prompt';
 import type {
@@ -409,6 +410,8 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
       if (!item) {
         throw new Error(`missing derived visual write at ${index}`);
       }
+      const spec = shotSpecForItem(item);
+      if (!spec) throw new Error(`missing spec at ${index}`);
       expect(written.frameId).toBe(item.mapping.frameId);
       // Verify reads the CAST row out of D1, so the stamp must be taken over
       // the cast bible (#867). Stamping the raw pre-cast bible — which the
@@ -424,6 +427,8 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
             elementBible: SPLIT.elementBible,
             aspectRatio: event.payload.aspectRatio,
             analysisModel: event.payload.analysisModelId,
+            // The spec is in the digest (#1923).
+            spec: storedShotSpec(spec),
           })
         );
       const verifyHash = await hashWith(
@@ -457,6 +462,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
             startingFrameImageUrl: null,
             referenceOnly: false,
             dialogue: { presence: false, lines: [] },
+            spec: storedShotSpec(spec),
           })
         ),
       });

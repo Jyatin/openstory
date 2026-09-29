@@ -270,6 +270,8 @@ function shotDb(
       getLatestWithInputHash: none,
       getLivePending: none,
     },
+    // No spec: the matrix pins prompt staleness, not spec currency (#1923).
+    shotSpecVersions: { getSelected: none },
     frameVariants: { listLiveClaims: empty },
     // The stale-cause hints read these; the legacy-digest verify reads the
     // character versions for a moved voice-only flag (#1787).
@@ -455,8 +457,8 @@ const SHOT_MATRIX: ShotRow[] = [
       ...w,
       still: { id: 'still-2', url: '/r2/still-2.png' },
     }),
-    // The motion prompt is written looking at the still.
-    stale: ['motionPrompt', 'clip'],
+    // The motion prompt is built from the spec, not the still (#1923).
+    stale: ['clip'],
   },
   {
     mutation: 'new motion prompt selected',
@@ -731,15 +733,14 @@ describe('staleness matrix — a shot and its clip', () => {
 
   it('a pre-#1785 stamp of a voice-only Alice stays fresh on deploy', async () => {
     // The pre-#1785 digest of a voice-only Alice is the digest of a voiced
-    // one: that shape never read the flag.
+    // one: that shape never read the flag. Visual only: an old motion stamp
+    // also carried the still URL, which `stampShot`'s current digest drops
+    // (#1923), so it cannot stand in for one.
     const stamps = await stampShot();
     const verdicts = await shotVerdicts(aliceVoiceOnly, stamps, [
       { characterId: 'c-alice', voiceOnly: true, createdAt: BEFORE },
     ]);
-    expect(verdicts).toMatchObject({
-      visualPrompt: 'fresh',
-      motionPrompt: 'fresh',
-    });
+    expect(verdicts).toMatchObject({ visualPrompt: 'fresh' });
   });
 
   it.each(SHOT_MATRIX)('$mutation → stale: $stale', async (row) => {

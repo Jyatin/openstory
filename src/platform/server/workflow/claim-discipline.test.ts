@@ -287,7 +287,7 @@ describe('claim discipline (#1130)', () => {
       }
     }
     expect(missing).toEqual([]);
-  });
+  }, 20_000); // Cold import of the whole scoped-db graph.
 
   test('no workflow promotes through a user selector', () => {
     const offenders: string[] = [];

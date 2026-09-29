@@ -223,6 +223,7 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
     shotId: first.shotId,
     spec: reordered,
     source: 'analysis',
+    inputHash: first.inputHash,
     createdBy: null,
   });
   expect(replayed.id).toBe(first.id);
@@ -231,6 +232,7 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
     shotId: first.shotId,
     spec: { ...first.spec, action: 'changed' },
     source: 'analysis',
+    inputHash: first.inputHash,
     createdBy: null,
   });
   expect(changed.id).not.toBe(first.id);

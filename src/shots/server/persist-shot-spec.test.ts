@@ -5,6 +5,7 @@ import type { Scene } from '@/shots/scene-analysis.schema';
 vi.mock('@/shots/input-hash', () => ({
   hashVisualPromptInput: async () => 'visual-hash',
   hashMotionPromptInput: async () => 'motion-hash',
+  sha256Hex: async () => 'spec-input-hash',
 }));
 
 import { persistShotSpec } from './persist-shot-spec';

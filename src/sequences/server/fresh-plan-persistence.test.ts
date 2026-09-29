@@ -209,6 +209,41 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
   }
   const specRows = await db.select().from(shotSpecVersions);
   expect(specRows).toHaveLength(2);
+  // Key order is not identity: a reordered copy of the selected spec is a replay.
+  const first = specRows[0];
+  if (!first) throw new Error('Missing spec row');
+  const reordered = {
+    soundCue: first.spec.soundCue,
+    direction: first.spec.direction,
+    cameraMovement: first.spec.cameraMovement,
+    action: first.spec.action,
+    framing: first.spec.framing,
+  };
+  const replayed = await scopedDb.shotSpecVersions.write({
+    shotId: first.shotId,
+    spec: reordered,
+    source: 'analysis',
+    createdBy: null,
+  });
+  expect(replayed.id).toBe(first.id);
+  // A changed spec appends a version and moves the pointer to it.
+  const changed = await scopedDb.shotSpecVersions.write({
+    shotId: first.shotId,
+    spec: { ...first.spec, action: 'changed' },
+    source: 'analysis',
+    createdBy: null,
+  });
+  expect(changed.id).not.toBe(first.id);
+  const [moved] = await db
+    .select()
+    .from(shots)
+    .where(eq(shots.id, first.shotId));
+  expect(moved?.selectedSpecVersionId).toBe(changed.id);
+  // Restore so the assertions below still see the persisted spec selected.
+  await db
+    .update(shots)
+    .set({ selectedSpecVersionId: first.id })
+    .where(eq(shots.id, first.shotId));
   for (const m of mapping) {
     const [shot] = await db.select().from(shots).where(eq(shots.id, m.shotId));
     const spec = specRows.find((row) => row.shotId === m.shotId);

@@ -20,9 +20,11 @@ import { storedShotSpec } from '@/shots/shot-list.schema';
 import { shotSpecForItem, type ShotWorkItem } from './shot-work-items';
 
 /**
- * Write one shot's spec and derived prompts. Null when the shot has no row
- * or no spec; otherwise whether a still prompt was written (a reference-only
- * shot has none).
+ * Write one shot's spec and derived prompts; returns whether a still prompt
+ * was written (a reference-only shot has none). Throws when the shot has no
+ * spec or, off reference-only, no frame: the batch skips the LLM for any
+ * scene whose shots carry specs, so a quiet skip here leaves a shot with no
+ * prompts at all.
  */
 export async function persistShotSpec(
   scopedDb: Pick<
@@ -31,12 +33,16 @@ export async function persistShotSpec(
   >,
   item: ShotWorkItem,
   context: Omit<VisualPromptHashInput, 'scene'> & { referenceOnly: boolean }
-): Promise<{ stillPrompt: boolean } | null> {
+): Promise<{ stillPrompt: boolean }> {
+  const { shotId, frameId, shotNumber } = item.mapping;
   const spec = shotSpecForItem(item);
-  const shotId = item.mapping.shotId;
-  if (!spec || !shotId) return null;
+  const where = `scene ${item.scene.sceneId} shot ${shotNumber} (${shotId})`;
+  if (!spec) throw new Error(`Shot spec missing for ${where}`);
 
   const { referenceOnly } = context;
+  if (!referenceOnly && frameId === null) {
+    throw new Error(`No frame to hold the still prompt for ${where}`);
+  }
   const stored = storedShotSpec(spec);
   const version = await scopedDb.shotSpecVersions.write({
     shotId,
@@ -52,10 +58,9 @@ export async function persistShotSpec(
     dialogue: shotDialogue(item.scene.originalScript.dialogue),
   });
 
-  const stillPrompt = !referenceOnly && item.mapping.frameId !== null;
-  if (stillPrompt && item.mapping.frameId) {
+  if (!referenceOnly && frameId !== null) {
     await scopedDb.framePromptVersions.write({
-      frameId: item.mapping.frameId,
+      frameId,
       source: 'derived',
       specVersionId: version.id,
       text: deriveStillPrompt(stored, item.scene, context.styleConfig),
@@ -75,5 +80,5 @@ export async function persistShotSpec(
     inputHash: await hashMotionPromptInput(narrowed),
     analysisModel: context.analysisModel,
   });
-  return { stillPrompt };
+  return { stillPrompt: !referenceOnly };
 }

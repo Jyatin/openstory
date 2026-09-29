@@ -337,7 +337,6 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
           analysisModel: analysisModelId,
           referenceOnly,
         });
-        if (!written) continue;
         const channel = getGenerationChannel(sequenceId);
         const { shotId } = item.mapping;
         if (written.stillPrompt) {

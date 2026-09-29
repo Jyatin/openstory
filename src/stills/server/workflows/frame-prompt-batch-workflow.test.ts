@@ -1,7 +1,8 @@
 /**
- * The visual-prompt LLM only authors 1-shot scenes (#1517). A 2+ shot scene
- * assembles every clip's prompt from its shot-list spec, so the batch spawns
- * nothing for it and returns no scene-level visual for it.
+ * The visual-prompt LLM only authors scenes with no shot-list spec (composed
+ * from D1). A scene whose shots carry specs gets its prompts derived by
+ * analysis (#1919), so the batch spawns nothing for it and returns no
+ * scene-level visual for it.
  */
 
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';

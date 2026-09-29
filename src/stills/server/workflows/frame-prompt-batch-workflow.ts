@@ -80,7 +80,7 @@ export class FramePromptBatchWorkflow extends OpenStoryWorkflowEntrypoint<FrameP
 
     // ============================================================
     // PHASE 3: Visual Prompt Generation — fan out one
-    // FramePromptWorkflow child per 1-shot scene. Spawns happen in parallel
+    // FramePromptWorkflow child per scene with no shot-list spec. Spawns happen in parallel
     // via Promise.all; the awaits are wrapped in Promise.allSettled so a
     // single timed-out child does not tank the entire parent run (each child
     // carries its own retry budget via spawnAndAwaitChild).

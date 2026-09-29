@@ -488,7 +488,8 @@ export function createSequenceElementsMethods(db: Database) {
                   audio: motion.audio,
                   usesStartFrame: motion.usesStartFrame,
                   source: motion.source === 'derived' ? 'derived' : 'renamed',
-                  specVersionId: motion.specVersionId,
+                  // The rename rewrote the text, so no spec produces it any more.
+                  specVersionId: null,
                   inputHash: motion.inputHash,
                   analysisModel: motion.analysisModel,
                 }),
@@ -514,7 +515,7 @@ export function createSequenceElementsMethods(db: Database) {
                   text: delta.imagePrompt,
                   components: image.components,
                   source: image.source === 'derived' ? 'derived' : 'renamed',
-                  specVersionId: image.specVersionId,
+                  specVersionId: null,
                   inputHash: image.inputHash,
                   analysisModel: image.analysisModel,
                 }),

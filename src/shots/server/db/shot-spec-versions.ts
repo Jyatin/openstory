@@ -14,6 +14,16 @@ import {
 import { generateId } from '@/platform/id';
 import type { StoredShotSpec } from '@/shots/shot-list.schema';
 
+/** JSON with sorted keys, so a JSONB round-trip that reorders them still matches. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        )
+      : v
+  );
+
 export function createShotSpecVersionsMethods(db: Database) {
   return {
     /**
@@ -39,7 +49,7 @@ export function createShotSpecVersionsMethods(db: Database) {
       if (
         selected &&
         selected.version.source === input.source &&
-        JSON.stringify(selected.version.spec) === JSON.stringify(input.spec)
+        canonical(selected.version.spec) === canonical(input.spec)
       ) {
         return selected.version;
       }
@@ -61,7 +71,10 @@ export function createShotSpecVersionsMethods(db: Database) {
           .set({ selectedSpecVersionId: id, updatedAt: new Date() })
           .where(eq(shots.id, input.shotId)),
       ]);
-      if (!version) throw new Error('Failed to insert shot spec version');
+      if (!version)
+        throw new Error(
+          `Failed to insert shot spec version for shot ${input.shotId}`
+        );
       return version;
     },
   };

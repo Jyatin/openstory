@@ -5,9 +5,9 @@ import { sceneDirection } from './scene-direction';
  *
  * Single source of truth: a shot's start-frame visual prompt and motion prompt
  * are ASSEMBLED from the parent scene's shared context plus the shot's spec —
- * never re-authored per shot by the LLM. The one derivation for analysis,
- * spec edits and rebuilds (#1915). Keeping the
- * derivation here (one place) is the structural fix for adjacent-clip drift:
+ * never re-authored per shot by the LLM. Analysis calls it today; spec
+ * edits and rebuilds will (#1915 part 2). Keeping the derivation here (one
+ * place) is the structural fix for adjacent-clip drift:
  * every shot in a scene inherits the same location / lighting / palette
  * / style truth verbatim.
  *
@@ -62,7 +62,8 @@ function sceneContextParts(
     direction.colorPalette,
     // Cast belongs to the shot's framing, not the scene-wide roster. Appending
     // that roster here puts later arrivals and off-camera listeners in every
-    // start frame, overriding the subjectStartState above.
+    // start frame, overriding the shot's framing.subjectStartState.
+
     // Style is the single look authored for the whole sequence.
     direction.look,
   ];

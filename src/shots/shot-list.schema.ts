@@ -142,8 +142,8 @@ const shotDialogueLineSchema = z.object({
 /**
  * One structured shot. Carries exactly what a real shot-list entry has:
  * framing/start-state, one primary action, a camera move, a direction note, a
- * sound cue, the lines spoken in it and a duration. Visual + motion prompts are DERIVED from
- * these fields plus the parent scene's shared context (see
+ * sound cue, the lines spoken in it and a duration. Visual + motion prompts
+ * are DERIVED from these fields plus the parent scene's shared context (see
  * `shot-list.derive.ts`).
  */
 export const shotSpecSchema = z.object({

@@ -28,17 +28,12 @@ import {
   type SequenceMusicPromptVersion,
 } from '@/platform/server/db/schema';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
-import {
-  loadSceneContextBySequence,
-  resolveSceneForShot,
-} from '@/shots/server/scene-script';
 import { getFrameImageUrl } from '@/shots/server/frame-image';
 import { loadShotPromptDialogue } from '@/shots/server/shot-dialogue';
 import { simpleHash } from '@/platform/hash';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
 import { terminateSingleArtifactRun } from '@/platform/server/workflow/run-outcome';
 import { storedMotionDialogueSchema } from './scene-analysis.schema';
-import type { Scene } from './scene-analysis.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import type {
   MotionPromptWorkflowInput,
@@ -243,7 +238,7 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
       components: chosen.components,
       parameters: chosen.parameters,
       audio: chosen.audio,
-      source: 'restored',
+      source: chosen.source === 'derived' ? 'derived' : 'restored',
       usesStartFrame: chosen.usesStartFrame,
       inputHash: chosen.inputHash,
       analysisModel: chosen.analysisModel,
@@ -606,28 +601,39 @@ export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
       deduplicationId,
     };
 
-    // Neighbour scenes give the motion LLM the same continuity context the
-    // analysis batch pipeline passes via MotionPromptBatchWorkflow (#929).
-    let sceneBefore: Scene | undefined;
-    let sceneAfter: Scene | undefined;
-    if (data.promptType === 'motion') {
+    // The scene's other shots, so a rewrite keeps continuity with them.
+    let siblingVisualPrompts: Array<{ shotId: string; text: string }> = [];
+    let siblingMotionPrompts: Array<{ shotId: string; text: string }> = [];
+    {
       const shotsInSeq = await scopedDb.shots.listBySequence(sequence.id);
-      const idx = shotsInSeq.findIndex((s) => s.id === shot.id);
-      const prevShot = idx > 0 ? shotsInSeq[idx - 1] : undefined;
-      const nextShot =
-        idx >= 0 && idx < shotsInSeq.length - 1
-          ? shotsInSeq[idx + 1]
-          : undefined;
-      const sceneContext = await loadSceneContextBySequence(
-        scopedDb,
-        sequence.id
+      const siblings = shotsInSeq.filter(
+        (sibling) =>
+          shot.sceneId &&
+          sibling.sceneId === shot.sceneId &&
+          sibling.id !== shot.id &&
+          !sibling.deletedAt
       );
-      sceneBefore = prevShot
-        ? (resolveSceneForShot(prevShot, sceneContext).scene ?? undefined)
-        : undefined;
-      sceneAfter = nextShot
-        ? (resolveSceneForShot(nextShot, sceneContext).scene ?? undefined)
-        : undefined;
+      const siblingFrames = await scopedDb.frames.getAnchorsByShots(
+        siblings.map((sibling) => sibling.id)
+      );
+      const visualVersions =
+        await scopedDb.framePromptVersions.getSelectedByFrameIds(
+          [...siblingFrames.values()].map((anchor) => anchor.id)
+        );
+      siblingVisualPrompts = [...siblingFrames.values()].flatMap((anchor) => {
+        const prompt = visualVersions.get(anchor.id);
+        return prompt?.text
+          ? [{ shotId: anchor.shotId, text: prompt.text }]
+          : [];
+      });
+      const siblingVersions =
+        await scopedDb.shotPromptVersions.getSelectedMotionByShots(
+          siblings.map((sibling) => sibling.id)
+        );
+      siblingMotionPrompts = siblings.flatMap((sibling) => {
+        const prompt = siblingVersions.get(sibling.id);
+        return prompt?.text ? [{ shotId: sibling.id, text: prompt.text }] : [];
+      });
     }
 
     let workflowRunId: string;
@@ -642,6 +648,7 @@ export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
             {
               ...commonInput,
               frameId: frame.id,
+              siblingVisualPrompts,
               targetVersionId: claim.id,
             },
             triggerOpts
@@ -662,8 +669,7 @@ export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
               // through the sequence row, so it has to reach the child too or
               // the stamp and the verify disagree.
               referenceOnly: shotReferenceOnly,
-              sceneBefore,
-              sceneAfter,
+              siblingMotionPrompts,
               dialogue: promptDialogue.dialogue,
               targetVersionId: claim.id,
             },

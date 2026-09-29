@@ -1,16 +1,3 @@
-import type { StyleConfig } from '@/look/style-config';
-const styleConfig: StyleConfig = {
-  version: 2,
-  look: {
-    mood: 'quiet',
-    artStyle: 'watercolour',
-    lighting: 'soft light',
-    colorPalette: ['silver', 'blue'],
-    colorGrading: 'cool shadows',
-  },
-  motion: { camera: 'locked' },
-  references: [],
-};
 /**
  * A continue runs the generation plan's units through the Update-all
  * executor (#1818). These pin the references wave: only the owed sheets,
@@ -30,9 +17,7 @@ import type { PlanTarget, UpdateStalePlan } from '../update-stale-plan';
 import { DEFAULT_ANALYSIS_MODEL } from '@/models/models.config';
 import * as realPlan from '../update-stale-plan';
 import { buildMotionRender } from '@/motion/server/build-motion-render';
-import { buildStoryboardMotionBatchShots } from '@/sequences/server/workflows/storyboard-motion-batch-shots';
 import { motionPromptFromVersion } from '@/motion/server/resolve-motion-prompt';
-import type { Scene } from '@/shots/scene-analysis.schema';
 
 vi.doMock('@/billing/server/fal-pricing-live', () => ({
   getEffectiveFalPricing: vi.fn(async () => ({})),
@@ -68,6 +53,18 @@ vi.doMock('@/shots/server/shot-image-input', () => ({
     async (args: { modelOverride: string }) => ({
       prompt: 'p',
       model: args.modelOverride,
+      frameId: 'anchor',
+      promptVersionId: 'saved-visual',
+      referenceImages: [
+        { referenceImageUrl: 'https://x/cast.png', description: 'cast' },
+      ],
+      sceneSnapshot: {
+        sceneId: 'scene',
+        visualPrompt: 'p',
+        characterSheetHashes: ['sheet-v1'],
+        locationSheetHashes: [],
+        elementReferenceHashes: [],
+      },
     })
   ),
 }));
@@ -88,6 +85,8 @@ vi.doMock('../update-stale-plan', () => ({
   })),
 }));
 
+const triggerWorkflow = vi.fn(async (..._args: unknown[]) => 'grid-run');
+vi.doMock('@/platform/server/workflow/client', () => ({ triggerWorkflow }));
 const failCharacter = new Set<string>();
 const spawnAndAwaitChild = vi.fn(
   async (
@@ -99,6 +98,16 @@ const spawnAndAwaitChild = vi.fn(
         throw new Error('sheet model refused');
       }
     }
+    if (args.spawnStepName === 'spawn-character-sheet-maya')
+      return {
+        sheetImageUrl: 'https://x/new-maya.png',
+        sheetVersionId: 'new-maya-version',
+      };
+    if (args.spawnStepName === 'spawn-location-sheet-hall')
+      return {
+        referenceImageUrl: 'https://x/new-hall.png',
+        referenceVersionId: 'new-hall-version',
+      };
     if (args.spawnStepName.startsWith('spawn-frame-prompt-'))
       return { finalVersionId: 'visual-result' };
     if (args.spawnStepName === 'spawn-dialogue-audio')
@@ -177,6 +186,7 @@ function makeScopedDb(): WorkflowScopedDb {
       },
     },
     liveRead: {
+      compliance: { listEnforcementFor: vi.fn(async () => []) },
       sequences: {
         getById: vi.fn(async () => ({
           musicStatus: 'completed',
@@ -222,8 +232,6 @@ function target(shotId: string, referenceIds: string[]): PlanTarget {
   return {
     shotId,
     frameId: `f-${shotId}`,
-    beforeShotId: null,
-    afterShotId: null,
     startingFrameImageUrl: null,
     usesStartFrame: true,
     durationMs: null,
@@ -266,6 +274,7 @@ function plan(overrides: Partial<UpdateStalePlan>): UpdateStalePlan {
     characterVoices: [],
     dialogueRecording: null,
     renderRefs: { characters: [], locations: [], elements: [] },
+    scenePrompts: {},
     targets: [],
     skipped: [],
     references: null,
@@ -314,6 +323,7 @@ const references = {
 describe('UpdateStaleShotsWorkflow — a continue (#1818)', () => {
   beforeEach(() => {
     spawnAndAwaitChild.mockClear();
+    triggerWorkflow.mockClear();
     emit.mockClear();
     failCharacter.clear();
   });
@@ -407,6 +417,7 @@ const clipTarget = (id: string): PlanTarget => ({
 describe('executor packed clips', () => {
   beforeEach(() => {
     spawnAndAwaitChild.mockClear();
+    triggerWorkflow.mockClear();
     failCharacter.clear();
   });
   it('deduplicates stale siblings into one generation using frozen membership and model', async () => {
@@ -426,107 +437,61 @@ describe('executor packed clips', () => {
     });
     expect(result.videos).toBe(1);
   });
-  it('submits identical packed prompts from fresh, manual and executor sources', async () => {
-    const dialogue = { presence: false, lines: [] };
-    const version = { text: 'She crosses the room.', audio: null };
-    // Only the scene fields read by the fresh source factory are needed.
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- intentionally minimal analysis fixture
-    const scene = {
-      sceneId: 'scene-1',
-      sceneNumber: 1,
-      metadata: {
-        title: 'Room',
+  it.each([true, false])(
+    'submits manual-equivalent packed prompts through the shared executor (freshRun=%s)',
+    async (freshRun) => {
+      const dialogue = { presence: false, lines: [] };
+      const version = { text: 'She crosses the room.', audio: null };
+      const ids = ['a', 'b'];
+      const context = { userId: 'u1', teamId: 't1', sequenceId: 'seq-1' };
+      const header = {
         location: 'Frozen room',
         timeOfDay: 'Night',
-        durationSeconds: 4,
-      },
-      originalScript: { extract: '', dialogue: [] },
-      continuity: {
-        characterTags: [],
         lightingSetup: 'overhead lamp',
         colorPalette: 'cold blue',
-      },
-      shots: [
-        { shotNumber: 1, durationSeconds: 2 },
-        { shotNumber: 2, durationSeconds: 2 },
-      ],
-    } as unknown as Scene;
-    const ids = ['a', 'b'];
-    const fresh = buildStoryboardMotionBatchShots({
-      styleConfig,
-      scenes: [scene],
-      shotMapping: ids.map((shotId, index) => ({
-        analysisSceneId: 'scene-1',
-        shotId,
-        shotNumber: index + 1,
-      })),
-      imageUrls: [],
-      frameVersionIds: [],
-      motionPromptsBySceneId: {
-        'scene-1': {
-          fullPrompt: version.text,
-          dialogue,
-          audio: { ambientSound: '', soundEffects: [] },
-        },
-      },
-      motionPromptVersionIdsBySceneId: {},
-      motionPromptVersionIdsByShotId: { a: 'prompt-a', b: 'prompt-b' },
-      videoModel: 'kling_v3_pro',
-      aspectRatio: '16:9',
-      referenceOnly: true,
-      characters: [],
-      elements: [],
-    });
-    const context = { userId: 'u1', teamId: 't1', sequenceId: 'seq-1' };
-    const freshJobs = buildMotionRender({ ...context, shots: fresh });
-    expect(freshJobs).toHaveLength(1);
-    const header = {
-      location: 'Frozen room',
-      timeOfDay: 'Night',
-      lightingSetup: 'overhead lamp',
-      colorPalette: 'cold blue',
-      look: 'watercolour, cool shadows',
-    };
-    // The manual path reconstructs selected immutable prompt rows and D1 scene data.
-    const manualJobs = buildMotionRender({
-      ...context,
-      shots: ids.map((shotId) => ({
-        shotId,
-        sceneId: 'scene-1',
-        renderSegmentId: 'segment-1',
-        referenceOnly: true,
-        packedScene: header,
+        look: 'watercolour, cool shadows',
+      };
+      // The manual path reconstructs selected immutable prompt rows and D1 scene data.
+      const manualJobs = buildMotionRender({
+        ...context,
+        shots: ids.map((shotId) => ({
+          shotId,
+          sceneId: 'scene-1',
+          renderSegmentId: 'segment-1',
+          referenceOnly: true,
+          packedScene: header,
+          attachSceneHeader: true,
+          duration: 2,
+          model: 'kling_v3_pro',
+          prompt: version.text,
+          motionPrompt: motionPromptFromVersion(version, dialogue),
+          characterTags: [],
+          motionPromptVersionId: `prompt-${shotId}`,
+        })),
+      });
+      const expected = {
+        prompt: manualJobs[0]?.input.prompt,
+        multiPrompt: manualJobs[0]?.input.multiPrompt,
+      };
+      expect(manualJobs).toHaveLength(1);
+      const targets = ids.map((id) => ({
+        ...clipTarget(id),
+        durationMs: 2000,
         attachSceneHeader: true,
-        duration: 2,
-        model: 'kling_v3_pro',
-        prompt: version.text,
-        motionPrompt: motionPromptFromVersion(version, dialogue),
-        characterTags: [],
-        motionPromptVersionId: `prompt-${shotId}`,
-      })),
-    });
-    const expected = {
-      prompt: freshJobs[0]?.input.prompt,
-      multiPrompt: freshJobs[0]?.input.multiPrompt,
-    };
-    expect(manualJobs[0]?.input).toMatchObject(expected);
-    const targets = ids.map((id) => ({
-      ...clipTarget(id),
-      durationMs: 2000,
-      attachSceneHeader: true,
-      motionRender: {
-        ...clipTarget(id).motionRender,
-        packedScene: header,
-        characterTags: [],
-      },
-    }));
-    const result = await run(plan({ targets }));
-    expect(result.failures).toEqual([]);
-    expect(spawned().filter((name) => name.startsWith('spawn-video-'))).toEqual(
-      ['spawn-video-a']
-    );
-    expect(payloadOf('spawn-video-a')).toMatchObject(expected);
-  });
+        motionRender: {
+          ...clipTarget(id).motionRender,
+          packedScene: header,
+          characterTags: [],
+        },
+      }));
+      const result = await run(plan({ targets }), { freshRun });
+      expect(result.failures).toEqual([]);
+      expect(
+        spawned().filter((name) => name.startsWith('spawn-video-'))
+      ).toEqual(['spawn-video-a']);
+      expect(payloadOf('spawn-video-a')).toMatchObject(expected);
+    }
+  );
 
   it('uses click-time reference URLs instead of reloading selection pointers', async () => {
     const shot = clipTarget('a');
@@ -567,6 +532,7 @@ describe('executor packed clips', () => {
 describe('fresh executor parity (#1891)', () => {
   beforeEach(() => {
     spawnAndAwaitChild.mockClear();
+    triggerWorkflow.mockClear();
     requireCredits.mockClear();
     emit.mockClear();
     failCharacter.clear();
@@ -614,6 +580,37 @@ describe('fresh executor parity (#1891)', () => {
     );
     expect(result.failures).toEqual([]);
     expect(result.images).toBe(2);
+    expect(triggerWorkflow).toHaveBeenCalledTimes(2);
+    for (const model of ['nano_banana_2', 'seedream_v5']) {
+      expect(triggerWorkflow).toHaveBeenCalledWith(
+        '/variant-image',
+        expect.objectContaining({
+          shotId: 'a',
+          thumbnailUrl: 'https://x/still.png',
+          scenePrompt: 'p',
+          frameId: 'anchor',
+          promptVersionId: 'saved-visual',
+          referenceImages: [
+            { referenceImageUrl: 'https://x/cast.png', description: 'cast' },
+          ],
+          tileHashInput: expect.objectContaining({
+            visualPrompt: 'p',
+            characterSheetHashes: ['sheet-v1'],
+          }),
+          model,
+        }),
+        expect.objectContaining({
+          deduplicationId: expect.stringContaining(`-a-${model}`),
+          enforcement: [],
+        })
+      );
+    }
+    expect(
+      triggerWorkflow.mock.calls.every(
+        (call) => !Object.hasOwn(Object(call[1]), 'reservationId')
+      )
+    ).toBe(true);
+
     expect(payloadOf('spawn-image-a')).toMatchObject({
       model: 'nano_banana_2',
       targetVariantId: 'claim-a',
@@ -630,6 +627,20 @@ describe('fresh executor parity (#1891)', () => {
       'claim-a'
     );
   });
+  it('does not start fresh enrichment grids during Continue', async () => {
+    await run(plan({ targets: [target('a', [])] }));
+    expect(triggerWorkflow).not.toHaveBeenCalled();
+  });
+
+  it.each([{ cancelled: true, imageUrl: '' }, { imageUrl: '' }])(
+    'does not start a grid when the still produces no artifact (%j)',
+    async (output) => {
+      spawnAndAwaitChild.mockResolvedValueOnce(output);
+      await run(plan({ targets: [target('a', [])] }), { freshRun: true });
+      expect(triggerWorkflow).not.toHaveBeenCalled();
+    }
+  );
+
   it('renders video alternatives without overriding a leftover Grok choice', async () => {
     const result = await run(
       plan({
@@ -800,4 +811,61 @@ describe('fresh executor parity (#1891)', () => {
       reservationId: 'hold',
     });
   });
+});
+
+it('overlays first generated sheets onto the pending bible rows before a fresh still', async () => {
+  spawnAndAwaitChild.mockClear();
+  failCharacter.clear();
+  const { prepareShotImageWorkflowInput } =
+    await import('@/shots/server/shot-image-input');
+  vi.mocked(prepareShotImageWorkflowInput).mockClear();
+  const result = await run(
+    plan({
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- minimal child payloads
+      references: {
+        characterSheets: [{ characterDbId: 'maya' }],
+        locationSheets: [{ locationDbId: 'hall' }],
+        elementSheets: null,
+        voices: [],
+        cost: { sheets: 0, voices: 0 },
+      } as never,
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- pending row identity and media are the exercised fields
+      renderRefs: {
+        characters: [
+          { id: 'maya', sheetImageUrl: null, selectedSheetVersionId: null },
+        ],
+        locations: [
+          {
+            id: 'hall',
+            referenceImageUrl: null,
+            selectedReferenceVersionId: null,
+          },
+        ],
+        elements: [],
+      } as never,
+      targets: [target('fresh-shot', ['maya', 'hall'])],
+    }),
+    { freshRun: true }
+  );
+  expect(result.failures).toEqual([]);
+  expect(prepareShotImageWorkflowInput).toHaveBeenCalledWith(
+    expect.objectContaining({
+      refs: expect.objectContaining({
+        characters: [
+          expect.objectContaining({
+            id: 'maya',
+            sheetImageUrl: 'https://x/new-maya.png',
+            selectedSheetVersionId: 'new-maya-version',
+          }),
+        ],
+        locations: [
+          expect.objectContaining({
+            id: 'hall',
+            referenceImageUrl: 'https://x/new-hall.png',
+            selectedReferenceVersionId: 'lrv-hall',
+          }),
+        ],
+      }),
+    })
+  );
 });

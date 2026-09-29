@@ -97,12 +97,15 @@ import {
 import {
   claimTargets,
   findTargetMissingStartFrameMode,
+  siblingPrompts,
   type MusicPlan,
   type PlanTarget,
   type ShotClaims,
   type SkippedShot,
 } from '@/shots/server/update-stale-plan';
 import { bindPendingVoices } from '@/shots/server/pending-voices';
+import { triggerWorkflow } from '@/platform/server/workflow/client';
+import { shotVariantDedupId } from '@/platform/server/workflow/dedup-ids';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
@@ -117,6 +120,7 @@ import type {
   LocationSheetWorkflowResult,
   FramePromptWorkflowInput,
   ImageWorkflowInput,
+  ShotVariantWorkflowInput,
   MotionPromptWorkflowInput,
   DialogueAudioWorkflowInput,
   DialogueAudioWorkflowResult,
@@ -178,8 +182,6 @@ type PromptScenes = {
   /** Script-overlaid scene metadata, the prompt children's primary input. */
   scene: Scene;
   /** Raw neighbour metadata for motion continuity. */
-  sceneBefore?: Scene;
-  sceneAfter?: Scene;
 };
 
 export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<UpdateStaleShotsWorkflowInput> {
@@ -219,6 +221,8 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
     if (
       // oxlint-disable-next-line typescript/no-unnecessary-condition -- queued pre-1888 payloads lack this required snapshot
       !plan.renderRefs ||
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- plans frozen before per-scene prompts
+      !plan.scenePrompts ||
       plan.targets.some((target) => !target.motionRender)
     ) {
       throw new WorkflowValidationError(
@@ -753,7 +757,44 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
       if (!output.imageUrl) {
         throw new Error('Image workflow completed without producing an image');
       }
+      const thumbnailUrl = output.imageUrl;
       counters.images += 1;
+      if (input.freshRun) {
+        // Independent enrichment, as in ShotImagesWorkflow: it can outlive
+        // this run and bills its own instance rather than the parent envelope.
+        await step.do(`trigger-variant-${target.shotId}-${model}`, async () => {
+          const enforcement =
+            await scopedDb.liveRead.compliance.listEnforcementFor(
+              userId,
+              teamId
+            );
+          await triggerWorkflow<ShotVariantWorkflowInput>(
+            '/variant-image',
+            {
+              userId,
+              teamId,
+              sequenceId,
+              shotId: target.shotId,
+              frameId: imageInput.frameId,
+              thumbnailUrl,
+              scenePrompt: imageInput.prompt,
+              promptVersionId: imageInput.promptVersionId,
+              referenceImages: imageInput.referenceImages,
+              aspectRatio: imageInput.aspectRatio,
+              model,
+              tileHashInput: imageInput.sceneSnapshot ?? null,
+            },
+            {
+              deduplicationId: shotVariantDedupId(
+                parentInstanceId,
+                target.shotId,
+                model
+              ),
+              enforcement,
+            }
+          );
+        });
+      }
     };
 
     const spawnImage = async (
@@ -1081,29 +1122,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             'WorkflowValidationError'
           );
         }
-        const neighbourIds = [target.beforeShotId, target.afterShotId].filter(
-          (id): id is string => id !== null
-        );
-        const neighbours = await Promise.all(
-          neighbourIds.map((id) => scopedDb.liveRead.shots.getById(id))
-        );
-        const sceneById = new Map(
-          neighbours
-            .filter((s) => !!s)
-            .map((s) => [
-              s.id,
-              resolveSceneForShot(s, sceneContext).scene ?? undefined,
-            ])
-        );
-        return {
-          scene,
-          sceneBefore: target.beforeShotId
-            ? sceneById.get(target.beforeShotId)
-            : undefined,
-          sceneAfter: target.afterShotId
-            ? sceneById.get(target.afterShotId)
-            : undefined,
-        };
+        return { scene };
       });
 
     // Dialogue is recorded ONCE PER SCENE (#1657). Fresh runs record after
@@ -1174,6 +1193,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               scenes: dialogueRecording.scenes,
               minDurationSeconds: dialogueRecording.minDurationSeconds,
               maxDurationSeconds: dialogueRecording.maxDurationSeconds,
+              analysisModelId: plan.promptContext?.analysisModelId,
             },
             spawnStepName: 'spawn-dialogue-audio',
             awaitStepName: 'await-dialogue-audio',
@@ -1390,8 +1410,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                   childPayload: {
                     ...base,
                     dialogue: target.dialogue,
-                    sceneBefore: scenes.sceneBefore,
-                    sceneAfter: scenes.sceneAfter,
+                    siblingMotionPrompts: siblingPrompts(plan, target).motion,
                     startingFrameImageUrl: target.usesStartFrame
                       ? (startingFrameImageUrl ?? undefined)
                       : undefined,
@@ -1430,6 +1449,8 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                       childPayload: {
                         ...base,
                         frameId: target.frameId,
+                        siblingVisualPrompts: siblingPrompts(plan, target)
+                          .visual,
                         targetVersionId: claims.visualVersionId ?? undefined,
                       },
                       spawnStepName: `spawn-frame-prompt-${target.shotId}`,

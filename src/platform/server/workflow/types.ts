@@ -209,6 +209,8 @@ export interface ShotVariantWorkflowInput extends SequenceWorkflowContext {
   /** The `frame_prompt_versions` row `scenePrompt` was read from, snapshotted
    * at the trigger — stamped on the sheet version for provenance (#1070). */
   promptVersionId?: string | null;
+  /** Already ordered still references, frozen by the shared plan executor. */
+  referenceImages?: ReferenceImageDescription[];
   /** Character reference sheets for visual consistency */
   characterReferences?: ReferenceImageDescription[];
   /** Location reference images for environment consistency */
@@ -1150,9 +1152,8 @@ export interface FramePromptBatchWorkflowResult {
 }
 
 export interface FramePromptWorkflowInput extends SequenceWorkflowContext {
+  siblingVisualPrompts?: Array<{ shotId: string; text: string }>;
   scene: Scene;
-  sceneBefore?: Scene;
-  sceneAfter?: Scene;
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
@@ -1228,14 +1229,14 @@ export interface MotionPromptBatchWorkflowInput extends SequenceWorkflowContext 
 
 export interface MotionPromptWorkflowInput extends SequenceWorkflowContext {
   scene: Scene;
+  /** Saved sibling directions, context only: never re-derived from a shot spec. */
+  siblingMotionPrompts?: Array<{ shotId: string; text: string }>;
   /**
    * What the shot says, snapshotted at the trigger from
    * `shotDialogueResolver` (#1784). It replaces `scene`'s script lines in
    * what the LLM reads and what the hash stamps (`sceneWithShotDialogue`).
    */
   dialogue: MotionDialogue;
-  sceneBefore?: Scene;
-  sceneAfter?: Scene;
   aspectRatio: AspectRatio;
   characterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];

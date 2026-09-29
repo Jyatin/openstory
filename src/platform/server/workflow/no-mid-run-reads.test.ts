@@ -480,6 +480,11 @@ const ALLOWED_LIVE_READS: Record<string, SanctionedRead[]> = {
   // compute-plan now runs at the trigger, so the plan arrives on the payload.
   'update-stale-shots-workflow.ts': [
     {
+      read: 'compliance.listEnforcementFor',
+      bucket: 'BILLING-GUARD',
+      why: 'Spawn-time enforcement for independent fresh-run framing grids, as in ShotImagesWorkflow.',
+    },
+    {
       read: 'apiKeys.hasUsableKey',
       bucket: 'BILLING-GUARD',
       why: 'The references wave bills only platform sheets when fal BYOK is unavailable; voices always spend platform funds.',
@@ -663,6 +668,15 @@ describe('workflows read no unsanctioned mutable DB state mid-run', () => {
       'Only update-stale-shots-workflow.ts may use scopedDb.stalenessPlanning. ' +
         'Everything else snapshots at the trigger or goes through scopedDb.liveRead.'
     ).toEqual(['update-stale-shots-workflow.ts']);
+  });
+
+  test('generation planning is restricted to the storyboard handoff', () => {
+    const users = workflowSourceFiles().filter((file) =>
+      stripCommentLines(readFileSync(workflowPath(file), 'utf8')).includes(
+        'generationPlanning'
+      )
+    );
+    expect(users).toEqual(['storyboard-workflow.ts']);
   });
 
   test('each read comes through the hatch its bucket requires', () => {

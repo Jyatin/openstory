@@ -153,8 +153,8 @@ export async function loadShotStalenessBatch(
     await Promise.all([
       scopedDb.frames.listAnchorsBySequence(sequence.id),
       loadSceneContextBySequence(scopedDb, sequence.id),
-      scopedDb.characters.listWithSheets(sequence.id),
-      scopedDb.sequenceLocations.listWithReferences(sequence.id),
+      scopedDb.characters.list(sequence.id),
+      scopedDb.sequenceLocations.list(sequence.id),
       scopedDb.sequenceElements.list(sequence.id),
       sequence.styleId
         ? scopedDb.styles.getById(sequence.styleId)
@@ -480,8 +480,8 @@ export async function computeShotStaleness(args: {
         const [characters, locations, elements] = refs
           ? [refs.characters, refs.locations, refs.elements]
           : await Promise.all([
-              scopedDb.characters.listWithSheets(sequence.id),
-              scopedDb.sequenceLocations.listWithReferences(sequence.id),
+              scopedDb.characters.list(sequence.id),
+              scopedDb.sequenceLocations.list(sequence.id),
               scopedDb.sequenceElements.list(sequence.id),
             ]);
 
@@ -543,8 +543,11 @@ export async function computeShotStaleness(args: {
         : await scopedDb.characters.listBibleVersionsBySequence(sequence.id),
       at
     );
-  let selectedMotion: { inputHash: string | null; createdAt: Date } | null =
-    null;
+  let selectedMotion: {
+    inputHash: string | null;
+    createdAt: Date;
+    source: string;
+  } | null = null;
 
   // Reference hash resolution: prefer the SELECTED version's `inputHash`, but
   // fall back to the most recent version with a non-null one for prompts whose
@@ -626,19 +629,28 @@ export async function computeShotStaleness(args: {
       const latest = reads
         ? (reads.latestMotionByShot.get(shot.id) ?? null)
         : await scopedDb.shotPromptVersions.getLatest(shot.id, 'motion');
-      const ctx = {
+      const contextWithFrame = async (
+        startingFrameImageUrl: string | null
+      ) => ({
         ...(await loadNarrowShotPromptContext({
           scopedDb,
           sequence: motionSequence,
           scene,
           analysisModelOverride: latest?.analysisModel ?? null,
-          startingFrameImageUrl: motionStartingFrameUrl,
+          startingFrameImageUrl,
           refs,
         })),
         dialogue: dialogue.dialogue,
-      };
-      const liveHash = await hashMotionPromptInput(ctx);
-      liveHashes.motionPrompt = liveHash;
+      });
+      // The live hash stamps the next LLM-written prompt, which sees the still.
+      // Only a derived reference is verified without one, as it was written.
+      const withFrame = await contextWithFrame(motionStartingFrameUrl);
+      liveHashes.motionPrompt = await hashMotionPromptInput(withFrame);
+      const derived = reference?.source === 'derived';
+      const ctx = derived ? await contextWithFrame(null) : withFrame;
+      const liveHash = derived
+        ? await hashMotionPromptInput(ctx)
+        : liveHashes.motionPrompt;
       if (referenceHash) {
         motionPrompt =
           referenceHash === liveHash ||
@@ -737,10 +749,8 @@ export async function computeShotStaleness(args: {
   if ([thumbnail, visualPrompt, motionPrompt].includes('stale')) {
     try {
       const resolvedRefs: ShotStalenessRefs = refs ?? {
-        characters: await scopedDb.characters.listWithSheets(sequence.id),
-        locations: await scopedDb.sequenceLocations.listWithReferences(
-          sequence.id
-        ),
+        characters: await scopedDb.characters.list(sequence.id),
+        locations: await scopedDb.sequenceLocations.list(sequence.id),
         elements: await scopedDb.sequenceElements.list(sequence.id),
         style: sequence.styleId
           ? await scopedDb.styles.getById(sequence.styleId)

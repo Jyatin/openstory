@@ -134,8 +134,12 @@ vi.doMock('@/shots/input-hash', () => ({
   ),
 }));
 
-const { computePlan, claimTargets, findTargetMissingStartFrameMode } =
-  await import('./update-stale-plan');
+const {
+  computePlan,
+  claimTargets,
+  findTargetMissingStartFrameMode,
+  siblingPrompts,
+} = await import('./update-stale-plan');
 type PlanTarget = import('./update-stale-plan').PlanTarget;
 type PlanUnitRef = import('@/sequences/generation-plan').PlanUnitRef;
 
@@ -170,6 +174,8 @@ function buildScopedDb(
   frames: Frame[],
   opts: {
     video?: VideoFixture;
+    visualPrompts?: Map<string, { text: string }>;
+    motionPrompts?: Map<string, { text: string }>;
     sequence?: Record<string, unknown>;
     /** The completed primary `sequence_music_variants` row, if any (#1657). */
     musicPrimary?: Record<string, unknown>;
@@ -222,16 +228,20 @@ function buildScopedDb(
         ),
     },
     framePromptVersions: {
-      getSelectedByFrameIds: () => Promise.resolve(new Map()),
+      getSelectedByFrameIds: () =>
+        Promise.resolve(opts.visualPrompts ?? new Map()),
     },
     shotPromptVersions: {
-      getSelectedMotionByShots: () => Promise.resolve(new Map()),
+      getSelectedMotionByShots: () =>
+        Promise.resolve(opts.motionPrompts ?? new Map()),
     },
     characters: {
-      listWithSheets: () => Promise.resolve([]),
       list: () => Promise.resolve([]),
     },
-    sequenceLocations: { listWithReferences: () => Promise.resolve([]) },
+    sequenceLocations: {
+      list: () => Promise.resolve([]),
+      listWithReferences: () => Promise.resolve([]),
+    },
     sequenceElements: { list: () => Promise.resolve([]) },
     styles: { getById: () => Promise.resolve(null) },
     renderSegments: {
@@ -301,7 +311,6 @@ describe('computePlan — a dialogue unit (#1703, #1780 §6)', () => {
         getSelectedBySequence: () => Promise.resolve([voicedVersion]),
       },
       characters: {
-        listWithSheets: () => Promise.resolve([]),
         list: () =>
           Promise.resolve([{ name: 'Woman', voiceId: 'voice-woman' }]),
       },
@@ -474,8 +483,6 @@ describe('claimTargets (#1085)', () => {
     return {
       shotId: 'shot-1',
       frameId: 'frame-1',
-      beforeShotId: null,
-      afterShotId: null,
       startingFrameImageUrl: null,
       usesStartFrame: true,
       durationMs: null,
@@ -735,10 +742,7 @@ describe('computePlan — durable step-result size', () => {
     const target = result.targets[0];
     expect(target).toBeDefined();
     // Neighbours are carried as ids, resolved to scenes per shot at spawn time.
-    expect(target).toMatchObject({
-      beforeShotId: 'shot-0',
-      afterShotId: 'shot-2',
-    });
+    expect(target).toMatchObject({});
     expect(target).not.toHaveProperty('scene');
     expect(target?.motionRender).toMatchObject({
       sceneId: 'scene-1',
@@ -832,6 +836,49 @@ describe('fresh plan model choices', () => {
       imageModels: ['seedream_v5', 'nano_banana_2'],
       videoModels: ['seedance_v2', 'kling_v3_pro'],
       audioModels: ['elevenlabs_music'],
+    });
+  });
+});
+
+describe('saved sibling direction snapshots', () => {
+  it('carries visual and motion framing from the same scene while excluding the target and other scenes', async () => {
+    const shots = [
+      makeShot(),
+      makeShot({ id: 'sibling' }),
+      makeShot({ id: 'other', sceneId: 'elsewhere' }),
+    ];
+    const frames = [
+      makeFrame(),
+      makeFrame({ id: 'sibling-frame', shotId: 'sibling' }),
+      makeFrame({ id: 'other-frame', shotId: 'other' }),
+    ];
+    const plan = await computePlan({
+      scopedDb: buildScopedDb(shots, frames, {
+        visualPrompts: new Map([
+          ['frame-1', { text: 'Target' }],
+          ['sibling-frame', { text: 'Close-up of the listener' }],
+          ['other-frame', { text: 'Another room' }],
+        ]),
+        motionPrompts: new Map([
+          ['shot-1', { text: 'Target' }],
+          ['sibling', { text: 'Listener turns toward camera' }],
+          ['other', { text: 'Other action' }],
+        ]),
+      }),
+      sequenceId: 'seq-1',
+      userId: 'user',
+      units: [
+        { kind: 'prompt:visual', id: 'shot-1' },
+        { kind: 'prompt:motion', id: 'shot-1' },
+      ],
+    });
+    // One copy per scene, not per target (#1903): the other scene is absent.
+    expect(Object.keys(plan.scenePrompts)).toEqual(['scene-1']);
+    const [target] = plan.targets;
+    if (!target) throw new Error('expected a target');
+    expect(siblingPrompts(plan, target)).toEqual({
+      visual: [{ shotId: 'sibling', text: 'Close-up of the listener' }],
+      motion: [{ shotId: 'sibling', text: 'Listener turns toward camera' }],
     });
   });
 });

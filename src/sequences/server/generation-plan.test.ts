@@ -142,7 +142,7 @@ describe('computeGenerationPlan', () => {
       'sheet:character:ravi': 'missing',
       'prompt:visual:s1': 'stale',
       'still:s1': 'stale',
-      'prompt:motion:s1': 'stale',
+      'prompt:motion:s1': 'done',
       'clip:s1': 'missing',
       'prompt:music:seq-1': 'missing',
       'music:seq-1': 'missing',

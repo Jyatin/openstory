@@ -75,14 +75,11 @@ import {
   motionPromptFromVersion,
   resolveMotionPromptFromVersion,
 } from '@/motion/server/resolve-motion-prompt';
-import { getAnchorImageUrl } from '@/shots/server/frame-image';
 import type {
   FramePromptVersion,
   FrameVariant,
   ShotPromptVersion,
 } from '@/platform/server/db/schema';
-import type { FramePromptResult } from '@/stills/server/workflows/frame-prompt-workflow';
-import type { MotionPromptWorkflowResult } from '@/motion/server/workflows/motion-prompt-workflow';
 import { getLogger } from '@/platform/logger';
 import { reinforceInstrumentalTags } from '@/audio/server/music-prompt';
 import {
@@ -97,7 +94,6 @@ import {
 import {
   claimTargets,
   findTargetMissingStartFrameMode,
-  siblingPrompts,
   type MusicPlan,
   type PlanTarget,
   type ShotClaims,
@@ -108,7 +104,10 @@ import { triggerWorkflow } from '@/platform/server/workflow/client';
 import { shotVariantDedupId } from '@/platform/server/workflow/dedup-ids';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
-import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import {
+  isEngineAbortError,
+  WorkflowValidationError,
+} from '@/platform/server/workflow/errors';
 import type {
   CharacterSheetWorkflowInput,
   CharacterSheetWorkflowResult,
@@ -118,10 +117,10 @@ import type {
   ElementSheetWorkflowResult,
   LocationSheetWorkflowInput,
   LocationSheetWorkflowResult,
-  FramePromptWorkflowInput,
   ImageWorkflowInput,
+  ShotSpecRewriteWorkflowInput,
+  ShotSpecRewriteWorkflowResult,
   ShotVariantWorkflowInput,
-  MotionPromptWorkflowInput,
   DialogueAudioWorkflowInput,
   DialogueAudioWorkflowResult,
   MotionWorkflowInput,
@@ -131,7 +130,11 @@ import type {
   MusicWorkflowInput,
   UpdateStaleShotsWorkflowInput,
 } from '@/platform/server/workflow/types';
-import { getGenerationChannel } from '@/platform/realtime';
+import {
+  getGenerationChannel,
+  getShotPromptChannel,
+} from '@/platform/realtime';
+import { completeDerivedPrompts } from '@/shots/server/rebuild-shot-prompts';
 import {
   GENERATION_STAGE_META,
   type GenerationStage,
@@ -146,6 +149,7 @@ const PARENT_BINDING_NAME = 'UPDATE_STALE_SHOTS_WORKFLOW';
 type UpdateStage =
   | 'reference'
   | 'voice'
+  | 'spec'
   | 'visual-prompt'
   | 'motion-prompt'
   | 'image'
@@ -1228,11 +1232,10 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
     }> = [];
 
     // ============================================================
-    // PHASE 2: fan out — one job per shot, so a shot's scene step runs once
-    // for both its prompt children. Within a shot the visual-prompt → image
-    // chain is sequential while the motion prompt runs alongside, and the
-    // video render (depth ≥ 'video') waits on both. Failures are recorded
-    // per stage so one shot never blocks its peers.
+    // PHASE 2: fan out — one job per shot. A stale spec is rewritten, then
+    // its prompts are rebuilt from the new spec. A current spec rebuilds
+    // for free, with no LLM. The still waits on the visual prompt. Motion
+    // does not wait on the still. The video render waits on both.
     // ============================================================
     // `promptCommon` is provably non-null whenever targets exist (the guard
     // above throws otherwise); the ternary is for the compiler, and yields
@@ -1245,6 +1248,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               visualVersionId: null,
               motionVersionId: null,
               imageVariantId: null,
+              specClaimId: null,
             };
             // A regen flag without a claim means another run already owns that
             // artifact ('already-in-flight' in `skipped`) — this run stands down.
@@ -1252,6 +1256,9 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               target.regenVisual && claims.visualVersionId !== null;
             const doMotion =
               target.regenMotion && claims.motionVersionId !== null;
+            const specClaimId = claims.specClaimId;
+            const doRewrite =
+              target.rewriteSpec === true && specClaimId !== null;
             // A sheet / element this run failed to make holds the still and
             // clip made from it (#1818) — never render without it.
             const heldByReference =
@@ -1270,6 +1277,30 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             const failClaims = (stage: UpdateStage): Promise<null> =>
               step.do(`fail-claim-${stage}-${target.shotId}`, async () => {
                 try {
+                  if (stage === 'spec') {
+                    if (claims.specClaimId) {
+                      await scopedDb.shotSpecVersions.clearClaimIf({
+                        shotId: target.shotId,
+                        claimId: claims.specClaimId,
+                      });
+                    }
+                    if (claims.visualVersionId) {
+                      await scopedDb.framePromptVersions.markTerminal(
+                        claims.visualVersionId,
+                        'failed'
+                      );
+                      await scopedDb.frameVariants.cancelByDependency(
+                        claims.visualVersionId,
+                        'Upstream shot rewrite failed'
+                      );
+                    }
+                    if (claims.motionVersionId) {
+                      await scopedDb.shotPromptVersions.markTerminal(
+                        claims.motionVersionId,
+                        'failed'
+                      );
+                    }
+                  }
                   if (stage === 'visual-prompt' && claims.visualVersionId) {
                     await scopedDb.framePromptVersions.markTerminal(
                       claims.visualVersionId,
@@ -1302,13 +1333,17 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                 return null;
               });
 
-            const needsPrompt = doVisual || doMotion;
+            const needsPrompt = doVisual || doMotion || doRewrite;
             let scenes: PromptScenes | null = null;
             if (needsPrompt) {
               try {
                 scenes = await loadPromptScenes(target);
               } catch (error) {
-                // Both prompt stages depend on this; neither can proceed.
+                if (isEngineAbortError(error)) throw error;
+                if (doRewrite) {
+                  failures.push(toFailure(target.shotId, 'spec', error));
+                  await failClaims('spec');
+                }
                 if (doVisual) {
                   failures.push(
                     toFailure(target.shotId, 'visual-prompt', error)
@@ -1348,156 +1383,222 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               motionVersionId: string | null;
             } = { visualVersionId: null, motionVersionId: null };
 
-            const base = scenes && {
-              userId,
-              teamId,
-              sequenceId,
-              shotId: target.shotId,
-              scene: scenes.scene,
-              aspectRatio: plan.aspectRatio,
-              ...promptCommon,
-              reservationId: input.reservationId,
-              // The user just clicked Update all, so a mounted shot panel should
-              // see its prompt stream in — same as the single-shot regen path.
-              emitStreaming: true,
+            const context = promptCommon;
+            const canRebuild = Boolean(target.spec && target.specVersionId);
+
+            const notePromptMiss = (
+              kind: 'visual' | 'motion',
+              error: unknown
+            ) => {
+              if (kind === 'visual') upstream.imageOk = false;
+              else upstream.motionOk = false;
+              failures.push(
+                toFailure(
+                  target.shotId,
+                  kind === 'visual' ? 'visual-prompt' : 'motion-prompt',
+                  error
+                )
+              );
             };
 
-            const stages: Array<Promise<void>> = [];
-
-            // The motion prompt is conditioned on the rendered still (#929),
-            // so when this run ALSO regenerates the image it must run after
-            // the image chain and read the fresh still — racing them stamps a
-            // hash the new still immediately invalidates, and the artifact
-            // reads stale again the moment the run finishes (#1095 review).
-            const runMotionPrompt = async (): Promise<void> => {
-              if (!(doMotion && base && scenes)) return;
-              let startingFrameImageUrl = target.startingFrameImageUrl;
-              if (doImage) {
-                startingFrameImageUrl = await step.do(
-                  `refresh-still-${target.shotId}`,
-                  async () => {
-                    // This run's own render when it landed; the selection
-                    // pointer only as the fallback, since a concurrent select
-                    // could have moved it to a still we didn't produce.
-                    const rendered = claims.imageVariantId
-                      ? await scopedDb.claims.frameVariants.getById(
-                          claims.imageVariantId
-                        )
-                      : null;
-                    if (rendered?.status === 'completed' && rendered.url) {
-                      return rendered.url;
-                    }
-                    return (
-                      (await getAnchorImageUrl(
-                        scopedDb.liveRead,
-                        target.shotId
-                      )) ??
-                      target.startingFrameImageUrl ??
-                      null
+            if (doRewrite) {
+              if (
+                typeof target.specInputHash === 'string' &&
+                scenes &&
+                context
+              ) {
+                try {
+                  const sceneId = target.motionRender.sceneId;
+                  const siblings = (
+                    sceneId ? (plan.sceneSpecs?.[sceneId] ?? []) : []
+                  )
+                    .filter((row) => row.shotId !== target.shotId)
+                    .map((row) => ({
+                      shotNumber: row.shotNumber,
+                      spec: row.spec,
+                    }));
+                  const rewritten = await spawnAndAwaitChild<
+                    ShotSpecRewriteWorkflowInput,
+                    ShotSpecRewriteWorkflowResult
+                  >(step, {
+                    binding: this.env.SHOT_SPEC_REWRITE_WORKFLOW,
+                    parentBindingName: PARENT_BINDING_NAME,
+                    parentInstanceId,
+                    childId: `shot-spec-rewrite:${sequenceId}:${target.shotId}`,
+                    childPayload: {
+                      userId,
+                      teamId,
+                      sequenceId,
+                      shotId: target.shotId,
+                      frameId: target.frameId,
+                      claimId: specClaimId,
+                      visualClaimId: doVisual ? claims.visualVersionId : null,
+                      motionClaimId: doMotion ? claims.motionVersionId : null,
+                      visualWritten: target.visualWritten === true,
+                      motionWritten: target.motionWritten === true,
+                      referenceOnly: !target.usesStartFrame,
+                      scene: scenes.scene,
+                      siblingSpecs: siblings,
+                      characterBible: context.characterBible,
+                      locationBible: context.locationBible,
+                      elementBible: context.elementBible,
+                      styleConfig: context.styleConfig,
+                      aspectRatio: plan.aspectRatio,
+                      analysisModelId: context.analysisModelId,
+                      lines: target.dialogue.lines.map(
+                        ({ character, line, tone }) => ({
+                          character,
+                          line,
+                          tone,
+                        })
+                      ),
+                      specInputHash: target.specInputHash,
+                      currentSpec: target.spec,
+                      dialogue: target.dialogue,
+                      emitStreaming: true,
+                      reservationId: input.reservationId,
+                    },
+                    spawnStepName: `spawn-shot-spec-rewrite-${target.shotId}`,
+                    awaitStepName: `await-shot-spec-rewrite-${target.shotId}`,
+                  });
+                  prompted.visualVersionId = rewritten.visualVersionId;
+                  prompted.motionVersionId = rewritten.motionVersionId;
+                  if (doVisual && !rewritten.visualVersionId) {
+                    notePromptMiss(
+                      'visual',
+                      new Error('Rewrite did not rebuild the still prompt')
                     );
+                  } else if (rewritten.visualVersionId) {
+                    counters.visualPrompts += 1;
+                  }
+                  if (doMotion && !rewritten.motionVersionId) {
+                    notePromptMiss(
+                      'motion',
+                      new Error('Rewrite did not rebuild the motion prompt')
+                    );
+                  } else if (rewritten.motionVersionId) {
+                    counters.motionPrompts += 1;
+                  }
+                } catch (error) {
+                  if (isEngineAbortError(error)) throw error;
+                  upstream.imageOk = false;
+                  upstream.motionOk = false;
+                  failures.push(toFailure(target.shotId, 'spec', error));
+                  await failClaims('spec');
+                }
+              } else {
+                upstream.imageOk = false;
+                upstream.motionOk = false;
+                failures.push({
+                  shotId: target.shotId,
+                  stage: 'spec',
+                  error: 'Shot spec is stale and cannot be rewritten',
+                });
+                await failClaims('spec');
+              }
+            } else if (
+              (doVisual || doMotion) &&
+              canRebuild &&
+              scenes &&
+              context &&
+              target.spec &&
+              target.specVersionId
+            ) {
+              const spec = target.spec;
+              const specVersionId = target.specVersionId;
+              const scene = scenes.scene;
+              try {
+                const rebuilt = await step.do(
+                  `rebuild-prompts-${target.shotId}`,
+                  async () => {
+                    const result = await completeDerivedPrompts(scopedDb, {
+                      spec,
+                      specVersionId,
+                      scene,
+                      styleConfig: context.styleConfig,
+                      characterBible: context.characterBible,
+                      locationBible: context.locationBible,
+                      elementBible: context.elementBible,
+                      aspectRatio: plan.aspectRatio,
+                      analysisModel: context.analysisModelId,
+                      dialogue: target.dialogue,
+                      referenceOnly: !target.usesStartFrame,
+                      frameId: target.frameId,
+                      shotId: target.shotId,
+                      visualClaimId: doVisual ? claims.visualVersionId : null,
+                      motionClaimId: doMotion ? claims.motionVersionId : null,
+                      visualWritten: target.visualWritten === true,
+                      motionWritten: target.motionWritten === true,
+                      currencyHash: target.specInputHash,
+                    });
+                    const channel = getShotPromptChannel(target.shotId);
+                    if (result.visualVersionId) {
+                      await channel.emit('shotPrompt.completed', {
+                        promptType: 'visual',
+                      });
+                    }
+                    if (result.motionVersionId) {
+                      await channel.emit('shotPrompt.completed', {
+                        promptType: 'motion',
+                      });
+                    }
+                    return result;
                   }
                 );
-              }
-              try {
-                const motionResult = await spawnAndAwaitChild<
-                  MotionPromptWorkflowInput,
-                  MotionPromptWorkflowResult
-                >(step, {
-                  binding: this.env.MOTION_PROMPT_WORKFLOW,
-                  parentBindingName: PARENT_BINDING_NAME,
-                  parentInstanceId,
-                  childId: `motion-prompt:${sequenceId}:${target.shotId}`,
-                  childPayload: {
-                    ...base,
-                    dialogue: target.dialogue,
-                    siblingMotionPrompts: siblingPrompts(plan, target).motion,
-                    startingFrameImageUrl: target.usesStartFrame
-                      ? (startingFrameImageUrl ?? undefined)
-                      : undefined,
-                    referenceOnly: !target.usesStartFrame,
-                    targetVersionId: claims.motionVersionId ?? undefined,
-                  },
-                  spawnStepName: `spawn-motion-prompt-${target.shotId}`,
-                  awaitStepName: `await-motion-prompt-${target.shotId}`,
-                });
-                prompted.motionVersionId = motionResult.finalVersionId;
-                counters.motionPrompts += 1;
+                prompted.visualVersionId = rebuilt.visualVersionId;
+                prompted.motionVersionId = rebuilt.motionVersionId;
+                if (doVisual && !rebuilt.visualVersionId) {
+                  notePromptMiss(
+                    'visual',
+                    new Error('Rebuild did not complete the still prompt')
+                  );
+                  await failClaims('visual-prompt');
+                } else if (rebuilt.visualVersionId) {
+                  counters.visualPrompts += 1;
+                }
+                if (doMotion && !rebuilt.motionVersionId) {
+                  notePromptMiss(
+                    'motion',
+                    new Error('Rebuild did not complete the motion prompt')
+                  );
+                  await failClaims('motion-prompt');
+                } else if (rebuilt.motionVersionId) {
+                  counters.motionPrompts += 1;
+                }
               } catch (error) {
-                upstream.motionOk = false;
-                failures.push(toFailure(target.shotId, 'motion-prompt', error));
+                if (isEngineAbortError(error)) throw error;
+                if (doVisual) {
+                  notePromptMiss('visual', error);
+                  await failClaims('visual-prompt');
+                }
+                if (doMotion) {
+                  notePromptMiss('motion', error);
+                  await failClaims('motion-prompt');
+                }
+              }
+            } else if (doVisual || doMotion) {
+              const error = new Error(
+                'Shot has no spec to rebuild prompts from'
+              );
+              if (doVisual) {
+                notePromptMiss('visual', error);
+                await failClaims('visual-prompt');
+              }
+              if (doMotion) {
+                notePromptMiss('motion', error);
                 await failClaims('motion-prompt');
               }
-            };
-
-            if (!doImage) {
-              // No image regen — the still can't move, run alongside.
-              stages.push(runMotionPrompt());
             }
 
-            if (doVisual && base) {
-              stages.push(
-                (async () => {
-                  try {
-                    const visualResult = await spawnAndAwaitChild<
-                      FramePromptWorkflowInput,
-                      FramePromptResult
-                    >(step, {
-                      binding: this.env.FRAME_PROMPT_WORKFLOW,
-                      parentBindingName: PARENT_BINDING_NAME,
-                      parentInstanceId,
-                      childId: `frame-prompt:${sequenceId}:${target.shotId}`,
-                      childPayload: {
-                        ...base,
-                        frameId: target.frameId,
-                        siblingVisualPrompts: siblingPrompts(plan, target)
-                          .visual,
-                        targetVersionId: claims.visualVersionId ?? undefined,
-                      },
-                      spawnStepName: `spawn-frame-prompt-${target.shotId}`,
-                      awaitStepName: `await-frame-prompt-${target.shotId}`,
-                    });
-                    prompted.visualVersionId = visualResult.finalVersionId;
-                    counters.visualPrompts += 1;
-                  } catch (error) {
-                    // Never render from the prompt the regen failed to replace.
-                    upstream.imageOk = false;
-                    failures.push(
-                      toFailure(target.shotId, 'visual-prompt', error)
-                    );
-                    await failClaims('visual-prompt');
-                    // The chained image claim was cancelled by the cascade
-                    // above. The motion prompt still runs — the still didn't
-                    // change, so its claim hash remains valid.
-                    if (doImage) await runMotionPrompt();
-                    return;
-                  }
-                  if (!doImage) return;
-                  try {
-                    await spawnImage(target, claims, prompted.visualVersionId);
-                  } catch (error) {
-                    upstream.imageOk = false;
-                    failures.push(toFailure(target.shotId, 'image', error));
-                    await failClaims('image');
-                  }
-                  // After the image settles either way: fresh still on
-                  // success, unchanged still on failure — both are safe
-                  // inputs for the motion prompt.
-                  await runMotionPrompt();
-                })()
-              );
-            } else if (doImage) {
-              stages.push(
-                (async () => {
-                  try {
-                    await spawnImage(target, claims, prompted.visualVersionId);
-                  } catch (error) {
-                    upstream.imageOk = false;
-                    failures.push(toFailure(target.shotId, 'image', error));
-                    await failClaims('image');
-                  }
-                  await runMotionPrompt();
-                })()
-              );
+            if (doImage && upstream.imageOk) {
+              try {
+                await spawnImage(target, claims, prompted.visualVersionId);
+              } catch (error) {
+                if (isEngineAbortError(error)) throw error;
+                upstream.imageOk = false;
+                failures.push(toFailure(target.shotId, 'image', error));
+                await failClaims('image');
+              }
             }
 
             if (heldByReference && target.regenImage) {
@@ -1508,8 +1609,6 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               });
               await failClaims('image');
             }
-
-            await Promise.allSettled(stages);
 
             if (target.regenDialogue && unvoicedShotIds.has(target.shotId)) {
               failures.push({

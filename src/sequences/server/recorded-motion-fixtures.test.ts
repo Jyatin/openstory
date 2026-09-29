@@ -4,9 +4,8 @@ import { z } from 'zod';
 import { motionPromptFromVersion } from '@/motion/server/resolve-motion-prompt';
 import { replayRecordedE2eScenes } from './recorded-e2e-scenes';
 import { DEFAULT_STYLE_TEMPLATES } from '@/look/style-templates';
-import { deriveShots } from '@/shots/shot-list.derive';
-import { sceneWithShotsSchema } from '@/shots/shot-list.schema';
-import { sceneForShot } from '@/shots/server/shot-work-items';
+import { deriveMotionPrompt } from '@/shots/shot-list.derive';
+import { sceneWithShotsSchema, storedShotSpec } from '@/shots/shot-list.schema';
 import { buildMotionRender } from '@/motion/server/build-motion-render';
 import { packedSceneFromScene } from '@/motion/server/build-motion-prompts';
 import { buildMotionReferenceImages } from '@/motion/server/build-motion-references';
@@ -51,28 +50,22 @@ it('recorded packed and individual motion requests match canonical direction and
       },
     });
     const shots = scene.shots.map((spec) => {
-      const per = sceneForShot(scene, spec.shotNumber);
-      const d = deriveShots(
-        { ...scene, originalScript: per.originalScript },
-        style
-      ).find((x) => x.shotNumber === spec.shotNumber);
-      if (!d) throw new Error('Missing derived shot');
+      const derived = deriveMotionPrompt(storedShotSpec(spec), {
+        referenceOnly: false,
+      });
       // Render reads authored per-shot dialogue, never the analysis scene's aggregate lines.
-      const motionPrompt = motionPromptFromVersion(
-        {
-          text: d.motionPrompt.fullPrompt,
-          audio: d.motionPrompt.audio ?? null,
-        },
-        { presence: spec.dialogue.length > 0, lines: spec.dialogue }
-      );
+      const motionPrompt = motionPromptFromVersion(derived, {
+        presence: spec.dialogue.length > 0,
+        lines: spec.dialogue,
+      });
       return {
         shotId: 'shot-' + spec.shotNumber,
         sceneId: scene.sceneId,
         renderSegmentId: scene.sceneId,
         model: 'minimax_h3_max' as const,
-        duration: d.durationMs / 1000,
+        duration: spec.durationSeconds,
         imageUrl: 'https://x/still',
-        prompt: d.motionPrompt.fullPrompt,
+        prompt: derived.text,
         motionPrompt,
         packedScene: packedSceneFromScene(scene, style),
         characterTags: scene.continuity.characterTags,

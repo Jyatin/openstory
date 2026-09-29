@@ -140,6 +140,7 @@ function createPreviewClient() {
               : 'Close-up of a woman beside a rain-streaked train window at night. Reflections of city lights trace her face, shallow depth of field.',
           components: null,
           source: 'ai-generated',
+          specVersionId: null,
           status: 'completed',
           inputHash: null,
           pendingInputHash: null,

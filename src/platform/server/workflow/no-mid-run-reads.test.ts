@@ -267,13 +267,6 @@ const ALLOWED_LIVE_READS: Record<string, SanctionedRead[]> = {
       why: 'Resolved inside the step that spends it.',
     },
   ],
-  'frame-prompt-workflow.ts': [
-    {
-      read: 'resolveLlmKey',
-      bucket: 'CREDENTIAL',
-      why: 'Resolved inside the step that spends it.',
-    },
-  ],
   'image-workflow.ts': [
     {
       read: 'frameVariants.getById',

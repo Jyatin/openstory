@@ -8,16 +8,9 @@
  */
 
 import { matchLocationsToScene } from '@/shots/scene-matching';
+import { canonicalBibleTag } from '@/cast/bible-field';
 import type { SceneSplitBiblesResult } from './response-schemas';
 import type { SceneSplittingScene } from '@/sequences/server/streaming-scene-parser';
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean)
-    .join('_');
-}
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -75,14 +68,8 @@ export function reconcileSceneTags(
     assignedElementTags: 0,
   };
 
-  const canonicalCharacterTag = (entry: {
-    name: string;
-    consistencyTag: string;
-  }): string => entry.consistencyTag || slugify(entry.name);
-  const canonicalLocationTag = (entry: {
-    name: string;
-    consistencyTag: string;
-  }): string => entry.consistencyTag || slugify(entry.name);
+  const canonicalCharacterTag = canonicalBibleTag;
+  const canonicalLocationTag = canonicalBibleTag;
 
   const reconciled = scenes.map((scene) => {
     const extract = scene.originalScript.extract;

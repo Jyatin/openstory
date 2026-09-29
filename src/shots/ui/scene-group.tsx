@@ -1,4 +1,3 @@
-import { SceneSettingForm } from './scene-setting-form';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -532,14 +531,6 @@ const SceneGroupComponent: React.FC<SceneGroupProps> = ({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-
-      {expanded && (
-        <SceneSettingForm
-          key={`${scene.id}:${scene.selectedScriptVersionId ?? ''}`}
-          scene={scene}
-          sequenceId={sequenceId}
-        />
-      )}
 
       {expanded && shots.length > 0 && (
         <div className="flex flex-col gap-2 border-t px-3 py-2">

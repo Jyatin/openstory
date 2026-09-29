@@ -248,16 +248,11 @@ flowchart LR
 
 **Sheet claims (#1113)** — every sheet workflow (`CharacterSheetWorkflow`, `LocationSheetWorkflow`, `LibraryTalentSheetWorkflow`, `LibraryLocationSheetWorkflow`) lands through a claim its trigger took (the bible workflows, the regenerate and recast server fns, the library talent/location funnels). The payload carries the claim id (`sheetVersionId`, `referenceVersionId`, `sheetId`, `referenceClaimId`). A character or sequence-location sheet payload also carries `bibleVersionId` (#1600): the bible version its metadata was read from, stamped on the version row the run lands, promoted or parked. A payload queued before #1600 has none and stamps null. The final write (`reconcile-database`, `reconcile-create-sheet`, `update-location-preview`) promotes only while the claim still names the run; otherwise the result parks as a divergent variant, `generation.stale:detected` fires, and the live sheet is untouched. A parked library talent sheet skips the headshot crop. Edits to a sheet's inputs, a recast or relink, a cast talent's sheet or description change, and a style change revoke claims; there is no write-time hash recompute. `onFailure` clears only the run's own claim. A run queued before #1113 has no claim id and lands unconditionally. The library location preview is stored under a unique name per run so a parked run cannot overwrite the live reference's bytes.
 
-**Frame Prompt Batch Workflow** (`src/stills/server/workflows/frame-prompt-batch-workflow.ts`):
-
-- Delegates to `FramePromptWorkflow` (`src/stills/server/workflows/frame-prompt-workflow.ts`) per **1-shot** scene (parallel via `spawnAndAwaitChild`)
-- Each such scene gets an LLM call that generates `fullPrompt` and `negativePrompt`. Scene `continuity` is authored in Phase 1 and is not re-emitted here.
-- **A 2+ shot scene is skipped here (#1517):** every one of its clips — the head included — gets its start-frame prompt assembled by `deriveShots` (scene context + the shot's framing / start state), which analyze-script writes to `frame_prompt_versions` in the `persist-derived-visual-prompts` step at the top of Phase 4 (`derivedShotForItem` in `shot-work-items.ts` is the one predicate; it is null on the 1-shot path). Its input hash is stamped over the **cast** character bible (`buildCastCharacterBible`), the same one the prompt children are handed — staleness verify reads the cast row out of D1, so stamping the raw pre-cast bible made every clip of every multi-shot scene read stale from birth (#1732).
-- Merges results back into scene objects
+**Shot prompts (#1923).** Analysis writes each shot's spec and derives the still and motion text in `persist-shot-specs` (`deriveStillPrompt` / `deriveMotionPrompt`). There is no visual-prompt or motion-prompt LLM. A later Rebuild writes the same derived text from the selected spec. Rewrite shot is the one prompt-side LLM: it refills that shot's spec, then rebuilds the text. The prompt hash includes the spec's canonical content when the digest kind is `current`, so a spec edit stales the prompts and a still re-render does not.
 
 ### Phase 4: Frame Images, then Motion/Music Prompts (Sequential)
 
-As of #929, frame images render **before** motion/music prompts (the two ran in parallel previously). The motion-prompt pass is conditioned on the actual rendered starting frame — the per-scene motion workflow reads the frame's `thumbnailUrl` and passes it to the LLM as a vision input — so the still must exist first. The motion prompt then describes movement that continues _that exact pose and composition_, instead of guessing a plausible start from scene text alone. Music has no image dependency but rides along with motion in the same child workflow, so it inherits the wait (an accepted latency cost on the non-critical music artifact).
+Frame images render before music design. Motion text is already derived from the shot spec, so it does not wait on the still. Music has no image dependency; it still runs in the motion-and-music child after the stills.
 
 ```mermaid
 flowchart LR
@@ -276,11 +271,9 @@ flowchart LR
 
 **Motion + Music Prompts Workflow** (`src/motion/server/workflows/motion-music-prompts-workflow.ts`):
 
-1. **Snap durations** — Snaps scene durations to video model capabilities upfront for the motion prompts. Music does not use them: its scene summaries come from `musicSceneSummariesFromAnalysis`, one row per scene with that scene's shot durations summed and no visual prompt, built through the same insert builders that wrote the `scenes` / `shots` rows. Verify, regenerate and Update all rebuild them from those rows with `musicSceneSummariesFromRows`, so a pipeline music prompt reads fresh the moment it lands (#1783)
-2. **Parallel generation** — Motion prompts and music design run simultaneously (parallel _within_ this child; the child itself runs after frame images):
-   - `MotionPromptWorkflow` — fans out one `MotionPromptSceneWorkflow` child per scene. Each per-scene call (`motion-prompt-scene-workflow.ts`) loads the rendered starting frame and, when the chosen analysis model accepts image input, attaches it to the LLM as a vision input (#929). The image's input-hash is folded into `motionPromptInputHash`, so re-rendering the still re-stales the motion prompt. When no image exists (render failed) or the model is text-only, it falls back to the text-only path. **Only 1-shot scenes get a child (#1517):** every clip of a 2+ shot scene takes its motion prompt from `deriveShots` (action + the single camera move + sound cue; reference-only prefixes unique framing, not the full visual prompt — scene lighting/palette/look attach once at assemble) in the batch's `derive-extra-shot-motion-prompts` step, written to `shot_prompt_versions` with a `derived-shot-motion` input hash. Both derived writes emit the same `generation.shot:updated` the LLM children do. **The motion prompt is written from the shot's lines (#1784):** each child's payload carries `dialogue` — in the pipeline, the shot-list lines scene-split just seeded onto the shot's dialogue node, from a regenerate, Update Stale or a continue (#1818), the `shotDialogueResolver` answer at click time — and `sceneWithShotDialogue` puts those lines in place of the script's in both the LLM's `scene` variable and the stamped hash.
-   - `MusicPromptWorkflow` — Single LLM call classifying per-scene music requirements + generating unified prompt with tags
-3. **Merge** — Combines motion prompts and music design into `completeScenes[]`
+1. **Music summaries** — Music does not use snapped durations: its scene summaries come from `musicSceneSummariesFromAnalysis`, one row per scene with that scene's shot durations summed and no visual prompt. Verify, regenerate and Update all rebuild them from those rows with `musicSceneSummariesFromRows` (#1783).
+2. **Music only** — `MusicPromptWorkflow` is the one LLM call. Motion maps come back empty. The motion text was written with the spec in `persist-shot-specs`.
+3. **Merge** — Joins the music design onto the scenes that already carry visual prompts.
 4. **Returns:** `{ completeScenes, musicPrompt, musicTags }`
 
 ### Phase 4b: Dialogue Audio (Conditional)
@@ -495,11 +488,10 @@ Per-scene fan-out (image, variant, motion) uses `Promise.allSettled` over `spawn
 | `src/cast/server/workflows/location-bible-workflow.ts`         | Location sheet generation (parallel per location)                    |
 | `src/cast/server/workflows/location-sheet-workflow.ts`         | Single location reference image generation                           |
 | **Prompt Generation**                                          |                                                                      |
-| `src/stills/server/workflows/frame-prompt-batch-workflow.ts`   | Visual prompt sub-workflow (parallel per 1-shot scene)               |
-| `src/stills/server/workflows/frame-prompt-workflow.ts`         | Per-scene visual prompt LLM call                                     |
-| `src/motion/server/workflows/motion-prompt-workflow.ts`        | Motion prompt sub-workflow (parallel per scene)                      |
-| `src/motion/server/workflows/motion-prompt-batch-workflow.ts`  | Motion prompts per shot batch; stamps the derived-shot motion hash   |
-| `src/motion/server/workflows/motion-music-prompts-workflow.ts` | Orchestrates motion + music prompts in parallel                      |
+| `src/shots/server/persist-shot-spec.ts`                        | First spec + derived still and motion prompts                        |
+| `src/shots/server/rebuild-shot-prompts.ts`                     | Rebuild derived prompts from the selected spec                       |
+| `src/shots/server/workflows/shot-spec-rewrite-workflow.ts`     | Rewrite shot: one LLM call refills the spec, then rebuilds           |
+| `src/motion/server/workflows/motion-music-prompts-workflow.ts` | Music design only                                                    |
 | `src/audio/server/workflows/music-prompt-workflow.ts`          | Music design LLM call                                                |
 | **Image Generation**                                           |                                                                      |
 | `src/stills/server/workflows/shot-images-workflow.ts`          | Orchestrates image + variant gen for all scenes                      |

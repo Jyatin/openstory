@@ -117,12 +117,36 @@ generateVoices, draftMotion }` — no `startFrom`.
    references wave first (sheets, element references, voices — each claimed
    in the run), then the per-shot jobs (prompts, stills, dialogue, clips)
    and music. A reference that fails holds the stills and clips made from it
-   (`PlanTarget.referenceIds`) and fails nothing else. Multi-shot shots that
-   owe a prompt get the per-shot LLM prompt: the shot-list specs a fresh run
-   derives from are not stored.
+   (`PlanTarget.referenceIds`) and fails nothing else. A shot that owes a
+   prompt follows the spec rule below: Rebuild when its spec is current,
+   Rewrite shot when it is stale or missing.
 
 Scenes and shots edited, added or deleted during a stop reach the continue:
 every unit is materialised per shot from D1 at the click.
+
+## Shot specs and prompts (#1923, #1929)
+
+A shot's still and motion prompts are built from its selected spec. The plan
+has a `spec` unit per shot, and both prompt units require it unless the prompt
+is written (`user-edit`). One rule decides what a prompt costs, and a fresh
+run, Continue, Update all and the inspector all apply it:
+
+- **Spec current, prompt stale: Rebuild.** The prompt digest includes the
+  spec's content, so editing the spec, or anything else the prompt reads,
+  makes the derived prompt stale. Rebuild re-derives it. No LLM, no cost.
+- **Spec stale or missing: Rewrite shot.** A spec is stale when what it was
+  written from moved: the shot's script slice, its lines, or the scene's
+  cast / continuity tags (`shot-spec-currency.ts`). Missing means the shot
+  predates specs. One LLM call refills the spec, then its prompts rebuild.
+  Every pre-spec shot owes one rewrite on its first Continue or Update all.
+- **A written prompt is never replaced without the user.** It reads fresh
+  and the plan leaves it. In the inspector, saving a spec or clicking
+  Rebuild / Rewrite shot asks whether to replace written text or keep it.
+- **A user's spec edit is current.** Saving stamps it with the live currency
+  hash, so it never turns into a paid rewrite on its own. Saving a stale spec
+  unchanged says it still fits and stamps it current too.
+
+Cost quotes count only the rewrites: a rebuild is free.
 
 ## What Update all does
 
@@ -260,11 +284,7 @@ the payload and draft-capable models preflight at 480p.
 
 The executor's `freshRun` flag orders and completes every phase with work:
 references, images/prompts, dialogue, motion, music. Existing continue and
-Update all retain their parallel schedule. Visual prompt batching already
-means **one prompt child per one-shot scene**, not one LLM call for several
-scenes (`FramePromptBatchWorkflow`); the executor has the same call count.
-Multi-shot first prompts are supplied by the analysis handoff, so they need
-no additional LLM call in the executor.
+Update all retain their parallel schedule. Update all rebuilds a prompt from the selected spec when that spec is current. It spawns Rewrite shot when the spec is stale or missing. A user-edited prompt is left as written.
 
 All spending children inherit the parent's `reservationId`. A preflight can
 spend the remaining own envelope plus unheld balance, excluding other runs'
@@ -292,14 +312,14 @@ rendering. Missing first character sheets reuse a compatible matched talent
 sheet, with zero generation cost; explicit regeneration still renders the edit.
 Voice-only cast never owes a sheet.
 
-The shot-list specification remains ephemeral. Analysis persists its derived
-visual and motion directions as ordinary first prompt versions. Motion source
+Analysis persists each shot's spec as its first `shot_spec_versions` row
+(#1915), and the visual and motion directions derived from it as ordinary
+first prompt versions that record its `specVersionId`. Every shot takes this
+path, one-shot scenes included (#1919): a fresh run makes no per-shot prompt
+LLM call. Motion source
 `derived` hashes the inputs derivation consumed, excluding a starting still;
 the first still therefore does not invalidate it or add a still prerequisite.
-Scene and style changes still invalidate it. Later LLM regeneration uses saved
-sibling directions as context and restores the normal still dependency. Restore,
-rename and provider rescue preserve derived provenance when they retain that
-origin. A user edit uses the ordinary current-input provenance.
+Scene and style changes still invalidate it. A current motion digest does not include the still URL, so rendering the first still does not stale the motion prompt. Restore copies the source and spec of the row being restored. An element rename writes `renamed` on the prompt and `rename` on a new spec version. A content-checker rescue writes `softened` or `shortened`. A user edit uses the ordinary current-input provenance and Update all does not overwrite it.
 
 Planning and prompt staleness load every active character/location bible, even
 before its first sheet exists. The selected sheet fields on these rows remain

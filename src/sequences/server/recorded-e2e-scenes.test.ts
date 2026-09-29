@@ -20,8 +20,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { DEFAULT_STYLE_TEMPLATES } from '@/look/style-templates';
 import { getVariantImagePrompt } from '@/stills/server/variant-image';
-import { deriveShots } from '@/shots/shot-list.derive';
-import { sceneWithShotsSchema } from '@/shots/shot-list.schema';
+import { deriveStillPrompt } from '@/shots/shot-list.derive';
+import { sceneWithShotsSchema, storedShotSpec } from '@/shots/shot-list.schema';
 import { buildShotImageReferenceImages } from '@/motion/server/build-motion-references';
 import { buildReferenceImagePrompt } from '@/stills/reference-image-prompt';
 import { DEFAULT_VIDEO_MODEL } from '@/models/models';
@@ -238,8 +238,12 @@ describe('recorded derived still fixtures', () => {
             elementTags: rawScene.continuity?.elementTags ?? [],
           },
         });
-        for (const shot of deriveShots(scene, style)) {
-          const visualPrompt = shot.visualPrompt.fullPrompt;
+        for (const spec of scene.shots) {
+          const visualPrompt = deriveStillPrompt(
+            storedShotSpec(spec),
+            scene,
+            style
+          );
           const refs = buildShotImageReferenceImages({
             scene,
             visualPrompt,

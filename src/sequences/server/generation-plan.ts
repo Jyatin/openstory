@@ -221,11 +221,18 @@ async function loadPlanInput(
                 0),
         })
       ),
-      motionPromptDerived:
-        (reads.selectedMotionByShot.get(shot.id)?.inputHash
-          ? reads.selectedMotionByShot.get(shot.id)
-          : reads.latestHashedMotionByShot.get(shot.id)
-        )?.source === 'derived',
+      spec: verdictOf(
+        staleness.spec === 'untracked'
+          ? 'missing'
+          : artifactVerdict({
+              exists: true,
+              staleness: staleness.spec,
+              inFlight: shot.pendingSpecVersionId != null,
+            })
+      ),
+      visualWritten: selectedPrompt?.source === 'user-edit',
+      motionWritten:
+        reads.selectedMotionByShot.get(shot.id)?.source === 'user-edit',
       motionPrompt: verdictOf(
         artifactVerdict({
           exists: reads.selectedMotionByShot.has(shot.id),

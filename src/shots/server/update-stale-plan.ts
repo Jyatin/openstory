@@ -61,8 +61,14 @@ import type {
   FrameVariant,
   Sequence,
   Shot,
+  ShotPromptVersion,
+  ShotSpecVersion,
   StyleConfig,
 } from '@/platform/server/db/schema';
+import {
+  canonicalStoredShotSpec,
+  type StoredShotSpec,
+} from '@/shots/shot-list.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { loadSequenceSegments } from '@/shots/server/sequence-segments';
 import {
@@ -141,6 +147,22 @@ export type PlanTarget = {
   visualPromptVersionId: string | null;
   regenVisual: boolean;
   regenMotion: boolean;
+  /**
+   * The spec is stale or missing. One Rewrite shot, then the prompts are
+   * rebuilt from what it writes. A current spec rebuilds for free instead.
+   */
+  rewriteSpec: boolean;
+  /** Selected spec at the click. Null when the shot has none. */
+  specVersionId: string | null;
+  spec: StoredShotSpec | null;
+  /**
+   * Live currency hash of the inputs the spec is judged against. Rebuild
+   * fills a null stamp with it. Rewrite stamps it on the new row.
+   */
+  specInputHash: string | null;
+  /** A `user-edit` prompt is never overwritten by Rebuild. */
+  visualWritten: boolean;
+  motionWritten: boolean;
   /**
    * Re-render the still. Never true without an existing imageUrl — Update all
    * must not spend credits creating a first still.
@@ -237,6 +259,8 @@ export type ShotClaims = {
   visualVersionId: string | null;
   motionVersionId: string | null;
   imageVariantId: string | null;
+  /** Rewrite claim id (`shots.pendingSpecVersionId`). */
+  specClaimId: string | null;
 };
 
 /**
@@ -332,6 +356,26 @@ export type ScenePrompts = {
   motion: ShotPromptText[];
 };
 
+function sceneSpecsFor(
+  shots: readonly Shot[],
+  selected: ReadonlyMap<string, ShotSpecVersion>
+): UpdateStalePlan['sceneSpecs'] {
+  const sceneSpecs: UpdateStalePlan['sceneSpecs'] = {};
+  for (const shot of shots) {
+    if (shot.deletedAt || !shot.sceneId) continue;
+    const version = selected.get(shot.id);
+    if (!version) continue;
+    const list = sceneSpecs[shot.sceneId] ?? [];
+    list.push({
+      shotId: shot.id,
+      shotNumber: shot.shotNumber,
+      spec: canonicalStoredShotSpec(version.spec),
+    });
+    sceneSpecs[shot.sceneId] = list;
+  }
+  return sceneSpecs;
+}
+
 /** A target's scene siblings: the scene's prompts without its own. */
 export function siblingPrompts(
   plan: Pick<UpdateStalePlan, 'scenePrompts'>,
@@ -378,6 +422,14 @@ export type UpdateStalePlan = {
    * square of a scene's shots and can burst the 1 MiB step output.
    */
   scenePrompts: Record<string, ScenePrompts>;
+  /**
+   * Selected spec of every live shot, once per scene. A rewrite reads its
+   * siblings from here. Spec content, not the prompt text.
+   */
+  sceneSpecs: Record<
+    string,
+    { shotId: string; shotNumber: number | null; spec: StoredShotSpec }[]
+  >;
   targets: PlanTarget[];
   skipped: SkippedShot[];
   /**
@@ -591,6 +643,7 @@ export async function computePlan(args: {
     dialogueRecording: null,
     renderRefs: { characters: [], locations: [], elements: [] },
     scenePrompts: {},
+    sceneSpecs: {},
     targets: [],
     skipped: [],
     references,
@@ -632,6 +685,7 @@ export async function computePlan(args: {
     selectedByFrame,
     selectedPromptByFrame,
     selectedMotionByShot,
+    selectedSpecByShot,
     dialogueVersions,
   ] = await Promise.all([
     scopedDb.frameVariants.getSelectedByFrameIds(frameIds),
@@ -643,6 +697,7 @@ export async function computePlan(args: {
     scopedDb.shotPromptVersions.getSelectedMotionByShots(
       allShots.map((s) => s.id)
     ),
+    scopedDb.shotSpecVersions.getSelectedByShotIds(allShots.map((s) => s.id)),
     // The authored dialogue per shot, read once (#1657). Each target carries
     // only its own shot's lines, so the run never reads the node mid-flight.
     // The rows, not just the lines: a recording names the version it spoke.
@@ -682,7 +737,8 @@ export async function computePlan(args: {
       selectedPrompt: frame
         ? (selectedPromptByFrame.get(frame.id) ?? null)
         : null,
-      selectedMotionVersionId: selectedMotionByShot.get(shot.id)?.id ?? null,
+      selectedMotion: selectedMotionByShot.get(shot.id) ?? null,
+      selectedSpec: selectedSpecByShot.get(shot.id) ?? null,
       dialogue: promptDialogueOf(shot),
       scene,
       refs,
@@ -784,6 +840,7 @@ export async function computePlan(args: {
     characterVoices,
     renderRefs: { characters, locations, elements },
     scenePrompts,
+    sceneSpecs: sceneSpecsFor(allShots, selectedSpecByShot),
     dialogueRecording:
       dialogueScenes.length > 0
         ? {
@@ -888,8 +945,10 @@ async function decideShotTarget(args: {
   /** Selected `frame_prompt_versions` row — the visual prompt a direct
    * image render will be built from. */
   selectedPrompt: FramePromptVersion | null;
-  /** Selected motion prompt version id — the video-only-regen default. */
-  selectedMotionVersionId: string | null;
+  /** Selected motion prompt — source decides whether Rebuild may replace it. */
+  selectedMotion: ShotPromptVersion | null;
+  /** Selected spec. Null when the shot has never had one. */
+  selectedSpec: ShotSpecVersion | null;
   /**
    * What the shot says now (`PlanTarget.dialogue`), and whether it is on
    * its dialogue node — the motion prompt's staleness reads both (#1784).
@@ -909,7 +968,8 @@ async function decideShotTarget(args: {
     frame,
     selectedImage,
     selectedPrompt,
-    selectedMotionVersionId,
+    selectedMotion,
+    selectedSpec,
     dialogue: promptDialogue,
     scene,
     refs,
@@ -952,8 +1012,11 @@ async function decideShotTarget(args: {
   }
 
   const flags = {
-    regenVisual: unitKinds.has('prompt:visual'),
-    regenMotion: unitKinds.has('prompt:motion'),
+    regenVisual:
+      unitKinds.has('prompt:visual') && selectedPrompt?.source !== 'user-edit',
+    regenMotion:
+      unitKinds.has('prompt:motion') && selectedMotion?.source !== 'user-edit',
+    rewriteSpec: unitKinds.has('spec'),
     regenImage: unitKinds.has('still'),
     regenDialogue: unitKinds.has('dialogue'),
     regenVideo: unitKinds.has('clip'),
@@ -961,6 +1024,7 @@ async function decideShotTarget(args: {
   if (
     !flags.regenVisual &&
     !flags.regenMotion &&
+    !flags.rewriteSpec &&
     !flags.regenImage &&
     !flags.regenDialogue &&
     !flags.regenVideo
@@ -1021,10 +1085,16 @@ async function decideShotTarget(args: {
       usesStartFrame: usesStartFrame(shot, sequence),
       durationMs: shot.durationMs,
       standingImageVariantId: selectedImage?.id ?? null,
-      standingMotionVersionId: selectedMotionVersionId,
+      standingMotionVersionId: selectedMotion?.id ?? null,
       visualPromptVersionId: selectedPrompt?.id ?? null,
       regenVisual: flags.regenVisual,
       regenMotion: flags.regenMotion,
+      rewriteSpec: flags.rewriteSpec,
+      specVersionId: selectedSpec?.id ?? null,
+      spec: selectedSpec ? canonicalStoredShotSpec(selectedSpec.spec) : null,
+      specInputHash: staleness.liveHashes.spec,
+      visualWritten: selectedPrompt?.source === 'user-edit',
+      motionWritten: selectedMotion?.source === 'user-edit',
       regenImage: flags.regenImage,
       visualLiveHash: staleness.liveHashes.visualPrompt,
       motionLiveHash: staleness.liveHashes.motionPrompt,
@@ -1080,7 +1150,8 @@ function hasUnknownStaleness(staleness: ShotStalenessResult): boolean {
   return (
     staleness.thumbnail === 'unknown' ||
     staleness.visualPrompt === 'unknown' ||
-    staleness.motionPrompt === 'unknown'
+    staleness.motionPrompt === 'unknown' ||
+    staleness.spec === 'unknown'
   );
 }
 
@@ -1161,7 +1232,8 @@ export async function claimTargets(args: {
     const ownsAny =
       claims.visualVersionId !== null ||
       claims.motionVersionId !== null ||
-      claims.imageVariantId !== null;
+      claims.imageVariantId !== null ||
+      claims.specClaimId !== null;
     if (foreignClaim && !ownsAny) {
       skipped.push({ shotId: target.shotId, reason: 'already-in-flight' });
     }
@@ -1182,7 +1254,11 @@ async function claimShotArtifacts(args: {
     visualVersionId: null,
     motionVersionId: null,
     imageVariantId: null,
+    specClaimId: null,
   };
+  if (target.rewriteSpec) {
+    claims.specClaimId = await scopedDb.shotSpecVersions.claim(target.shotId);
+  }
   let foreignClaim = false;
 
   if (target.regenVisual && target.visualLiveHash) {

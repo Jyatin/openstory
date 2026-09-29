@@ -24,6 +24,7 @@ vi.doMock('@/shots/input-hash', () => ({
   motionPromptInputHashMatches: vi.fn(
     async (stored: string | null) => stored === (await hashMotionPromptInput())
   ),
+  sha256Hex: realInputHash.sha256Hex,
 }));
 
 const { computeShotStaleness, loadShotStalenessReads } =
@@ -157,6 +158,9 @@ function makeScopedDb(overrides: {
         .fn()
         .mockResolvedValue(overrides.imageLiveClaims ?? []),
     },
+    shotSpecVersions: {
+      getSelected: vi.fn().mockResolvedValue(null),
+    },
   });
 }
 
@@ -195,11 +199,13 @@ describe('computeShotStaleness', () => {
       motionPrompt: 'stale',
     });
     // Thumbnail branch never produced a hash (it threw); prompts did.
-    expect(result.liveHashes).toEqual({
+    expect(result.liveHashes).toMatchObject({
       thumbnail: null,
       visualPrompt: 'visual-stored',
       motionPrompt: 'motion-moved',
     });
+    expect(result.liveHashes.spec).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.spec).toBe('untracked');
   });
 
   it('falls back to the latest version hash when the selected one has none', async () => {
@@ -306,7 +312,13 @@ describe('computeShotStaleness', () => {
       thumbnail: 'generating',
       visualPrompt: 'generating',
       motionPrompt: 'generating',
-      liveHashes: { thumbnail: null, visualPrompt: null, motionPrompt: null },
+      spec: 'generating',
+      liveHashes: {
+        thumbnail: null,
+        visualPrompt: null,
+        motionPrompt: null,
+        spec: null,
+      },
       causes: [],
     });
     // Short-circuits before any work: the batch fn runs this for every shot in
@@ -785,10 +797,9 @@ describe('per-shot start-frame override', () => {
       scene,
       selectedImage: still,
     });
-    // The derived row is judged as written; the claim it seeds must match the
-    // hash the replacement is checked against once it is no longer derived.
+    // Rebuild does not condition on the still. The live digest leaves the URL out.
     expect(result.motionPrompt).toBe('fresh');
-    expect(result.liveHashes.motionPrompt).toBe('with-still');
+    expect(result.liveHashes.motionPrompt).toBe('motion-stored');
   });
 
   it('a later LLM version again consumes the rendered still', async () => {
@@ -924,6 +935,9 @@ describe('loadShotStalenessReads (#1795)', () => {
     const sequenceEvents = {
       listBySequence: vi.fn().mockResolvedValue([]),
     };
+    const shotSpecVersions = {
+      getSelectedByShotIds: vi.fn().mockResolvedValue(new Map()),
+    };
 
     await loadShotStalenessReads(
       asStub<Parameters<typeof loadShotStalenessReads>[0]>({
@@ -931,6 +945,7 @@ describe('loadShotStalenessReads (#1795)', () => {
         shotPromptVersions,
         frameVariants,
         sequenceEvents,
+        shotSpecVersions,
         shotDialogue: {
           getSelectedBySequence: vi.fn().mockResolvedValue([]),
         },

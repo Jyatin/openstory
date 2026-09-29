@@ -1,7 +1,6 @@
-/** Analyze and cast the script, then persist the first derived shot prompts. */
+/** Analyze and cast the script, then persist each shot's spec and derived prompts. */
 import { sanitizeScriptContent } from '@/sequences/prompt-validation';
 import { resolveVideoModels } from '@/models/resolve-video-models';
-import { shotDialogue } from '@/shots/shot-dialogue';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import { buildCastCharacterBible } from '@/cast/character-prompt';
 import { getGenerationChannel } from '@/platform/realtime';
@@ -24,15 +23,8 @@ import {
   type GenerationStage,
 } from '@/sequences/pipeline';
 import { createCastRecords } from '@/cast/server/workflows/cast-records';
-import {
-  derivedShotForItem,
-  shotWorkItems,
-} from '@/shots/server/shot-work-items';
-import {
-  hashVisualPromptInput,
-  hashMotionPromptInput,
-} from '@/shots/input-hash';
-import { narrowShotPromptContext } from '@/shots/server/prompt-context';
+import { shotWorkItems } from '@/shots/server/shot-work-items';
+import { persistShotSpec } from '@/shots/server/persist-shot-spec';
 import { deriveAutoStyle } from '@/look/server/workflows/auto-style-step';
 import { waitForElementVision } from '@/cast/server/workflows/wait-for-sheets';
 import type { SequenceElement } from '@/platform/server/db/schema';
@@ -332,16 +324,11 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         existingElements: elementsMinimal,
       });
     });
-    // Derivation consumes only the shot-list specification and frozen bibles.
-    // Persist its first versions now; the spec itself is deliberately ephemeral.
-    await step.do('persist-derived-shot-prompts', async () => {
+    // Each shot's spec lands as its first version, with the prompts derived
+    // from it (#1915). Derivation reads only the spec and the frozen bibles.
+    await step.do('persist-shot-specs', async () => {
       for (const item of shotWorkItems(scenes, shotMapping)) {
-        const derived = derivedShotForItem(item, styleConfig, {
-          referenceOnly,
-        });
-        if (!derived || !item.mapping.shotId) continue;
-        const context = narrowShotPromptContext({
-          scene: item.scene,
+        const written = await persistShotSpec(scopedDb, item, {
           styleConfig,
           characterBible: castCharacterBible,
           locationBible,
@@ -349,36 +336,17 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
           aspectRatio,
           analysisModel: analysisModelId,
           referenceOnly,
-          startingFrameImageUrl: null,
-          dialogue: shotDialogue(item.scene.originalScript.dialogue),
         });
-        if (!referenceOnly && item.mapping.frameId) {
-          await scopedDb.framePromptVersions.writeAiVersion({
-            frameId: item.mapping.frameId,
-            text: derived.visualPrompt.fullPrompt,
-            inputHash: await hashVisualPromptInput(context),
-            analysisModel: analysisModelId,
+        const channel = getGenerationChannel(sequenceId);
+        const { shotId } = item.mapping;
+        if (written.stillPrompt) {
+          await channel.emit('generation.shot:updated', {
+            shotId,
+            updateType: 'visual-prompt',
           });
-          await getGenerationChannel(sequenceId).emit(
-            'generation.shot:updated',
-            {
-              shotId: item.mapping.shotId,
-              updateType: 'visual-prompt',
-            }
-          );
         }
-        await scopedDb.shotPromptVersions.write({
-          shotId: item.mapping.shotId,
-          promptType: 'motion',
-          source: 'derived',
-          text: derived.motionPrompt.fullPrompt,
-          audio: derived.motionPrompt.audio,
-          usesStartFrame: !referenceOnly,
-          inputHash: await hashMotionPromptInput(context),
-          analysisModel: analysisModelId,
-        });
-        await getGenerationChannel(sequenceId).emit('generation.shot:updated', {
-          shotId: item.mapping.shotId,
+        await channel.emit('generation.shot:updated', {
+          shotId,
           updateType: 'motion-prompt',
         });
       }

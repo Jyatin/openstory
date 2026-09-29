@@ -1,45 +1,26 @@
 import { saveShotPrompt } from '@/shots/server/save-shot-prompt';
+import { regenerateShotPrompt } from '@/shots/server/regenerate-shot-prompt';
 import { readMusicPromptStaleness } from '@/audio/server/music-staleness';
-import {
-  rendersReferenceOnly,
-  shotPromptSequence,
-  usesStartFrame,
-} from './use-start-frame';
-import {
-  hashMotionPromptInput,
-  computeMusicPromptInputHash,
-  hashVisualPromptInput,
-  motionPromptInputHashMatches,
-  musicPromptInputHashMatches,
-  visualPromptInputHashMatches,
-  voiceOnlyMovedSince,
-} from './input-hash';
 import {
   DEFAULT_ANALYSIS_MODEL,
   getAnalysisModelById,
 } from '@/models/models.config';
 import {
-  loadShotPromptContext,
-  narrowShotPromptContext,
-} from '@/shots/server/prompt-context';
+  computeMusicPromptInputHash,
+  musicPromptInputHashMatches,
+} from './input-hash';
 import {
   SHOT_PROMPT_TYPES,
   type ShotPromptVersion,
   type SequenceMusicPromptVersion,
 } from '@/platform/server/db/schema';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
-import { getFrameImageUrl } from '@/shots/server/frame-image';
-import { loadShotPromptDialogue } from '@/shots/server/shot-dialogue';
 import { simpleHash } from '@/platform/hash';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
 import { terminateSingleArtifactRun } from '@/platform/server/workflow/run-outcome';
 import { storedMotionDialogueSchema } from './scene-analysis.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
-import type {
-  MotionPromptWorkflowInput,
-  MusicPromptWorkflowInput,
-  FramePromptWorkflowInput,
-} from '@/platform/server/workflow/types';
+import type { MusicPromptWorkflowInput } from '@/platform/server/workflow/types';
 import { musicSceneSummariesFromRows } from '@/audio/server/workflows/music-scene-summaries';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
@@ -188,6 +169,21 @@ const shotRestoreInput = z.object({
   promptType: promptTypeSchema,
 });
 
+/**
+ * A derived row restores as derived, carrying the spec it was built from.
+ * A derived row whose spec id is missing (legacy) cannot be written as
+ * derived, so it restores as history. Every other source restores as history.
+ */
+function restoredPromptProvenance(row: {
+  source: string;
+  specVersionId: string | null;
+}): { source: 'derived'; specVersionId: string } | { source: 'restored' } {
+  if (row.source === 'derived' && row.specVersionId) {
+    return { source: 'derived', specVersionId: row.specVersionId };
+  }
+  return { source: 'restored' };
+}
+
 export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
   .middleware([shotAccessMiddleware])
   .validator(zodValidator(shotRestoreInput))
@@ -212,10 +208,10 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
         frameId: context.frame.id,
         text: frameChosen.text,
         components: frameChosen.components,
-        source: 'restored',
         inputHash: frameChosen.inputHash,
         analysisModel: frameChosen.analysisModel,
         createdBy: context.user.id,
+        ...restoredPromptProvenance(frameChosen),
       });
       return { variantId: inserted.id };
     }
@@ -238,11 +234,11 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
       components: chosen.components,
       parameters: chosen.parameters,
       audio: chosen.audio,
-      source: chosen.source === 'derived' ? 'derived' : 'restored',
       usesStartFrame: chosen.usesStartFrame,
       inputHash: chosen.inputHash,
       analysisModel: chosen.analysisModel,
       createdBy: context.user.id,
+      ...restoredPromptProvenance(chosen),
     });
     return { variantId: inserted.id };
   });
@@ -421,287 +417,28 @@ const shotRegenerateInput = z.object({
   sequenceId: ulidSchema,
   shotId: ulidSchema,
   promptType: promptTypeSchema,
-  // `force: true` bypasses the up-to-date short-circuit so the user can roll
-  // the dice on a fresh non-deterministic LLM completion even when no upstream
-  // inputs have changed. The staleness-banner path leaves this unset.
+  // `force: true` rebuilds even when the prompts read fresh. The
+  // staleness-banner path leaves this unset.
   force: z.boolean().optional(),
+  /** Replace this prompt even though the user wrote it (confirmed in the UI). */
+  replaceWritten: z.boolean().optional(),
 });
 
 export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
   .middleware([shotAccessMiddleware])
   .validator(zodValidator(shotRegenerateInput))
   .handler(async ({ context, data }) => {
-    const { shot, frame, sequence, scopedDb, user, teamId, scene } = context;
-
-    if (!scene) {
+    if (!context.scene) {
       throw new Error('Shot has no scene metadata to regenerate from');
     }
-
-    const shotReferenceOnly = rendersReferenceOnly(shot, sequence);
-    const ctx = await loadShotPromptContext({
-      scopedDb,
-      sequence: shotPromptSequence(sequence, shot),
-      scene,
-      // Motion prompts are conditioned on the rendered still (#929); feeding
-      // its URL here keeps this regen-bail check in lockstep with the
-      // generation-time stamp and the staleness verify. No-op for visual. The
-      // still lives on the anchor frame's selected version now (#989/#1067).
-      startingFrameImageUrl: shotReferenceOnly
-        ? null
-        : await getFrameImageUrl(scopedDb, frame.id),
+    const replace = data.replaceWritten === true;
+    return regenerateShotPrompt(context, context.scene, {
+      force: data.force === true,
+      replace: {
+        visual: replace && data.promptType === 'visual',
+        motion: replace && data.promptType === 'motion',
+      },
     });
-
-    // Bail if the cached input hash already matches the live recompute —
-    // otherwise every double-click enqueues a duplicate workflow run and
-    // appends a no-op `'regenerated'` history row. Hash inputs are narrowed
-    // to what this shot's continuity actually references; the workflow
-    // downstream still gets the full bibles for LLM context.
-    //
-    // `force` skips this bail so an explicit user click always reaches the
-    // LLM — there's no other way to get a fresh non-deterministic completion
-    // when upstream inputs are unchanged.
-    const narrowed = narrowShotPromptContext(ctx);
-    // What the shot says now (#1784): the motion prompt is written from, and
-    // hashed over, the shot's lines — not the script's.
-    const promptDialogue =
-      data.promptType === 'motion'
-        ? await loadShotPromptDialogue(scopedDb, sequence.id, shot)
-        : null;
-    const liveHash = promptDialogue
-      ? await hashMotionPromptInput({
-          ...narrowed,
-          dialogue: promptDialogue.dialogue,
-        })
-      : await hashVisualPromptInput(narrowed);
-    const stored =
-      data.promptType === 'visual'
-        ? await scopedDb.framePromptVersions.getSelected(frame.id)
-        : await scopedDb.shotPromptVersions.getSelectedMotion(shot.id);
-    const storedHash = stored?.inputHash ?? null;
-    // Legacy digests ignore the voice-only flag (#1787); only read the
-    // history when the stored digest is not the current one.
-    const voiceOnlyMoved =
-      !!stored &&
-      storedHash !== liveHash &&
-      voiceOnlyMovedSince(
-        await scopedDb.characters.listBibleVersionsBySequence(sequence.id),
-        stored.createdAt
-      );
-    if (
-      !data.force &&
-      (promptDialogue
-        ? await motionPromptInputHashMatches(
-            storedHash,
-            { ...narrowed, dialogue: promptDialogue.dialogue },
-            { legacyScriptDialogue: !promptDialogue.onNode, voiceOnlyMoved }
-          )
-        : await visualPromptInputHashMatches(storedHash, narrowed, {
-            voiceOnlyMoved,
-          }))
-    ) {
-      return {
-        workflowRunId: null,
-        alreadyUpToDate: true,
-        alreadyInFlight: false,
-      } as const;
-    }
-
-    // Server-side dedup (#1085): a live pending claim for exactly these
-    // inputs means a run is already producing this prompt — a second click,
-    // a second tab, or a teammate must no-op instead of double-spending.
-    // Applies to `force` too: force bypasses the up-to-date bail, not an
-    // in-flight run.
-    const existingClaim =
-      data.promptType === 'visual'
-        ? await scopedDb.framePromptVersions.getLivePending(frame.id, liveHash)
-        : await scopedDb.shotPromptVersions.getLivePending(shot.id, liveHash);
-    if (existingClaim) {
-      return {
-        workflowRunId: existingClaim.workflowRunId,
-        alreadyUpToDate: false,
-        alreadyInFlight: true,
-      } as const;
-    }
-
-    // Pre-create the pending version row (#1085) so in-flight work is
-    // representable: staleness reads 'updating', duplicate enqueues no-op,
-    // and the run completes this row in place. The partial unique index on
-    // live claims closes the check-then-insert race above — the loser lands
-    // here and reports in-flight instead of double-spending.
-    let claim;
-    try {
-      claim =
-        data.promptType === 'visual'
-          ? await scopedDb.framePromptVersions.createPending({
-              frameId: frame.id,
-              pendingInputHash: liveHash,
-              createdBy: user.id,
-            })
-          : await scopedDb.shotPromptVersions.createPending({
-              shotId: shot.id,
-              pendingInputHash: liveHash,
-              usesStartFrame: usesStartFrame(shot, sequence),
-              createdBy: user.id,
-            });
-    } catch (error) {
-      const racedClaim =
-        data.promptType === 'visual'
-          ? await scopedDb.framePromptVersions.getLivePending(
-              frame.id,
-              liveHash
-            )
-          : await scopedDb.shotPromptVersions.getLivePending(shot.id, liveHash);
-      if (!racedClaim) throw error;
-      return {
-        workflowRunId: racedClaim.workflowRunId,
-        alreadyUpToDate: false,
-        alreadyInFlight: true,
-      } as const;
-    }
-
-    // Always stream deltas for this endpoint — it's only invoked from the
-    // shot inspector (stale banner or force regenerate), so a viewer is
-    // watching. Binding emitStreaming to `force` alone left the stale-banner
-    // path silent (no shotPrompt.streaming events → textarea never updates).
-    // Fields common to both prompt workflows. The two trigger calls below build
-    // their input in a NARROWED, per-type block (not a `A | B` union) so the
-    // compiler enforces each workflow's required fields — a union literal only
-    // has to satisfy ONE member, which is exactly how the missing-`frameId` bug
-    // slipped through (FramePromptWorkflowInput needs it, MotionPromptWorkflowInput
-    // doesn't, so the union accepted the omission).
-    const commonInput = {
-      userId: user.id,
-      teamId,
-      sequenceId: sequence.id,
-      shotId: shot.id,
-      scene,
-      aspectRatio: sequence.aspectRatio,
-      resolution: sequence.resolution,
-      characterBible: [...ctx.characterBible],
-      locationBible: [...ctx.locationBible],
-      elementBible: [...ctx.elementBible],
-      styleConfig: ctx.styleConfig,
-      analysisModelId:
-        getAnalysisModelById(ctx.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL,
-      emitStreaming: true,
-    };
-
-    // Force-regen needs a unique dedup ID per click so the workflow trigger
-    // doesn't collapse repeat clicks into a single run — the user is explicitly
-    // asking for another LLM completion. The auto-staleness path keeps the stable
-    // hash-based ID so genuine retries collapse to one run.
-    const deduplicationId = data.force
-      ? shotPromptForceDedupId(
-          data.promptType,
-          shot.id,
-          `${Date.now()}-${crypto.randomUUID()}`
-        )
-      : shotPromptDedupId(data.promptType, shot.id, liveHash);
-    const triggerOpts = {
-      deduplicationId,
-    };
-
-    // The scene's other shots, so a rewrite keeps continuity with them.
-    let siblingVisualPrompts: Array<{ shotId: string; text: string }> = [];
-    let siblingMotionPrompts: Array<{ shotId: string; text: string }> = [];
-    {
-      const shotsInSeq = await scopedDb.shots.listBySequence(sequence.id);
-      const siblings = shotsInSeq.filter(
-        (sibling) =>
-          shot.sceneId &&
-          sibling.sceneId === shot.sceneId &&
-          sibling.id !== shot.id &&
-          !sibling.deletedAt
-      );
-      const siblingFrames = await scopedDb.frames.getAnchorsByShots(
-        siblings.map((sibling) => sibling.id)
-      );
-      const visualVersions =
-        await scopedDb.framePromptVersions.getSelectedByFrameIds(
-          [...siblingFrames.values()].map((anchor) => anchor.id)
-        );
-      siblingVisualPrompts = [...siblingFrames.values()].flatMap((anchor) => {
-        const prompt = visualVersions.get(anchor.id);
-        return prompt?.text
-          ? [{ shotId: anchor.shotId, text: prompt.text }]
-          : [];
-      });
-      const siblingVersions =
-        await scopedDb.shotPromptVersions.getSelectedMotionByShots(
-          siblings.map((sibling) => sibling.id)
-        );
-      siblingMotionPrompts = siblings.flatMap((sibling) => {
-        const prompt = siblingVersions.get(sibling.id);
-        return prompt?.text ? [{ shotId: sibling.id, text: prompt.text }] : [];
-      });
-    }
-
-    let workflowRunId: string;
-    try {
-      workflowRunId = !promptDialogue
-        ? // `frameId` is REQUIRED on FramePromptWorkflowInput — the workflow
-          // never reads the DB (#991) and persists the visual prompt only
-          // when it's present, so resolving the anchor frame here (from the
-          // access middleware's `frame`) is mandatory, not optional.
-          await triggerWorkflow<FramePromptWorkflowInput>(
-            '/frame-prompt',
-            {
-              ...commonInput,
-              frameId: frame.id,
-              siblingVisualPrompts,
-              targetVersionId: claim.id,
-            },
-            triggerOpts
-          )
-        : // Snapshot the rendered still at trigger time (#929) so the motion
-          // workflow never looks it up mid-run (a concurrent re-render could
-          // swap it). The still lives on the anchor frame's selected
-          // version now (#989/#1067).
-          await triggerWorkflow<MotionPromptWorkflowInput>(
-            '/motion-prompt',
-            {
-              ...commonInput,
-              startingFrameImageUrl: shotReferenceOnly
-                ? null
-                : await getFrameImageUrl(scopedDb, frame.id),
-              // The mode picks which motion-prompt template writes this
-              // version; the hash the bail check above computed folded it in
-              // through the sequence row, so it has to reach the child too or
-              // the stamp and the verify disagree.
-              referenceOnly: shotReferenceOnly,
-              siblingMotionPrompts,
-              dialogue: promptDialogue.dialogue,
-              targetVersionId: claim.id,
-            },
-            triggerOpts
-          );
-    } catch (error) {
-      // The claim must not outlive a trigger that never happened.
-      if (data.promptType === 'visual') {
-        await scopedDb.framePromptVersions.markTerminal(claim.id, 'failed');
-      } else {
-        await scopedDb.shotPromptVersions.markTerminal(claim.id, 'failed');
-      }
-      throw error;
-    }
-
-    // Stamp the producing instance so cancel + zombie reconciliation can
-    // verify the run. 'generating' from here on — the instance starts
-    // immediately.
-    if (data.promptType === 'visual') {
-      await scopedDb.framePromptVersions.markGenerating(
-        claim.id,
-        workflowRunId
-      );
-    } else {
-      await scopedDb.shotPromptVersions.markGenerating(claim.id, workflowRunId);
-    }
-
-    return {
-      workflowRunId,
-      alreadyUpToDate: false,
-      alreadyInFlight: false,
-    } as const;
   });
 
 const saveMusicPromptInput = z.object({

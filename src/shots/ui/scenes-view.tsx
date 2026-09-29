@@ -1806,6 +1806,7 @@ export const ScenesView: React.FC<ScenesViewProps> = ({
                       }
                       facetShotIds={facetShotIds}
                       musicEditable={scope === 'sequence'}
+                      sceneScope={scope === 'scenes'}
                       scene={scriptScene}
                       scopeShots={scopeShots}
                       filmSeconds={shots ? sumShotSeconds(shots) : undefined}

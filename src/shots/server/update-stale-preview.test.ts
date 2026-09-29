@@ -62,9 +62,9 @@ describe('buildUpdateStalePreview', () => {
     expect(preview.motionPromptShotIds).toEqual(['b']);
     expect(preview.imageShotIds).toEqual(['a']);
     expect(preview.videoShotIds).toEqual(['b']);
-    // 2 LLM calls at $0.02; image $0.04; video $0.50; no music
+    // Rebuild is free. Rewrite is the only prompt LLM. Image $0.04; video $0.50.
     expect(preview.costByLevel).toEqual({
-      prompts: 40_000,
+      prompts: 0,
       images: 40_000,
       dialogue: 0,
       video: 500_000,

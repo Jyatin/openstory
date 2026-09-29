@@ -57,6 +57,7 @@ export function defaultSingleShot(durationSeconds: number): ShotSpec {
     },
     action: '',
     cameraMovement: { move: 'static', pacing: 'slow' },
+    direction: '',
     soundCue: '',
     dialogue: [],
     durationSeconds: durationSeconds > 0 ? durationSeconds : 3,

@@ -36,6 +36,7 @@ const PLAN_KIND_STAGE = {
   'sheet:location': 'references',
   'ref:element': 'references',
   voice: 'references',
+  spec: 'references',
   'prompt:visual': 'references',
   still: 'images',
   'prompt:motion': 'images',
@@ -103,9 +104,12 @@ export function artifactVerdict(args: {
 }
 
 export type PlanShot = {
-  /** Derived direction did not consume the still; later LLM versions do. */
-  motionPromptDerived?: boolean;
   id: string;
+  /** The shot's spec: missing when it has none (#1923). */
+  spec: ArtifactVerdict;
+  /** A user-written prompt is not rebuilt from the spec. */
+  visualWritten: boolean;
+  motionWritten: boolean;
   /** `usesStartFrame(shot, sequence)` — the mode is per shot. */
   usesStartFrame: boolean;
   /** Entities the shot's still (or reference-only clip) is rendered from. */
@@ -167,9 +171,15 @@ const SHOT_UNITS: ReadonlyArray<{
   requires: (shot: PlanShot) => PlanUnitRef[];
 }> = [
   {
+    kind: 'spec',
+    verdict: (s) => s.spec,
+    requires: () => [],
+  },
+  {
     kind: 'prompt:visual',
     verdict: (s) => (s.usesStartFrame ? s.visualPrompt : null),
-    requires: () => [],
+    requires: (s) =>
+      s.visualWritten || !s.usesStartFrame ? [] : [ref('spec', s.id)],
   },
   {
     kind: 'still',
@@ -179,8 +189,7 @@ const SHOT_UNITS: ReadonlyArray<{
   {
     kind: 'prompt:motion',
     verdict: (s) => s.motionPrompt,
-    requires: (s) =>
-      s.usesStartFrame && !s.motionPromptDerived ? [ref('still', s.id)] : [],
+    requires: (s) => (s.motionWritten ? [] : [ref('spec', s.id)]),
   },
   {
     kind: 'dialogue',
@@ -357,6 +366,7 @@ const KIND_NOUN: Record<PlanUnitKind, [one: string, many: string]> = {
   'sheet:location': ['reference', 'references'],
   'ref:element': ['reference', 'references'],
   voice: ['voice', 'voices'],
+  spec: ['shot rewrite', 'shot rewrites'],
   'prompt:visual': ['prompt', 'prompts'],
   still: ['image', 'images'],
   'prompt:motion': ['prompt', 'prompts'],
@@ -466,7 +476,7 @@ const REFERENCE_KINDS = new Set<PlanUnitKind>([
 
 /** What each Update-all depth reaches, cumulatively (#1819). */
 const UPDATE_ALL_KINDS: Record<UpdateStaleDepth, readonly PlanUnitKind[]> = {
-  prompts: ['prompt:visual', 'prompt:motion'],
+  prompts: ['spec', 'prompt:visual', 'prompt:motion'],
   images: ['sheet:character', 'sheet:location', 'ref:element', 'still'],
   dialogue: ['dialogue'],
   video: ['clip'],

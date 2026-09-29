@@ -161,6 +161,9 @@ export const shotPromptVersions = snakeCase.table(
     // stamp, all of which were written before reference-only shipped and so
     // were image-to-video; every write input requires an explicit value.
     usesStartFrame: integer({ mode: 'boolean' }).default(true).notNull(),
+    // The `shot_spec_versions` row this text was derived from (#1915). Null
+    // for text that was not derived from a spec (an LLM or a user wrote it).
+    specVersionId: text(),
 
     // SHA-256 of the upstream context that produced an AI prompt; null for
     // user-edits since they have no upstream input surface.

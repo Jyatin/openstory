@@ -15,6 +15,7 @@ const createTestShot = (overrides: Partial<Shot>): Shot => ({
   updatedAt: new Date(),
   selectedMotionPromptVersionId: null,
   selectedSpecVersionId: null,
+  pendingSpecVersionId: null,
   audioClips: null,
   renderSegmentId: null,
   deletedAt: null,

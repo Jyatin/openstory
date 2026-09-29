@@ -173,12 +173,37 @@ export type StoredShotSpec = Omit<
   'shotNumber' | 'durationSeconds' | 'dialogue'
 >;
 
+/**
+ * What Rewrite shot returns (#1923). Same fields as {@link storedShotSpec},
+ * union-free, so it can be a structured-output schema on its own.
+ */
+export const storedShotSpecSchema = z.object({
+  framing: shotFramingSchema,
+  action: z.string().meta({ description: 'The ONE primary action' }),
+  cameraMovement: shotCameraMovementSchema,
+  direction: z.string().meta({ description: 'Direction note, empty if none' }),
+  soundCue: z.string().meta({ description: 'SFX/ambience, empty if none' }),
+});
+
 /** Drop the fields that live elsewhere; the rest is what a version stores. */
 export function storedShotSpec(spec: ShotSpec): StoredShotSpec {
+  return canonicalStoredShotSpec(spec);
+}
+
+/** Stable key order for hashing and equality. A chained move stays one string. */
+export function canonicalStoredShotSpec(spec: StoredShotSpec): StoredShotSpec {
   return {
-    framing: spec.framing,
+    framing: {
+      shotSize: spec.framing.shotSize,
+      angle: spec.framing.angle,
+      composition: spec.framing.composition,
+      subjectStartState: spec.framing.subjectStartState,
+    },
     action: spec.action,
-    cameraMovement: spec.cameraMovement,
+    cameraMovement: {
+      move: spec.cameraMovement.move,
+      pacing: spec.cameraMovement.pacing,
+    },
     direction: spec.direction,
     soundCue: spec.soundCue,
   };

@@ -592,6 +592,10 @@ import type {
   VideoManifestEntry,
 } from '@/platform/server/db/schema';
 import { styleConfigHashBody } from '@/look/style-config';
+import {
+  canonicalStoredShotSpec,
+  type StoredShotSpec,
+} from '@/shots/shot-list.schema';
 
 /**
  * Visual-prompt assembler DTO (#1616). Every channel is required so stamp
@@ -606,6 +610,12 @@ export type VisualPromptHashInput = {
   elementBible: readonly ElementBibleEntry[];
   aspectRatio: string;
   analysisModel: string;
+  /**
+   * The shot's selected spec (#1923). Omitted or null leaves the digest
+   * unchanged, so a stamp from before specs still matches. Present, it is
+   * hashed by content: derivation is a pure function of that content.
+   */
+  spec?: StoredShotSpec | null;
 };
 
 /**
@@ -631,10 +641,7 @@ export type MotionPromptHashInput = VisualPromptHashInput & {
  * the motion hash hashes it. `voiceToken` is dropped: it binds a voice on the
  * clip, never the prompt, and the LLM cannot know which elements exist.
  */
-export function sceneWithShotDialogue(
-  scene: Scene,
-  dialogue: MotionDialogue
-): Scene {
+function sceneWithShotDialogue(scene: Scene, dialogue: MotionDialogue): Scene {
   return {
     ...scene,
     originalScript: {
@@ -677,6 +684,14 @@ const visualPromptHashInputSchema = z.object({
   elementBible: z.array(requiredObject),
   aspectRatio: z.string(),
   analysisModel: z.string(),
+  // The hash assembler only. The LLM schema is `storedShotSpecSchema`.
+  spec: z
+    .custom<StoredShotSpec>(
+      (value) =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+    )
+    .nullable()
+    .optional(),
 });
 
 const motionPromptHashInputSchema = visualPromptHashInputSchema.extend({
@@ -721,6 +736,7 @@ type PromptSceneContextHashInput = {
   analysisModel: string;
   startingFrameImageUrl?: string | null;
   referenceOnly?: boolean;
+  spec?: StoredShotSpec | null;
 };
 
 function toVisualBodyInput(
@@ -734,6 +750,7 @@ function toVisualBodyInput(
     elementBible: input.elementBible,
     aspectRatio: input.aspectRatio,
     analysisModel: input.analysisModel,
+    spec: input.spec,
   };
 }
 
@@ -967,6 +984,11 @@ function visualPromptHashBody(
     ...bibles,
     aspectRatio: trim(input.aspectRatio),
     analysisModel: trim(input.analysisModel),
+    // Content, and only on the current stamp. A legacy digest has no spec,
+    // so a part-1 stamp stays fresh until the selected spec changes (#1923).
+    ...(kind === 'current' && input.spec
+      ? { spec: canonicalStoredShotSpec(input.spec) }
+      : {}),
   };
 }
 
@@ -991,7 +1013,15 @@ function motionPromptHashBody(
     ...bibles,
     aspectRatio: trim(input.aspectRatio),
     analysisModel: trim(input.analysisModel),
-    startingFrameImageUrl: trim(input.startingFrameImageUrl),
+    // The current stamp is the derived prompt: it does not read the still.
+    // Legacy kinds keep the URL so an old LLM stamp still matches until the
+    // still it was written against changes (#1923).
+    ...(kind === 'current'
+      ? {}
+      : { startingFrameImageUrl: trim(input.startingFrameImageUrl) }),
+    ...(kind === 'current' && input.spec
+      ? { spec: canonicalStoredShotSpec(input.spec) }
+      : {}),
     ...(input.referenceOnly ? { referenceOnly: true } : {}),
   };
 }
@@ -1061,14 +1091,20 @@ function acceptedKinds<K extends PromptHashKind>(
 export async function visualPromptInputHashMatches(
   stored: string | null,
   raw: VisualPromptHashInput | MotionPromptHashInput,
-  { voiceOnlyMoved }: { voiceOnlyMoved: boolean }
+  {
+    voiceOnlyMoved,
+    acceptLegacy = true,
+  }: { voiceOnlyMoved: boolean; acceptLegacy?: boolean }
 ): Promise<boolean> {
   if (!stored) return false;
   const input = toVisualBodyInput(assembleVisualPromptHashInput(raw));
-  const kinds = acceptedKinds(
-    ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
-    voiceOnlyMoved
-  );
+  // A prompt built from an older spec must not hide behind a pre-spec digest.
+  const kinds = acceptLegacy
+    ? acceptedKinds(
+        ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
+        voiceOnlyMoved
+      )
+    : (['current'] as const);
   const digests = await Promise.all(
     kinds.map((kind) => sha256Hex(visualPromptHashBody(input, kind)))
   );
@@ -1109,17 +1145,24 @@ export async function motionPromptInputHashMatches(
   {
     legacyScriptDialogue,
     voiceOnlyMoved,
-  }: { legacyScriptDialogue: boolean; voiceOnlyMoved: boolean }
+    acceptLegacy = true,
+  }: {
+    legacyScriptDialogue: boolean;
+    voiceOnlyMoved: boolean;
+    acceptLegacy?: boolean;
+  }
 ): Promise<boolean> {
   if (!stored) return false;
   const assembled = assembleMotionPromptHashInput(raw);
   const inputs = legacyScriptDialogue
     ? [toMotionBodyInput(assembled), toMotionBodyInput(assembled, true)]
     : [toMotionBodyInput(assembled)];
-  const kinds = acceptedKinds(
-    ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
-    voiceOnlyMoved
-  );
+  const kinds = acceptLegacy
+    ? acceptedKinds(
+        ['v5-voiced', 'v5-titled', 'v5-named', 'v4'] as const,
+        voiceOnlyMoved
+      )
+    : (['current'] as const);
   const digests = await Promise.all(
     inputs.flatMap((input) =>
       kinds.map((kind) => sha256Hex(motionPromptHashBody(input, kind)))

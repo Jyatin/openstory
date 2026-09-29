@@ -28,7 +28,6 @@ import {
   type SequenceMusicPromptVersion,
 } from '@/platform/server/db/schema';
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
-import { getFrameImageUrl } from '@/shots/server/frame-image';
 import { loadShotPromptDialogue } from '@/shots/server/shot-dialogue';
 import { simpleHash } from '@/platform/hash';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
@@ -36,10 +35,17 @@ import { terminateSingleArtifactRun } from '@/platform/server/workflow/run-outco
 import { storedMotionDialogueSchema } from './scene-analysis.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import type {
-  MotionPromptWorkflowInput,
   MusicPromptWorkflowInput,
-  FramePromptWorkflowInput,
+  ShotSpecRewriteWorkflowInput,
 } from '@/platform/server/workflow/types';
+import {
+  deriveMotionPrompt,
+  deriveStillPrompt,
+} from '@/shots/shot-list.derive';
+import {
+  hashShotSpecInput,
+  specCurrencyFromScene,
+} from '@/shots/shot-spec-currency';
 import { musicSceneSummariesFromRows } from '@/audio/server/workflows/music-scene-summaries';
 import { createServerFn } from '@tanstack/react-start';
 import { zodValidator } from '@tanstack/zod-adapter';
@@ -188,6 +194,21 @@ const shotRestoreInput = z.object({
   promptType: promptTypeSchema,
 });
 
+/**
+ * A derived row restores as derived, carrying the spec it was built from.
+ * A derived row whose spec id is missing (legacy) cannot be written as
+ * derived, so it restores as history. Every other source restores as history.
+ */
+function restoredPromptProvenance(row: {
+  source: string;
+  specVersionId: string | null;
+}): { source: 'derived'; specVersionId: string } | { source: 'restored' } {
+  if (row.source === 'derived' && row.specVersionId) {
+    return { source: 'derived', specVersionId: row.specVersionId };
+  }
+  return { source: 'restored' };
+}
+
 export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
   .middleware([shotAccessMiddleware])
   .validator(zodValidator(shotRestoreInput))
@@ -215,9 +236,7 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
         inputHash: frameChosen.inputHash,
         analysisModel: frameChosen.analysisModel,
         createdBy: context.user.id,
-        ...(frameChosen.source === 'derived'
-          ? { source: 'derived', specVersionId: frameChosen.specVersionId }
-          : { source: 'restored' }),
+        ...restoredPromptProvenance(frameChosen),
       });
       return { variantId: inserted.id };
     }
@@ -244,9 +263,7 @@ export const restoreShotPromptVariantFn = createServerFn({ method: 'POST' })
       inputHash: chosen.inputHash,
       analysisModel: chosen.analysisModel,
       createdBy: context.user.id,
-      ...(chosen.source === 'derived'
-        ? { source: 'derived', specVersionId: chosen.specVersionId }
-        : { source: 'restored' }),
+      ...restoredPromptProvenance(chosen),
     });
     return { variantId: inserted.id };
   });
@@ -442,270 +459,260 @@ export const regenerateShotPromptFn = createServerFn({ method: 'POST' })
     }
 
     const shotReferenceOnly = rendersReferenceOnly(shot, sequence);
+    if (shot.pendingSpecVersionId) {
+      return {
+        workflowRunId: null,
+        alreadyUpToDate: false,
+        alreadyInFlight: true,
+        rebuilt: false,
+      } as const;
+    }
+
+    const promptDialogue = await loadShotPromptDialogue(
+      scopedDb,
+      sequence.id,
+      shot
+    );
+    const currencyHash = await hashShotSpecInput(
+      specCurrencyFromScene(scene, promptDialogue.dialogue.lines)
+    );
+    const selectedSpec = await scopedDb.shotSpecVersions.getSelected(shot.id);
+    const specMissing = selectedSpec === null;
+    const specStale =
+      selectedSpec !== null &&
+      selectedSpec.inputHash !== null &&
+      selectedSpec.inputHash !== currencyHash;
+    const specCurrent = !specMissing && !specStale;
+
     const ctx = await loadShotPromptContext({
       scopedDb,
       sequence: shotPromptSequence(sequence, shot),
       scene,
-      // Motion prompts are conditioned on the rendered still (#929); feeding
-      // its URL here keeps this regen-bail check in lockstep with the
-      // generation-time stamp and the staleness verify. No-op for visual. The
-      // still lives on the anchor frame's selected version now (#989/#1067).
-      startingFrameImageUrl: shotReferenceOnly
-        ? null
-        : await getFrameImageUrl(scopedDb, frame.id),
+      startingFrameImageUrl: null,
     });
+    const narrowed = narrowShotPromptContext({
+      ...ctx,
+      startingFrameImageUrl: null,
+      dialogue: promptDialogue.dialogue,
+      referenceOnly: shotReferenceOnly,
+      spec: selectedSpec?.spec ?? null,
+    });
+    const analysisModel =
+      getAnalysisModelById(ctx.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL;
+    const visualSelected = await scopedDb.framePromptVersions.getSelected(
+      frame.id
+    );
+    const motionSelected = await scopedDb.shotPromptVersions.getSelectedMotion(
+      shot.id
+    );
 
-    // Bail if the cached input hash already matches the live recompute —
-    // otherwise every double-click enqueues a duplicate workflow run and
-    // appends a no-op `'regenerated'` history row. Hash inputs are narrowed
-    // to what this shot's continuity actually references; the workflow
-    // downstream still gets the full bibles for LLM context.
-    //
-    // `force` skips this bail so an explicit user click always reaches the
-    // LLM — there's no other way to get a fresh non-deterministic completion
-    // when upstream inputs are unchanged.
-    const narrowed = narrowShotPromptContext(ctx);
-    // What the shot says now (#1784): the motion prompt is written from, and
-    // hashed over, the shot's lines — not the script's.
-    const promptDialogue =
-      data.promptType === 'motion'
-        ? await loadShotPromptDialogue(scopedDb, sequence.id, shot)
-        : null;
-    const liveHash = promptDialogue
-      ? await hashMotionPromptInput({
-          ...narrowed,
-          dialogue: promptDialogue.dialogue,
-        })
-      : await hashVisualPromptInput(narrowed);
-    const stored =
-      data.promptType === 'visual'
-        ? await scopedDb.framePromptVersions.getSelected(frame.id)
-        : await scopedDb.shotPromptVersions.getSelectedMotion(shot.id);
-    const storedHash = stored?.inputHash ?? null;
-    // Legacy digests ignore the voice-only flag (#1787); only read the
-    // history when the stored digest is not the current one.
-    const voiceOnlyMoved =
-      !!stored &&
-      storedHash !== liveHash &&
-      voiceOnlyMovedSince(
-        await scopedDb.characters.listBibleVersionsBySequence(sequence.id),
-        stored.createdAt
+    if (specCurrent && selectedSpec) {
+      await scopedDb.shotSpecVersions.stampInputHashIfEmpty(
+        selectedSpec.id,
+        currencyHash
       );
-    if (
-      !data.force &&
-      (promptDialogue
-        ? await motionPromptInputHashMatches(
-            storedHash,
-            { ...narrowed, dialogue: promptDialogue.dialogue },
-            { legacyScriptDialogue: !promptDialogue.onNode, voiceOnlyMoved }
-          )
-        : await visualPromptInputHashMatches(storedHash, narrowed, {
-            voiceOnlyMoved,
-          }))
-    ) {
+      const visualHash = await hashVisualPromptInput(narrowed);
+      const motionHash = await hashMotionPromptInput(narrowed);
+      const voiceHistory =
+        await scopedDb.characters.listBibleVersionsBySequence(sequence.id);
+      const visualFresh =
+        visualSelected?.source === 'user-edit' ||
+        shotReferenceOnly ||
+        (await visualPromptInputHashMatches(
+          visualSelected?.inputHash ?? null,
+          narrowed,
+          {
+            voiceOnlyMoved: voiceOnlyMovedSince(
+              voiceHistory,
+              visualSelected?.createdAt ?? new Date(0)
+            ),
+            acceptLegacy:
+              (visualSelected?.specVersionId ?? null) === selectedSpec.id,
+          }
+        ));
+      const motionFresh =
+        motionSelected?.source === 'user-edit' ||
+        (await motionPromptInputHashMatches(
+          motionSelected?.inputHash ?? null,
+          narrowed,
+          {
+            legacyScriptDialogue: !promptDialogue.onNode,
+            voiceOnlyMoved: voiceOnlyMovedSince(
+              voiceHistory,
+              motionSelected?.createdAt ?? new Date(0)
+            ),
+            acceptLegacy:
+              (motionSelected?.specVersionId ?? null) === selectedSpec.id,
+          }
+        ));
+      const writeVisual =
+        !shotReferenceOnly && visualSelected?.source !== 'user-edit';
+      const writeMotion = motionSelected?.source !== 'user-edit';
+      if (!data.force && visualFresh && motionFresh) {
+        return {
+          workflowRunId: null,
+          alreadyUpToDate: true,
+          alreadyInFlight: false,
+          rebuilt: false,
+        } as const;
+      }
+      if (writeVisual) {
+        await scopedDb.framePromptVersions.write({
+          frameId: frame.id,
+          source: 'derived',
+          specVersionId: selectedSpec.id,
+          text: deriveStillPrompt(selectedSpec.spec, scene, ctx.styleConfig),
+          inputHash: visualHash,
+          analysisModel,
+          createdBy: user.id,
+        });
+      }
+      if (writeMotion) {
+        const motion = deriveMotionPrompt(selectedSpec.spec, {
+          referenceOnly: shotReferenceOnly,
+        });
+        await scopedDb.shotPromptVersions.write({
+          shotId: shot.id,
+          promptType: 'motion',
+          source: 'derived',
+          specVersionId: selectedSpec.id,
+          text: motion.text,
+          audio: motion.audio,
+          usesStartFrame: !shotReferenceOnly,
+          inputHash: motionHash,
+          analysisModel,
+          createdBy: user.id,
+        });
+      }
+      if (!writeVisual && !writeMotion) {
+        return {
+          workflowRunId: null,
+          alreadyUpToDate: true,
+          alreadyInFlight: false,
+          rebuilt: false,
+        } as const;
+      }
       return {
         workflowRunId: null,
-        alreadyUpToDate: true,
+        alreadyUpToDate: false,
         alreadyInFlight: false,
+        rebuilt: true,
       } as const;
     }
 
-    // Server-side dedup (#1085): a live pending claim for exactly these
-    // inputs means a run is already producing this prompt — a second click,
-    // a second tab, or a teammate must no-op instead of double-spending.
-    // Applies to `force` too: force bypasses the up-to-date bail, not an
-    // in-flight run.
-    const existingClaim =
-      data.promptType === 'visual'
-        ? await scopedDb.framePromptVersions.getLivePending(frame.id, liveHash)
-        : await scopedDb.shotPromptVersions.getLivePending(shot.id, liveHash);
-    if (existingClaim) {
-      return {
-        workflowRunId: existingClaim.workflowRunId,
-        alreadyUpToDate: false,
-        alreadyInFlight: true,
-      } as const;
-    }
-
-    // Pre-create the pending version row (#1085) so in-flight work is
-    // representable: staleness reads 'updating', duplicate enqueues no-op,
-    // and the run completes this row in place. The partial unique index on
-    // live claims closes the check-then-insert race above — the loser lands
-    // here and reports in-flight instead of double-spending.
-    let claim;
+    const visualHash = await hashVisualPromptInput(narrowed);
+    const motionHash = await hashMotionPromptInput(narrowed);
+    const claimId = await scopedDb.shotSpecVersions.claim(shot.id);
+    let visualClaimId: string | null = null;
+    let motionClaimId: string | null = null;
     try {
-      claim =
-        data.promptType === 'visual'
-          ? await scopedDb.framePromptVersions.createPending({
-              frameId: frame.id,
-              pendingInputHash: liveHash,
-              createdBy: user.id,
-            })
-          : await scopedDb.shotPromptVersions.createPending({
-              shotId: shot.id,
-              pendingInputHash: liveHash,
-              usesStartFrame: usesStartFrame(shot, sequence),
-              createdBy: user.id,
-            });
-    } catch (error) {
-      const racedClaim =
-        data.promptType === 'visual'
-          ? await scopedDb.framePromptVersions.getLivePending(
-              frame.id,
-              liveHash
-            )
-          : await scopedDb.shotPromptVersions.getLivePending(shot.id, liveHash);
-      if (!racedClaim) throw error;
-      return {
-        workflowRunId: racedClaim.workflowRunId,
-        alreadyUpToDate: false,
-        alreadyInFlight: true,
-      } as const;
-    }
-
-    // Always stream deltas for this endpoint — it's only invoked from the
-    // shot inspector (stale banner or force regenerate), so a viewer is
-    // watching. Binding emitStreaming to `force` alone left the stale-banner
-    // path silent (no shotPrompt.streaming events → textarea never updates).
-    // Fields common to both prompt workflows. The two trigger calls below build
-    // their input in a NARROWED, per-type block (not a `A | B` union) so the
-    // compiler enforces each workflow's required fields — a union literal only
-    // has to satisfy ONE member, which is exactly how the missing-`frameId` bug
-    // slipped through (FramePromptWorkflowInput needs it, MotionPromptWorkflowInput
-    // doesn't, so the union accepted the omission).
-    const commonInput = {
-      userId: user.id,
-      teamId,
-      sequenceId: sequence.id,
-      shotId: shot.id,
-      scene,
-      aspectRatio: sequence.aspectRatio,
-      resolution: sequence.resolution,
-      characterBible: [...ctx.characterBible],
-      locationBible: [...ctx.locationBible],
-      elementBible: [...ctx.elementBible],
-      styleConfig: ctx.styleConfig,
-      analysisModelId:
-        getAnalysisModelById(ctx.analysisModel)?.id ?? DEFAULT_ANALYSIS_MODEL,
-      emitStreaming: true,
-    };
-
-    // Force-regen needs a unique dedup ID per click so the workflow trigger
-    // doesn't collapse repeat clicks into a single run — the user is explicitly
-    // asking for another LLM completion. The auto-staleness path keeps the stable
-    // hash-based ID so genuine retries collapse to one run.
-    const deduplicationId = data.force
-      ? shotPromptForceDedupId(
-          data.promptType,
-          shot.id,
-          `${Date.now()}-${crypto.randomUUID()}`
-        )
-      : shotPromptDedupId(data.promptType, shot.id, liveHash);
-    const triggerOpts = {
-      deduplicationId,
-    };
-
-    // The scene's other shots, so a rewrite keeps continuity with them.
-    let siblingVisualPrompts: Array<{ shotId: string; text: string }> = [];
-    let siblingMotionPrompts: Array<{ shotId: string; text: string }> = [];
-    {
+      if (!shotReferenceOnly && visualSelected?.source !== 'user-edit') {
+        const row = await scopedDb.framePromptVersions.createPending({
+          frameId: frame.id,
+          pendingInputHash: visualHash,
+          createdBy: user.id,
+        });
+        visualClaimId = row.id;
+      }
+      if (motionSelected?.source !== 'user-edit') {
+        const row = await scopedDb.shotPromptVersions.createPending({
+          shotId: shot.id,
+          pendingInputHash: motionHash,
+          usesStartFrame: usesStartFrame(shot, sequence),
+          createdBy: user.id,
+        });
+        motionClaimId = row.id;
+      }
       const shotsInSeq = await scopedDb.shots.listBySequence(sequence.id);
-      const siblings = shotsInSeq.filter(
-        (sibling) =>
-          shot.sceneId &&
-          sibling.sceneId === shot.sceneId &&
-          sibling.id !== shot.id &&
-          !sibling.deletedAt
-      );
-      const siblingFrames = await scopedDb.frames.getAnchorsByShots(
-        siblings.map((sibling) => sibling.id)
-      );
-      const visualVersions =
-        await scopedDb.framePromptVersions.getSelectedByFrameIds(
-          [...siblingFrames.values()].map((anchor) => anchor.id)
-        );
-      siblingVisualPrompts = [...siblingFrames.values()].flatMap((anchor) => {
-        const prompt = visualVersions.get(anchor.id);
-        return prompt?.text
-          ? [{ shotId: anchor.shotId, text: prompt.text }]
+      const siblingIds = shotsInSeq
+        .filter(
+          (sibling) =>
+            shot.sceneId &&
+            sibling.sceneId === shot.sceneId &&
+            sibling.id !== shot.id &&
+            !sibling.deletedAt
+        )
+        .map((sibling) => sibling.id);
+      const specs = await scopedDb.shotSpecVersions.getSelectedByShotIds([
+        ...siblingIds,
+        shot.id,
+      ]);
+      const siblingSpecs = siblingIds.flatMap((id) => {
+        const version = specs.get(id);
+        const sibling = shotsInSeq.find((row) => row.id === id);
+        return version
+          ? [{ shotNumber: sibling?.shotNumber ?? null, spec: version.spec }]
           : [];
       });
-      const siblingVersions =
-        await scopedDb.shotPromptVersions.getSelectedMotionByShots(
-          siblings.map((sibling) => sibling.id)
+      const workflowRunId = await triggerWorkflow<ShotSpecRewriteWorkflowInput>(
+        '/shot-spec-rewrite',
+        {
+          userId: user.id,
+          teamId,
+          sequenceId: sequence.id,
+          shotId: shot.id,
+          frameId: frame.id,
+          claimId,
+          visualClaimId,
+          motionClaimId,
+          visualWritten: visualSelected?.source === 'user-edit',
+          motionWritten: motionSelected?.source === 'user-edit',
+          referenceOnly: shotReferenceOnly,
+          scene,
+          siblingSpecs,
+          characterBible: [...ctx.characterBible],
+          locationBible: [...ctx.locationBible],
+          elementBible: [...ctx.elementBible],
+          styleConfig: ctx.styleConfig,
+          aspectRatio: sequence.aspectRatio,
+          analysisModelId: analysisModel,
+          lines: promptDialogue.dialogue.lines.map(
+            ({ character, line, tone }) => ({
+              character,
+              line,
+              tone,
+            })
+          ),
+          specInputHash: currencyHash,
+          currentSpec: selectedSpec?.spec ?? null,
+          dialogue: promptDialogue.dialogue,
+          emitStreaming: true,
+        }
+      );
+      if (visualClaimId) {
+        await scopedDb.framePromptVersions.markGenerating(
+          visualClaimId,
+          workflowRunId
         );
-      siblingMotionPrompts = siblings.flatMap((sibling) => {
-        const prompt = siblingVersions.get(sibling.id);
-        return prompt?.text ? [{ shotId: sibling.id, text: prompt.text }] : [];
-      });
-    }
-
-    let workflowRunId: string;
-    try {
-      workflowRunId = !promptDialogue
-        ? // `frameId` is REQUIRED on FramePromptWorkflowInput — the workflow
-          // never reads the DB (#991) and persists the visual prompt only
-          // when it's present, so resolving the anchor frame here (from the
-          // access middleware's `frame`) is mandatory, not optional.
-          await triggerWorkflow<FramePromptWorkflowInput>(
-            '/frame-prompt',
-            {
-              ...commonInput,
-              frameId: frame.id,
-              siblingVisualPrompts,
-              targetVersionId: claim.id,
-            },
-            triggerOpts
-          )
-        : // Snapshot the rendered still at trigger time (#929) so the motion
-          // workflow never looks it up mid-run (a concurrent re-render could
-          // swap it). The still lives on the anchor frame's selected
-          // version now (#989/#1067).
-          await triggerWorkflow<MotionPromptWorkflowInput>(
-            '/motion-prompt',
-            {
-              ...commonInput,
-              startingFrameImageUrl: shotReferenceOnly
-                ? null
-                : await getFrameImageUrl(scopedDb, frame.id),
-              // The mode picks which motion-prompt template writes this
-              // version; the hash the bail check above computed folded it in
-              // through the sequence row, so it has to reach the child too or
-              // the stamp and the verify disagree.
-              referenceOnly: shotReferenceOnly,
-              siblingMotionPrompts,
-              dialogue: promptDialogue.dialogue,
-              targetVersionId: claim.id,
-            },
-            triggerOpts
-          );
+      }
+      if (motionClaimId) {
+        await scopedDb.shotPromptVersions.markGenerating(
+          motionClaimId,
+          workflowRunId
+        );
+      }
+      return {
+        workflowRunId,
+        alreadyUpToDate: false,
+        alreadyInFlight: false,
+        rebuilt: false,
+      } as const;
     } catch (error) {
-      // The claim must not outlive a trigger that never happened.
-      if (data.promptType === 'visual') {
-        await scopedDb.framePromptVersions.markTerminal(claim.id, 'failed');
-      } else {
-        await scopedDb.shotPromptVersions.markTerminal(claim.id, 'failed');
+      await scopedDb.shotSpecVersions.clearClaimIf({
+        shotId: shot.id,
+        claimId,
+      });
+      if (visualClaimId) {
+        await scopedDb.framePromptVersions.markTerminal(
+          visualClaimId,
+          'failed'
+        );
+      }
+      if (motionClaimId) {
+        await scopedDb.shotPromptVersions.markTerminal(motionClaimId, 'failed');
       }
       throw error;
     }
-
-    // Stamp the producing instance so cancel + zombie reconciliation can
-    // verify the run. 'generating' from here on — the instance starts
-    // immediately.
-    if (data.promptType === 'visual') {
-      await scopedDb.framePromptVersions.markGenerating(
-        claim.id,
-        workflowRunId
-      );
-    } else {
-      await scopedDb.shotPromptVersions.markGenerating(claim.id, workflowRunId);
-    }
-
-    return {
-      workflowRunId,
-      alreadyUpToDate: false,
-      alreadyInFlight: false,
-    } as const;
   });
 
 const saveMusicPromptInput = z.object({

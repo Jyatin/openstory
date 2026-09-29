@@ -19,6 +19,10 @@ import {
   voiceOnlyMovedSince,
 } from '@/shots/input-hash';
 import {
+  hashShotSpecInput,
+  specCurrencyFromScene,
+} from '@/shots/shot-spec-currency';
+import {
   loadNarrowShotPromptContext,
   type ShotPromptContextRefs,
   type ShotPromptContextSequence,
@@ -40,6 +44,7 @@ import type {
   SequenceEvent,
   Shot,
   ShotPromptVersion,
+  ShotSpecVersion,
 } from '@/platform/server/db/schema';
 import {
   characterBibleChanged,
@@ -99,12 +104,16 @@ type ShotLiveHashes = {
   thumbnail: string | null;
   visualPrompt: string | null;
   motionPrompt: string | null;
+  /** What the selected spec was written from. Null when the shot has no scene. */
+  spec: string | null;
 };
 
 export type ShotStalenessResult = {
   thumbnail: ArtifactStaleness;
   visualPrompt: ArtifactStaleness;
   motionPrompt: ArtifactStaleness;
+  /** The shot's spec. `'untracked'` when the shot has none (#1923). */
+  spec: ArtifactStaleness;
   liveHashes: ShotLiveHashes;
   /** Inputs edited since the stale artifacts were generated (#1194), as display labels. Empty when fresh or undeterminable. */
   causes: string[];
@@ -115,7 +124,13 @@ export const UNTRACKED_STALENESS: ShotStalenessResult = {
   thumbnail: 'untracked',
   visualPrompt: 'untracked',
   motionPrompt: 'untracked',
-  liveHashes: { thumbnail: null, visualPrompt: null, motionPrompt: null },
+  spec: 'untracked',
+  liveHashes: {
+    thumbnail: null,
+    visualPrompt: null,
+    motionPrompt: null,
+    spec: null,
+  },
   causes: [],
 };
 
@@ -124,7 +139,13 @@ export const GENERATING_STALENESS: ShotStalenessResult = {
   thumbnail: 'generating',
   visualPrompt: 'generating',
   motionPrompt: 'generating',
-  liveHashes: { thumbnail: null, visualPrompt: null, motionPrompt: null },
+  spec: 'generating',
+  liveHashes: {
+    thumbnail: null,
+    visualPrompt: null,
+    motionPrompt: null,
+    spec: null,
+  },
   causes: [],
 };
 
@@ -192,6 +213,8 @@ export type ShotStalenessReads = {
   sceneContext: ReadonlyMap<string, SceneContext>;
   /** What each shot says, for the motion hash (#1784). */
   dialogueOf: (shot: { id: string }) => ShotPromptDialogue;
+  /** The spec each shot points at (#1923). Absent keys mean no row. */
+  selectedSpecByShot: ReadonlyMap<string, ShotSpecVersion>;
   /** Input history for the causes, loaded once and only when one is stale. */
   inputHistory: () => Promise<InputHistory>;
 };
@@ -263,6 +286,7 @@ export async function loadShotStalenessReads(
     | 'frameVariants'
     | 'sequenceEvents'
     | 'shotDialogue'
+    | 'shotSpecVersions'
   > &
     InputHistoryDb,
   sequenceId: string,
@@ -284,6 +308,7 @@ export async function loadShotStalenessReads(
     liveImageClaimsByFrame,
     settingsEvents,
     linesByShotId,
+    selectedSpecByShot,
   ] = await Promise.all([
     scopedDb.framePromptVersions.getSelectedByFrameIds([...frameIds]),
     scopedDb.framePromptVersions.getLatestByFrameIds([...frameIds]),
@@ -302,6 +327,7 @@ export async function loadShotStalenessReads(
       kind: SETTINGS_CHANGED_EVENT,
     }),
     loadShotDialogueLines(scopedDb, sequenceId),
+    scopedDb.shotSpecVersions.getSelectedByShotIds([...shotIds]),
   ]);
 
   const dependIds = new Set<string>();
@@ -335,6 +361,7 @@ export async function loadShotStalenessReads(
     promptById,
     settingsEvents,
     sceneContext,
+    selectedSpecByShot,
     dialogueOf: shotPromptDialogueResolver({
       linesByShotId,
       shots,
@@ -462,7 +489,11 @@ export async function computeShotStaleness(args: {
     thumbnail: null,
     visualPrompt: null,
     motionPrompt: null,
+    spec: null,
   };
+  const selectedSpec: ShotSpecVersion | null = reads
+    ? (reads.selectedSpecByShot?.get(shot.id) ?? null)
+    : await scopedDb.shotSpecVersions.getSelected(shot.id);
   let thumbnail: ArtifactStaleness = 'untracked';
   const selectedPrompt = !frame
     ? null
@@ -547,6 +578,7 @@ export async function computeShotStaleness(args: {
     inputHash: string | null;
     createdAt: Date;
     source: string;
+    specVersionId: string | null;
   } | null = null;
 
   // Reference hash resolution: prefer the SELECTED version's `inputHash`, but
@@ -571,24 +603,32 @@ export async function computeShotStaleness(args: {
       const latest = reads
         ? (reads.latestPromptByFrame.get(frame.id) ?? null)
         : await scopedDb.framePromptVersions.getLatest(frame.id);
-      const ctx = await loadNarrowShotPromptContext({
-        scopedDb,
-        sequence: motionSequence,
-        scene,
-        analysisModelOverride: latest?.analysisModel ?? null,
-        refs,
-      });
+      const ctx = {
+        ...(await loadNarrowShotPromptContext({
+          scopedDb,
+          sequence: motionSequence,
+          scene,
+          analysisModelOverride: latest?.analysisModel ?? null,
+          refs,
+        })),
+        spec: selectedSpec?.spec ?? null,
+      };
       const liveHash = await hashVisualPromptInput(ctx);
       liveHashes.visualPrompt = liveHash;
-      if (referenceHash) {
-        // Fresh prompts match the current digest. Legacy digests are only
-        // hashed when it doesn't — the common editor load is the match.
+      if (selectedPrompt?.source === 'user-edit') {
+        // A kept written prompt reads fresh. Part 3 decides replace or keep.
+        visualPrompt = 'fresh';
+      } else if (referenceHash) {
+        // A prompt built from an older spec must not match a pre-spec digest.
+        const acceptLegacy =
+          (reference?.specVersionId ?? null) === (selectedSpec?.id ?? null);
         visualPrompt =
           referenceHash === liveHash ||
           (await visualPromptInputHashMatches(referenceHash, ctx, {
             voiceOnlyMoved: await voiceOnlyMoved(
               reference?.createdAt ?? new Date(0)
             ),
+            acceptLegacy,
           }))
             ? 'fresh'
             : 'stale';
@@ -641,17 +681,24 @@ export async function computeShotStaleness(args: {
           refs,
         })),
         dialogue: dialogue.dialogue,
+        spec: selectedSpec?.spec ?? null,
       });
-      // The live hash stamps the next LLM-written prompt, which sees the still.
-      // Only a derived reference is verified without one, as it was written.
-      const withFrame = await contextWithFrame(motionStartingFrameUrl);
-      liveHashes.motionPrompt = await hashMotionPromptInput(withFrame);
+      // The current digest ignores the still. An old LLM stamp still carries
+      // it, so only that row is verified against the rendered URL (#1923).
       const derived = reference?.source === 'derived';
-      const ctx = derived ? await contextWithFrame(null) : withFrame;
-      const liveHash = derived
-        ? await hashMotionPromptInput(ctx)
-        : liveHashes.motionPrompt;
-      if (referenceHash) {
+      const written = selectedMotion?.source === 'user-edit';
+      const ctx = await contextWithFrame(
+        written || derived || motionSequence.referenceOnly
+          ? null
+          : motionStartingFrameUrl
+      );
+      const liveHash = await hashMotionPromptInput(ctx);
+      liveHashes.motionPrompt = liveHash;
+      if (written) {
+        motionPrompt = 'fresh';
+      } else if (referenceHash) {
+        const acceptLegacy =
+          (reference?.specVersionId ?? null) === (selectedSpec?.id ?? null);
         motionPrompt =
           referenceHash === liveHash ||
           (await motionPromptInputHashMatches(referenceHash, ctx, {
@@ -659,6 +706,7 @@ export async function computeShotStaleness(args: {
             voiceOnlyMoved: await voiceOnlyMoved(
               reference?.createdAt ?? new Date(0)
             ),
+            acceptLegacy,
           }))
             ? 'fresh'
             : 'stale';
@@ -745,6 +793,28 @@ export async function computeShotStaleness(args: {
     }
   }
 
+  let spec: ArtifactStaleness = 'untracked';
+  if (shot.pendingSpecVersionId) {
+    spec = 'updating';
+  } else if (!scene) {
+    spec = selectedSpec ? 'unknown' : 'untracked';
+  } else {
+    try {
+      const live = await hashShotSpecInput(
+        specCurrencyFromScene(scene, dialogue.dialogue.lines)
+      );
+      liveHashes.spec = live;
+      if (!selectedSpec) spec = 'untracked';
+      else if (selectedSpec.inputHash == null) spec = 'fresh';
+      else spec = live === selectedSpec.inputHash ? 'fresh' : 'stale';
+    } catch (error) {
+      spec = 'unknown';
+      logger.warn(`spec staleness uncomputable for shot ${shot.id}:`, {
+        err: error,
+      });
+    }
+  }
+
   let causes: string[] = [];
   if ([thumbnail, visualPrompt, motionPrompt].includes('stale')) {
     try {
@@ -786,7 +856,7 @@ export async function computeShotStaleness(args: {
     }
   }
 
-  return { thumbnail, visualPrompt, motionPrompt, liveHashes, causes };
+  return { thumbnail, visualPrompt, motionPrompt, spec, liveHashes, causes };
 }
 
 const after = (d: Date | null | undefined, at: number) =>

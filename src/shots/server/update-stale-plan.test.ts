@@ -30,11 +30,13 @@ const FRESH: ShotStalenessResult = {
   thumbnail: 'fresh',
   visualPrompt: 'fresh',
   motionPrompt: 'fresh',
+  spec: 'fresh',
   causes: [],
   liveHashes: {
     thumbnail: 'live-thumb',
     visualPrompt: 'live-visual',
     motionPrompt: 'live-motion',
+    spec: 'live-spec',
   },
 };
 
@@ -255,6 +257,9 @@ function buildScopedDb(
     },
     sequenceVariants: {
       getMusicPrimary: () => Promise.resolve(opts.musicPrimary ?? null),
+    },
+    shotSpecVersions: {
+      getSelectedByShotIds: () => Promise.resolve(new Map()),
     },
   });
 }
@@ -491,6 +496,12 @@ describe('claimTargets (#1085)', () => {
       visualPromptVersionId: null,
       regenVisual: false,
       regenMotion: false,
+      rewriteSpec: false,
+      specVersionId: null,
+      spec: null,
+      specInputHash: null,
+      visualWritten: false,
+      motionWritten: false,
       regenImage: false,
       regenDialogue: false,
       visualLiveHash: 'vh',

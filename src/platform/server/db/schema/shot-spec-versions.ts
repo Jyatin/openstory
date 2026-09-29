@@ -16,8 +16,12 @@ import type { StoredShotSpec } from '@/shots/shot-list.schema';
 import { user } from './auth';
 import { shots } from './shots';
 
-/** `analysis`: the shot-list pass wrote it. */
-const SHOT_SPEC_SOURCES = ['analysis'] as const;
+/**
+ * `analysis`: the shot-list pass wrote it.
+ * `rewrite`: Rewrite shot refilled it (#1923).
+ * `rename`: an element-token rename rewrote its strings.
+ */
+const SHOT_SPEC_SOURCES = ['analysis', 'rewrite', 'rename'] as const;
 export type ShotSpecSource = (typeof SHOT_SPEC_SOURCES)[number];
 
 export const shotSpecVersions = snakeCase.table(
@@ -32,6 +36,13 @@ export const shotSpecVersions = snakeCase.table(
       .references(() => shots.id, { onDelete: 'cascade' }),
     spec: text({ mode: 'json' }).$type<StoredShotSpec>().notNull(),
     source: text({ enum: SHOT_SPEC_SOURCES }).notNull(),
+    /**
+     * What this version was written from: the scene's script slice, this
+     * shot's lines, and the scene's cast / continuity tags (#1923). Null on
+     * a row from before the column — treated as current, so analysis rows
+     * are not a Rewrite. Rebuild fills it in place.
+     */
+    inputHash: text(),
     createdAt: integer({ mode: 'timestamp' })
       .$defaultFn(() => new Date())
       .notNull(),

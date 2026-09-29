@@ -17,6 +17,10 @@ import {
   deriveStillPrompt,
 } from '@/shots/shot-list.derive';
 import { storedShotSpec } from '@/shots/shot-list.schema';
+import {
+  hashShotSpecInput,
+  specCurrencyFromScene,
+} from '@/shots/shot-spec-currency';
 import { shotSpecForItem, type ShotWorkItem } from './shot-work-items';
 
 /**
@@ -44,18 +48,25 @@ export async function persistShotSpec(
     throw new Error(`No frame to hold the still prompt for ${where}`);
   }
   const stored = storedShotSpec(spec);
+  const lines = item.scene.originalScript.dialogue;
+  const inputHash = await hashShotSpecInput(
+    specCurrencyFromScene(item.scene, lines)
+  );
   const version = await scopedDb.shotSpecVersions.write({
     shotId,
     spec: stored,
     source: 'analysis',
+    inputHash,
     createdBy: null,
   });
   // Derivation consumes no rendered still: the hash says so (#1892).
+  // The spec's content is part of the prompt digest (#1923).
   const narrowed = narrowShotPromptContext({
     ...context,
     scene: item.scene,
     startingFrameImageUrl: null,
-    dialogue: shotDialogue(item.scene.originalScript.dialogue),
+    dialogue: shotDialogue(lines),
+    spec: stored,
   });
 
   if (!referenceOnly && frameId !== null) {

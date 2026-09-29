@@ -743,7 +743,6 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
               )
             : null;
         return {
-          derived: original?.source === 'derived',
           inputHash: original?.inputHash ?? null,
           analysisModel: original?.analysisModel ?? null,
         };
@@ -775,7 +774,6 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
       provenance: {
         inputHash: string | null;
         analysisModel: string | null;
-        derived?: boolean;
       },
       source: 'softened' | 'shortened',
       audio: MotionAudio | null = null
@@ -788,10 +786,8 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
           promptType: 'motion',
           text,
           audio,
-          // A rescue rewrote the text, so it is no longer built from a spec.
-          ...(provenance.derived
-            ? { source: 'derived' as const, specVersionId: null }
-            : { source }),
+          // A rescue rewrote the text, so the row is the rewrite, not the spec.
+          source,
           usesStartFrame: !input.referenceOnly,
           inputHash: provenance.inputHash,
           analysisModel: provenance.analysisModel,

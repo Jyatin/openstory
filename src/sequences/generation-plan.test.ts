@@ -19,6 +19,9 @@ const SEQ = 'seq-1';
 function shot(id: string, overrides: Partial<PlanShot> = {}): PlanShot {
   return {
     id,
+    spec: 'done',
+    visualWritten: false,
+    motionWritten: false,
     usesStartFrame: true,
     references: { characterIds: [], locationIds: [], elementIds: [] },
     speakerIds: [],
@@ -199,11 +202,13 @@ describe('planUnits — scenario table (#1816)', () => {
     );
     expect(states(plan)).toMatchObject({
       'still:s1': 'running',
-      'prompt:motion:s1': 'blocked by still:s1',
-      'clip:s1': 'blocked by prompt:motion:s1,still:s1',
+      'prompt:motion:s1': 'missing',
+      'clip:s1': 'blocked by still:s1',
     });
-    // Nothing a run could make yet.
-    expect(planWork(plan, 'music')).toEqual([]);
+    // The motion prompt no longer waits on the still (#1923).
+    expect(planWork(plan, 'music').map((unit) => unit.kind)).toEqual([
+      'prompt:motion',
+    ]);
   });
 
   it('an uncomputable verdict is blocked, never fresh', () => {
@@ -476,12 +481,7 @@ describe('updateAllUnits — Update all is the plan filtered to stale (#1819)', 
     ).toEqual([]);
     expect(
       keys(updateAllUnits(plan, { depth: 'images', shotIds: null }))
-    ).toEqual([
-      'sheet:character:maya',
-      'still:s1',
-      // The new still re-conditions its motion prompt (#929).
-      'prompt:motion:s1',
-    ]);
+    ).toEqual(['sheet:character:maya', 'still:s1']);
   });
 
   it('records a first reading only when every speaker has a voice (#1780 §6)', () => {
@@ -524,12 +524,11 @@ describe('updateAllUnits — Update all is the plan filtered to stale (#1819)', 
   });
 });
 
-it('keeps initial derived direction done while its still is missing, then restores the dependency for LLM regeneration', () => {
+it('a derived motion prompt requires the spec and ignores the still; a written one does not (#1923)', () => {
   const derived = planUnits(
     input({
       shots: [
         shot('s', {
-          motionPromptDerived: true,
           still: 'missing',
           clip: 'missing',
         }),
@@ -539,15 +538,36 @@ it('keeps initial derived direction done while its still is missing, then restor
   );
   expect(derived.find((unit) => unit.kind === 'prompt:motion')).toMatchObject({
     state: 'done',
-    requires: [],
+    requires: [{ kind: 'spec', id: 's' }],
   });
-  const regenerated = planUnits(
+  const written = planUnits(
     input({
-      shots: [shot('s', { motionPromptDerived: false, still: 'missing' })],
+      shots: [
+        shot('s', {
+          spec: 'stale',
+          motionWritten: true,
+          visualWritten: true,
+        }),
+      ],
     }),
     SEQ
   );
-  expect(
-    regenerated.find((unit) => unit.kind === 'prompt:motion')
-  ).toMatchObject({ state: 'stale', requires: [{ kind: 'still', id: 's' }] });
+  expect(written.find((unit) => unit.kind === 'prompt:motion')).toMatchObject({
+    state: 'done',
+    requires: [],
+  });
+  expect(written.find((unit) => unit.kind === 'prompt:visual')).toMatchObject({
+    state: 'done',
+    requires: [],
+  });
+  const staleSpec = planUnits(
+    input({ shots: [shot('s', { spec: 'stale' })] }),
+    SEQ
+  );
+  expect(staleSpec.find((unit) => unit.kind === 'prompt:motion')).toMatchObject(
+    { state: 'stale', cascaded: true }
+  );
+  expect(staleSpec.find((unit) => unit.kind === 'prompt:visual')).toMatchObject(
+    { state: 'stale', cascaded: true }
+  );
 });

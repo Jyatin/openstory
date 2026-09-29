@@ -580,19 +580,26 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
       if (result.alreadyUpToDate) {
         toast.info('Prompt is already up to date');
       } else if (result.alreadyInFlight) {
-        // Server-side dedup hit (#1085): a run — this tab's, another tab's,
-        // or a teammate's — is already producing this prompt.
         toast.info('This prompt is already being regenerated');
+      } else if (result.rebuilt) {
+        toast.success('Rebuilt the prompts from the shot spec');
+        void queryClient.invalidateQueries({
+          queryKey: shotKeys.list(sequenceId),
+        });
+        if (shot?.id) {
+          void queryClient.invalidateQueries({
+            queryKey: shotKeys.detail(shot.id),
+          });
+        }
+        void queryClient.invalidateQueries({
+          queryKey: shotStalenessNamespace,
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ['shot-prompt-preview', sequenceId],
+        });
       } else {
-        // Workflow is now enqueued; hold the busy state via the stream's
-        // `'pending'` status until deltas start arriving. Naturally cleared
-        // when the DELTA/COMPLETED/FAILED reducer cases fire.
         markPromptPending(vars.promptType);
-        toast.success(
-          vars.promptType === 'visual'
-            ? 'Regenerating visual prompt…'
-            : 'Regenerating motion prompt…'
-        );
+        toast.success('Rewriting the shot…');
       }
       // Deliberately no staleness invalidation here: the workflow has only been
       // enqueued, so a refetch now would answer 'stale' and undo the optimistic

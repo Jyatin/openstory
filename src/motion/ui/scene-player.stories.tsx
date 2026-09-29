@@ -75,6 +75,7 @@ const mockShot = (spec: {
       useStartFrame: null,
       selectedMotionPromptVersionId: null,
       selectedSpecVersionId: null,
+      pendingSpecVersionId: null,
       audioClips: null,
       renderSegmentId: null,
       deletedAt: null,

@@ -68,7 +68,8 @@ export function buildUpdateStalePreview(
   const videos = plan.targets.filter((t) => t.regenVideo);
   const music = plan.music;
 
-  const promptsCost = estimateLLMCost(visual.length + motion.length);
+  const rewrites = plan.targets.filter((t) => t.rewriteSpec === true);
+  const promptsCost = estimateLLMCost(rewrites.length);
   const imagesCost = sum(
     images.map((t) =>
       estimateImageCost(t.imageModel, plan.aspectRatio, 1, {

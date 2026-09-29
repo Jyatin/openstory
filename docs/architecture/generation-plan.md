@@ -254,11 +254,7 @@ the payload and draft-capable models preflight at 480p.
 
 The executor's `freshRun` flag orders and completes every phase with work:
 references, images/prompts, dialogue, motion, music. Existing continue and
-Update all retain their parallel schedule. Visual prompt batching already
-means **one prompt child per one-shot scene**, not one LLM call for several
-scenes (`FramePromptBatchWorkflow`); the executor has the same call count.
-Multi-shot first prompts are supplied by the analysis handoff, so they need
-no additional LLM call in the executor.
+Update all retain their parallel schedule. Update all rebuilds a prompt from the selected spec when that spec is current. It spawns Rewrite shot when the spec is stale or missing. A user-edited prompt is left as written.
 
 All spending children inherit the parent's `reservationId`. A preflight can
 spend the remaining own envelope plus unheld balance, excluding other runs'
@@ -293,10 +289,7 @@ path, one-shot scenes included (#1919): a fresh run makes no per-shot prompt
 LLM call. Motion source
 `derived` hashes the inputs derivation consumed, excluding a starting still;
 the first still therefore does not invalidate it or add a still prerequisite.
-Scene and style changes still invalidate it. Later LLM regeneration uses saved
-sibling directions as context and restores the normal still dependency. Restore,
-rename and provider rescue preserve derived provenance when they retain that
-origin. A user edit uses the ordinary current-input provenance.
+Scene and style changes still invalidate it. A current motion digest does not include the still URL, so rendering the first still does not stale the motion prompt. Restore copies the source and spec of the row being restored. An element rename writes `renamed` on the prompt and `rename` on a new spec version. A content-checker rescue writes `softened` or `shortened`. A user edit uses the ordinary current-input provenance and Update all does not overwrite it.
 
 Planning and prompt staleness load every active character/location bible, even
 before its first sheet exists. The selected sheet fields on these rows remain

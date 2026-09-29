@@ -28,6 +28,7 @@ const mockShot: ShotView = toShotView(
     useStartFrame: null,
     selectedMotionPromptVersionId: null,
     selectedSpecVersionId: null,
+    pendingSpecVersionId: null,
     audioClips: null,
     renderSegmentId: null,
     deletedAt: null,

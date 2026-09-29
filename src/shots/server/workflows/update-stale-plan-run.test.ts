@@ -35,6 +35,7 @@ const emit = vi.fn(
 );
 vi.doMock('@/platform/realtime', () => ({
   getGenerationChannel: vi.fn(() => ({ emit })),
+  getShotPromptChannel: vi.fn(() => ({ emit })),
 }));
 vi.doMock('@/platform/server/db/scoped', () => ({ createScopedDb: vi.fn() }));
 vi.doMock('@/shots/server/scene-script', () => ({
@@ -42,8 +43,13 @@ vi.doMock('@/shots/server/scene-script', () => ({
   resolveSceneForShot: vi.fn((shot: { id: string }) => ({
     scene: {
       sceneId: shot.id,
-      metadata: { title: shot.id },
-      originalScript: { extract: 'Scene' },
+      metadata: {
+        title: shot.id,
+        location: 'INT. ROOM',
+        timeOfDay: 'day',
+        storyBeat: 'beat',
+      },
+      originalScript: { extract: 'Scene', dialogue: [] },
     },
     script: null,
   })),
@@ -166,7 +172,22 @@ function makeScopedDb(): WorkflowScopedDb {
       markVoiceClaimTerminal: vi.fn(),
     },
     sequenceLocations: { claimReference },
-    frameVariants: { markTerminal: vi.fn() },
+    frameVariants: {
+      markTerminal: vi.fn(),
+      cancelByDependency: vi.fn(),
+    },
+    framePromptVersions: {
+      completePendingAiVersion: vi.fn(async () => ({ id: 'visual-done' })),
+      markTerminal: vi.fn(),
+    },
+    shotPromptVersions: {
+      completePendingAiVersion: vi.fn(async () => ({ id: 'motion-done' })),
+      markTerminal: vi.fn(),
+    },
+    shotSpecVersions: {
+      stampInputHashIfEmpty: vi.fn(),
+      clearClaimIf: vi.fn(),
+    },
     stalenessPlanning: {},
     claims: {
       frameVariants: {
@@ -240,6 +261,12 @@ function target(shotId: string, referenceIds: string[]): PlanTarget {
     visualPromptVersionId: null,
     regenVisual: false,
     regenMotion: false,
+    rewriteSpec: false,
+    specVersionId: null,
+    spec: null,
+    specInputHash: null,
+    visualWritten: false,
+    motionWritten: false,
     regenImage: true,
     visualLiveHash: null,
     motionLiveHash: null,
@@ -537,22 +564,53 @@ describe('fresh executor parity (#1891)', () => {
     emit.mockClear();
     failCharacter.clear();
   });
-  it('uses one prompt child per single-shot scene and carries the reservation', async () => {
+  it('rebuilds each shot from its spec without a prompt model', async () => {
+    const spec = {
+      framing: {
+        shotSize: 'wide',
+        angle: 'eye level',
+        composition: 'centered',
+        subjectStartState: 'at the door',
+      },
+      action: 'she runs',
+      cameraMovement: { move: 'dolly in, then pan left', pacing: 'quick' },
+      direction: '',
+      soundCue: '',
+    };
     const targets = ['a', 'b'].map((id) => ({
       ...target(id, []),
       regenVisual: true,
       regenImage: false,
+      spec,
+      specVersionId: `spec-${id}`,
+      specInputHash: 'currency',
     }));
-    const result = await run(plan({ targets }), {
-      freshRun: true,
-      reservationId: 'hold',
-    });
+    const base = plan({ targets });
+    const result = await run(
+      {
+        ...base,
+        promptContext: base.promptContext && {
+          ...base.promptContext,
+          styleConfig: {
+            version: 2,
+            look: {
+              colorPalette: ['#111'],
+              medium: 'film',
+              artStyle: 'noir',
+              colorGrading: 'teal',
+              mood: 'tense',
+              lighting: 'low',
+            },
+            motion: { camera: 'push in' },
+            references: [],
+          },
+        },
+      },
+      { freshRun: true, reservationId: 'hold' }
+    );
     expect(result.failures).toEqual([]);
     expect(result.visualPrompts).toBe(2);
-    expect(spawned()).toEqual(['spawn-frame-prompt-a', 'spawn-frame-prompt-b']);
-    expect(payloadOf('spawn-frame-prompt-a')).toMatchObject({
-      reservationId: 'hold',
-    });
+    expect(spawned().filter((name) => name.includes('prompt'))).toEqual([]);
   });
   it('gates simultaneous sheet and platform voice spend together against the parent envelope', async () => {
     const p = plan({

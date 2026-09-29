@@ -19,7 +19,10 @@ import type { VisualPromptComponents } from '@/shots/scene-analysis.schema';
 import type { VisualPromptInputHash } from '@/shots/input-hash';
 import type { Database } from '@/platform/server/db/client';
 import { framePromptVersions, frames, user } from '@/platform/server/db/schema';
-import type { FramePromptVersion } from '@/platform/server/db/schema';
+import type {
+  FramePromptVersion,
+  PromptVersionSource,
+} from '@/platform/server/db/schema';
 import { and, desc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { pageOf } from '@/platform/server/db/read-page';
 import type { PageOptions } from '@/platform/server/db/read-page';
@@ -69,12 +72,12 @@ export type WriteFramePromptVersionInput = WriteFramePromptVersionBase &
         analysisModel: string | null;
       }
     | {
-        // Built from a shot spec (#1915); a restore of such a row stays
-        // derived and copies its spec. Null on rows from before specs.
+        // Built from a shot spec (#1915). A restore copies this id. A
+        // derived row with no spec is rejected by the type.
         source: 'derived';
         inputHash: string | null;
         analysisModel: string | null;
-        specVersionId: string | null;
+        specVersionId: string;
       }
   );
 
@@ -429,7 +432,15 @@ export function createFramePromptVersionsMethods(db: Database) {
        * verify digest captured at trigger (#1616).
        */
       inputHash?: VisualPromptInputHash;
+      /**
+       * Wins over the claim hash. Rewrite shot passes the digest of the new
+       * spec; the claim was stamped from the spec the run replaced (#1923).
+       */
+      stampHash?: VisualPromptInputHash;
       analysisModel: string;
+      /** Rebuild sets `derived` and the spec the text came from (#1923). */
+      source?: PromptVersionSource;
+      specVersionId?: string | null;
     }): Promise<FramePromptVersion | null> => {
       const [claim] = await db
         .select()
@@ -446,7 +457,8 @@ export function createFramePromptVersionsMethods(db: Database) {
           `FramePromptVersion ${input.versionId} not found for frame ${input.frameId}`
         );
       }
-      const inputHash = claim.pendingInputHash ?? input.inputHash;
+      const inputHash =
+        input.stampHash ?? claim.pendingInputHash ?? input.inputHash;
       if (!inputHash) {
         throw new Error(
           `FramePromptVersion ${input.versionId} has no pendingInputHash; cannot complete`
@@ -501,6 +513,10 @@ export function createFramePromptVersionsMethods(db: Database) {
           inputHash,
           analysisModel: input.analysisModel,
           status: 'completed',
+          ...(input.source !== undefined ? { source: input.source } : {}),
+          ...(input.specVersionId !== undefined
+            ? { specVersionId: input.specVersionId }
+            : {}),
         })
         .where(
           and(

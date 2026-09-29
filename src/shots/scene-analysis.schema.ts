@@ -428,7 +428,6 @@ export const visualPromptResultSchema = z.object({
     description: 'Image generation prompt data',
   }),
 });
-export type VisualPromptResult = z.infer<typeof visualPromptResultSchema>;
 
 // ============================================================================
 // Original Script Schema
@@ -546,7 +545,6 @@ export type ElementBibleEntry = Omit<
   z.infer<typeof elementBibleEntrySchema>,
   'firstMention'
 > & { firstMention: FirstMentionWithScene };
-export type VisualPrompt = z.infer<typeof visualPromptSchema>;
 export type VisualPromptComponents = z.infer<
   typeof visualPromptComponentsSchema
 >;

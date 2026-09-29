@@ -153,9 +153,13 @@ v1 for every shot. A still or motion prompt version derived from a spec
 (`source: 'derived'`) records `specVersionId`, so framing is stored once.
 Text is derived when the version is written (`deriveStillPrompt`,
 `deriveMotionPrompt` in `src/shots/shot-list.derive.ts`), never at render
-time. `move` and `pacing` are free text: a move may chain motions ("arc
-around the actor, then follow as she runs"). A shot from before specs has no
-row and keeps its text as written.
+time. Rebuild does that again from the selected spec. Rewrite shot refills
+the spec with one LLM call, then rebuilds the same way (#1923). The prompt
+hash includes the spec's canonical content, so two versions of the same
+words share a hash and a version id is only provenance. `move` and `pacing`
+are free text: a move may chain motions ("arc around the actor, then follow
+as she runs"). A shot from before specs has no row and keeps its text as
+written until Rewrite shot.
 
 ### Video variants + the 15s constraint _(Phase 3)_
 

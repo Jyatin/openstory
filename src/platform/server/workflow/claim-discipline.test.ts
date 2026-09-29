@@ -130,6 +130,15 @@ const CLAIM_DOMAINS: Record<string, ClaimDomain> = {
     promote: 'shotDialogue.appendRecording',
     userSelect: 'shotDialogue.selectSection',
   },
+  // Pointer claim (#1923). Analysis still seeds v1 through `write` (pinned
+  // below). Rewrite shot is the async generation into the table.
+  'shot specs': {
+    tables: ['shot_spec_versions'],
+    claim: 'shotSpecVersions.claim',
+    clear: 'shotSpecVersions.clearClaimIf',
+    promote: 'shotSpecVersions.promoteIfPending',
+    userSelect: 'shotSpecVersions.select',
+  },
 };
 
 /**
@@ -160,9 +169,6 @@ const EXCEPTIONS: Record<string, string> = {
   // selection by design — its output IS the new source. User edits append.
   scene_script_versions: 'authored; re-analysis replaces by design',
   shot_dialogue_versions: 'authored; re-analysis replaces by design',
-  // Shot specs (#1915): analysis seeds v1 in the run that creates the shot.
-  // Rewrite shot, the async generation into it, takes a claim when it lands.
-  shot_spec_versions: 'authored; analysis seeds v1, re-analysis replaces',
   // Bible history (#1600): authored, not generated. Analysis, a person's
   // edit and a recast each append; nothing is generated into it async.
   character_bible_versions: 'authored; analysis and edits append',
@@ -188,12 +194,6 @@ const UNCLAIMED_WRITERS: readonly ScopedMethod[] = [
   'locations.updateReference',
 ];
 const UNCLAIMED_CALL_SITES: Record<string, string> = {
-  // The pipeline's prompt passes take no claim: their output is selected,
-  // superseding a user override (which stays in history).
-  'src/stills/server/workflows/frame-prompt-workflow.ts: framePromptVersions.writeAiVersion':
-    'run with no targetVersionId (pipeline) selects, no claim',
-  'src/motion/server/workflows/motion-prompt-workflow.ts: shotPromptVersions.writeAiVersion':
-    'run with no targetVersionId (pipeline) selects, no claim',
   // Analysis seeds each new shot's spec and the prompts derived from it.
   'src/shots/server/persist-shot-spec.ts: shotSpecVersions.write':
     'analysis seeds spec v1, no claim',

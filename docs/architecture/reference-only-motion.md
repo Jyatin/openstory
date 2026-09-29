@@ -29,9 +29,7 @@ every visual decision the prompt declines to make, the model makes instead —
 and it makes a _different_ one on the next shot. A sequence written that way
 loses its set, its light and its framing between every cut.
 
-So reference-only uses a separate template
-(`phase/motion-prompt-reference-only-chat`) that asks for the still's job and
-the motion's job in one prompt:
+Reference-only motion text is derived (`deriveMotionPrompt`). It prefixes the shot's framing, then the action, direction, camera move and sound cue:
 
 1. **Shot size and lens feel** — the framing at the instant the shot opens.
 2. **Blocking** — where each named character is, facing where, touching what,
@@ -47,10 +45,9 @@ the motion's job in one prompt:
 Then the same motion discipline as its sibling: one camera move, camera and
 subject motion in separate sentences, one physics event, one continuous take.
 
-Two templates rather than one template with a conditional block. They disagree
-on their most load-bearing rule, and a prompt that hedges between them gets
-both half-right. `src/motion/server/motion-prompt-templates.test.ts` pins the
-disagreement so a future edit cannot quietly merge them.
+`deriveMotionPrompt` writes that opening from the spec's framing fields. The
+still prompt is derived the same way and is skipped when the shot is
+reference-only.
 
 ### What it must still NOT describe
 

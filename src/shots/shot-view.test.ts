@@ -33,6 +33,7 @@ function makeShot(): Shot {
     durationMs: 3000,
     selectedMotionPromptVersionId: null,
     selectedSpecVersionId: null,
+    pendingSpecVersionId: null,
     audioClips: null,
     useStartFrame: null,
     renderSegmentId: 'seg-1',

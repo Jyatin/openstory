@@ -10,6 +10,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_TO_VIDEO_MODELS } from '@/models/models';
+import { buildMotionRender } from '@/motion/server/build-motion-render';
 import { audioSourceKeyFromVoicedLines } from '@/motion/dialogue-tts';
 import { isSelectedVersionStale } from '@/shots/scene-segments';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
@@ -92,11 +93,6 @@ vi.doMock('@/shots/input-hash', () => ({
     manifest: { motionPromptVersionId: string | null }[],
     model: string
   ) => `${model}:${manifest[0]?.motionPromptVersionId ?? 'null'}`,
-}));
-
-const mockRecordDialogue = vi.fn();
-vi.doMock('@/motion/server/record-dialogue', () => ({
-  recordDialogue: mockRecordDialogue,
 }));
 
 const { MotionWorkflow } = await import('./motion-workflow');
@@ -222,6 +218,7 @@ function makeEvent(
       sequenceId: 'seq-1',
       shotId: 'shot-1',
       sceneId: 'scene-1',
+      packedScene: {},
       imageUrl: '/r2/stills/a.png',
       referenceOnly: false,
       prompt: 'the original prompt',
@@ -1087,64 +1084,60 @@ describe('recording its own dialogue (#1657)', () => {
     recordingId: 'rec-1',
   };
 
-  it('speaks the snapshotted conversation, adopts only its own shot, and stamps the clip', async () => {
-    mockRecordDialogue.mockReset();
-    mockRecordDialogue.mockResolvedValue({ 'shot-1': [recordedClip] });
+  it('assembles an edited prompt with the upstream dialogue take (#1836)', async () => {
     const { scopedDb, videoVariants } = makeScopedDb();
-    const context = [
-      { ...voiced(0, 'Stay down.'), shotId: 'shot-0' },
-      { ...own, shotId: 'shot-1' },
-    ];
-
-    await makeWorkflow().runBody(
-      makeEvent({ voicedLines: [own], dialogueContext: context }),
-      makeStep(),
-      scopedDb
-    );
-
-    expect(mockRecordDialogue).toHaveBeenCalledTimes(1);
-    expect(mockRecordDialogue.mock.calls[0]?.[1]).toMatchObject({
-      lines: context,
-      // The neighbour is spoken for the acting; its audio is not touched.
-      adoptShotIds: ['shot-1'],
+    const [job] = buildMotionRender({
+      userId: 'u1',
+      teamId: 'team-1',
+      sequenceId: 'seq-1',
+      shots: [
+        {
+          shotId: 'shot-1',
+          sceneId: 'scene-1',
+          imageUrl: '/r2/stills/a.png',
+          referenceOnly: false,
+          frameVersionId: 'fv-1',
+          packedScene: {},
+          prompt: 'Sarah waits beside the window.',
+          motionPromptVersionId: 'spv-user-edit',
+          model: MODEL,
+          duration: 5,
+          motionPrompt: {
+            fullPrompt: 'Sarah pushes through the blue door.',
+            dialogue: {
+              presence: true,
+              lines: [{ character: 'Sarah', line: own.text, tone: '' }],
+            },
+            audio: null,
+          },
+          voicedLines: [own],
+          audioClips: [
+            { ...recordedClip, spokenLines: [{ index: 0, text: 'Run!' }] },
+          ],
+        },
+      ],
     });
+    expect(job).toBeDefined();
+    await makeWorkflow().runBody(makeEvent(job?.input), makeStep(), scopedDb);
+    const submitted = submittedArgs(0).prompt;
+    expect(submitted).toContain('Sarah pushes through the blue door.');
+    // Recorded dialogue is bound by token, proving post-recording assembly ran.
+    expect(submitted).toContain('Lipsync Sarah to DIALOGUE.');
+    expect(submitted).not.toContain('Sarah waits beside the window.');
+    expect(submitted).not.toContain('Now run.');
     expect(videoVariants.appendVersion).toHaveBeenCalledWith(
       expect.objectContaining({
         manifest: [
           expect.objectContaining({
+            motionPromptVersionId: 'spv-user-edit',
             audioClipIds: ['section-1'],
-            audioSourceKey: recordedClip.sourceKey,
-            dialogueKey: null,
           }),
         ],
       })
     );
   });
 
-  it('falls back to the shot’s own lines when the payload carries no context for it', async () => {
-    mockRecordDialogue.mockReset();
-    mockRecordDialogue.mockResolvedValue({ 'shot-1': [recordedClip] });
-    const { scopedDb } = makeScopedDb();
-
-    await makeWorkflow().runBody(
-      makeEvent({
-        voicedLines: [own],
-        // A context that does not contain this shot is not this shot's.
-        dialogueContext: [{ ...voiced(0, 'Elsewhere.'), shotId: 'shot-9' }],
-      }),
-      makeStep(),
-      scopedDb
-    );
-
-    expect(mockRecordDialogue.mock.calls[0]?.[1]).toMatchObject({
-      lines: [{ ...own, shotId: 'shot-1' }],
-      adoptShotIds: ['shot-1'],
-    });
-  });
-
-  it('fails instead of rendering voiced lines with no audio', async () => {
-    mockRecordDialogue.mockReset();
-    mockRecordDialogue.mockResolvedValue({});
+  it('blocks motion before submission when upstream dialogue audio is missing', async () => {
     const { scopedDb } = makeScopedDb();
 
     await expect(
@@ -1153,31 +1146,24 @@ describe('recording its own dialogue (#1657)', () => {
         makeStep(),
         scopedDb
       )
-    ).rejects.toThrow(/Shot shot-1 has no audio for its lines yet/);
+    ).rejects.toThrow(/Dialogue audio is not ready for shot shot-1/);
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
-  it("renders with the shot's own audio when nothing was promoted for it", async () => {
-    // Another run held the claim for these words, or the user picked a
-    // reading while this recorded: the recorder hands back nothing, and the
-    // clip the shot holds NOW is the truth.
-    mockRecordDialogue.mockReset();
-    mockRecordDialogue.mockResolvedValue({});
-    const { scopedDb, videoVariants } = makeScopedDb([recordedClip]);
+  it('blocks motion when the supplied audio belongs to different dialogue', async () => {
+    const { scopedDb } = makeScopedDb();
 
-    await makeWorkflow().runBody(
-      makeEvent({ voicedLines: [own] }),
-      makeStep(),
-      scopedDb
-    );
-
-    // The manifest is the one record of what the clip spoke (#1786).
-    expect(videoVariants.appendVersion).toHaveBeenCalledWith(
-      expect.objectContaining({
-        manifest: [
-          expect.objectContaining({ audioClipIds: [recordedClip.id] }),
-        ],
-      })
-    );
+    await expect(
+      makeWorkflow().runBody(
+        makeEvent({
+          voicedLines: [own],
+          audioClips: [{ ...recordedClip, sourceKey: 'stale-lines' }],
+        }),
+        makeStep(),
+        scopedDb
+      )
+    ).rejects.toThrow(/Dialogue audio is not ready for shot shot-1/);
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 });
 

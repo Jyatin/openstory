@@ -1,3 +1,4 @@
+import { buildPackedMotionPrompt } from '@/motion/server/build-motion-render';
 /**
  * Optimised-prompt inspector (#1242). The scene editor used to run the same
  * fal/Ark/Grok/Gemini request builders in the browser; those now live behind
@@ -7,10 +8,9 @@
 import { withMeasuredDurations } from '@/cast/server/sequence-elements/media-duration';
 import { isBytePlusConfigured } from '@/models/server/byteplus-config';
 import {
-  assemblePackedMotionPrompt,
   packedPromptFitsLimit,
   packedSceneFromScene,
-} from '@/motion/server/assemble-motion-prompt';
+} from '@/motion/server/build-motion-render';
 import { packMotionBatchShots } from '@/motion/server/pack-motion-jobs';
 import { motionPromptFromVersion } from '@/motion/server/resolve-motion-prompt';
 import { resolveShotDuration } from '@/motion/resolve-shot-duration';
@@ -205,7 +205,7 @@ async function loadPackedPreviewMembers(input: {
   const packedScene = packedSceneFromScene(input.scene);
   const promptFits = (members: readonly (typeof packable)[number][]) =>
     packedPromptFitsLimit(
-      assemblePackedMotionPrompt({
+      buildPackedMotionPrompt({
         shots: members.map((member) => ({
           durationSeconds: resolveShotDuration({
             durationMs: member.durationMs,

@@ -1,3 +1,4 @@
+import { buildPackedMotionPrompt } from '@/motion/server/build-motion-render';
 /**
  * Assembled request the scene editor's optimised-prompt inspector shows
  * (#1242). Same builders submit uses, so the JSON cannot drift — but the
@@ -36,11 +37,10 @@ import type { Resolution } from '@/models/resolutions';
 import { buildBytePlusImageRequest } from '@/stills/build-byteplus-image-request';
 import { buildImageRequest } from '@/stills/build-image-request';
 import {
-  assemblePackedMotionPrompt,
   packedPromptFitsLimit,
   packedSceneFromScene,
   type PackedMotionPromptShot,
-} from '@/motion/server/assemble-motion-prompt';
+} from '@/motion/server/build-motion-render';
 import { buildBytePlusVideoRequest } from '@/motion/server/build-byteplus-video-request';
 import { buildGeminiVideoRequest } from '@/motion/server/build-gemini-video-request';
 import { buildGrokVideoRequest } from '@/motion/server/build-grok-video-request';
@@ -330,7 +330,7 @@ export function buildShotPromptPreview(input: {
   const isPacked = packedMembers.length > 1;
   const packedFirst = packedMembers[0];
   const packed = isPacked
-    ? assemblePackedMotionPrompt({
+    ? buildPackedMotionPrompt({
         shots: packedMembers.map((member): PackedMotionPromptShot => ({
           durationSeconds: Math.max(
             1,

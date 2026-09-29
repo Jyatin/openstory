@@ -1,3 +1,4 @@
+import { buildMotionShotPrompt } from '@/motion/server/build-motion-render';
 /**
  * Build the per-shot payload analyze-script hands to motion-batch.
  *
@@ -31,16 +32,12 @@ import {
   modelTakesDialogueAudio,
   voicedDialogueLines,
 } from '@/motion/dialogue-tts';
-import { dialogueContextFor } from '@/shots/server/shot-dialogue';
 import {
   resolveShotDialogue,
   type ShotDialogueLine,
 } from '@/shots/shot-dialogue';
 import type { MotionAudioClip } from '@/platform/server/db/schema';
-import {
-  assembleMotionPrompt,
-  packedSceneFromScene,
-} from '@/motion/server/assemble-motion-prompt';
+import { packedSceneFromScene } from '@/motion/server/build-motion-render';
 import { buildMotionReferenceImages } from '@/motion/server/build-motion-references';
 import { getLogger } from '@/platform/logger';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
@@ -168,7 +165,7 @@ export function buildStoryboardMotionBatchShots(input: {
       mapping.shotId && leftoverGrok.has(mapping.shotId)
         ? 'grok_imagine_video_1_5'
         : input.videoModel;
-    const prompt = assembleMotionPrompt({
+    const prompt = buildMotionShotPrompt({
       motionPrompt: motionPromptData,
       model: shotModel,
       characterTags,
@@ -182,20 +179,6 @@ export function buildStoryboardMotionBatchShots(input: {
         : undefined,
       voicedLines
     );
-
-    // No clip for these lines (the Dialogue stage was skipped, or it failed
-    // for this shot): motion records its own, so hand it the conversation
-    // around the shot and the reading is still acted in context (#1657).
-    const dialogueContext = mapping.shotId
-      ? dialogueContextFor({
-          shot: { id: mapping.shotId },
-          voicedLines,
-          audioClips,
-          sceneShots: sceneShotsOf(input.shotMapping, scene.sceneId),
-          dialogueOf,
-          characters: input.characters,
-        })
-      : undefined;
 
     return {
       shotId: mapping.shotId,
@@ -225,7 +208,6 @@ export function buildStoryboardMotionBatchShots(input: {
       }),
       voicedLines,
       ...(audioClips.length > 0 ? { audioClips } : {}),
-      ...(dialogueContext ? { dialogueContext } : {}),
     };
   });
 }

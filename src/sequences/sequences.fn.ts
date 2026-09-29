@@ -1,3 +1,4 @@
+import { packedSceneFromScene } from '@/motion/server/build-motion-render';
 import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_MUSIC_MODEL,
@@ -1206,6 +1207,10 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
                 return {
                   shotId: f.id,
                   sceneId: f.sceneId,
+                  packedScene: packedSceneFromScene(sceneOf(f)),
+                  attachSceneHeader:
+                    allShots.filter((row) => row.sceneId === f.sceneId).length >
+                    1,
                   // Reference-only carries no still; every other eligible shot
                   // has one. Same encoding as the batch path in
                   // `generateBatchMotionFn`: a null `frameVersionId` means the
@@ -1233,14 +1238,10 @@ export const addModelToSequenceFn = createServerFn({ method: 'POST' })
                   model,
                   motionPrompt,
                   // The audio that goes with the words in the prompt: the clip
-                  // when one matches, the lines either way, and the
-                  // conversation to fall back on. This path used to send none.
+                  // when one matches and the lines either way.
                   voicedLines: spoken?.voicedLines ?? [],
                   ...(spoken && spoken.audioClips.length > 0
                     ? { audioClips: spoken.audioClips }
-                    : {}),
-                  ...(spoken?.dialogueContext
-                    ? { dialogueContext: spoken.dialogueContext }
                     : {}),
                   sceneTitle: sceneOf(f)?.metadata?.title,
                   characterTags: sceneOf(f)?.continuity?.characterTags,

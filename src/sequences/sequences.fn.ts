@@ -51,7 +51,6 @@ import {
 import { ulidSchema } from '@/platform/server/schemas/id.schemas';
 import {
   createSequenceSchema,
-  MUSIC_REQUIRES_MOTION_ERROR,
   updateSequenceSchema,
 } from '@/sequences/server/sequence.schemas';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
@@ -274,16 +273,14 @@ export const continueGenerationFn = createServerFn({ method: 'POST' })
     // click must not leave its switches on a sequence nothing ran with.
     const settings = {
       generationStopAt: stopAt,
-      autoGenerateMotion,
-      autoGenerateMusic,
       generateStartFrames: requested.generateStartFrames,
       generateVoices: requested.generateVoices,
       draftMotion: data.draftMotion,
     };
     const before = {
-      generationStopAt: sequence.generationStopAt,
-      autoGenerateMotion: sequence.autoGenerateMotion,
-      autoGenerateMusic: sequence.autoGenerateMusic,
+      generationStopAt: resolveStopAt({
+        generationStopAt: sequence.generationStopAt,
+      }),
       generateStartFrames: sequence.generateStartFrames,
       generateVoices: sequence.generateVoices,
       draftMotion: sequence.draftMotion,
@@ -331,19 +328,6 @@ export const continueGenerationFn = createServerFn({ method: 'POST' })
   });
 
 /**
- * Music only generates inside the motion phase (#823), so an update whose
- * merged flags leave music on without motion would strand music as a silent
- * no-op on the next regeneration. The schema alone can't catch this — it
- * doesn't see the persisted flags a partial update leaves untouched.
- */
-export const musicWithoutMotion = (
-  update: { autoGenerateMusic?: boolean; autoGenerateMotion?: boolean },
-  existing: { autoGenerateMusic: boolean; autoGenerateMotion: boolean }
-): boolean =>
-  (update.autoGenerateMusic ?? existing.autoGenerateMusic) &&
-  !(update.autoGenerateMotion ?? existing.autoGenerateMotion);
-
-/**
  * Update a sequence.
  * Triggers storyboard regeneration if script/style/aspectRatio/model changes.
  */
@@ -354,10 +338,6 @@ export const updateSequenceFn = createServerFn({ method: 'POST' })
   )
   .handler(async ({ data, context }) => {
     const { sequenceId, ...updateData } = data;
-
-    if (musicWithoutMotion(updateData, context.sequence)) {
-      throw new Error(MUSIC_REQUIRES_MOTION_ERROR);
-    }
 
     const needsRegeneration =
       updateData.script !== undefined ||
@@ -396,8 +376,6 @@ export const updateSequenceFn = createServerFn({ method: 'POST' })
     if (needsRegeneration) {
       const stopAt = resolveStopAt({
         generationStopAt: sequence.generationStopAt,
-        autoGenerateMotion: sequence.autoGenerateMotion,
-        autoGenerateMusic: sequence.autoGenerateMusic,
       });
       const reservationId = allowsUnfundedGeneration(stopAt)
         ? undefined
@@ -411,12 +389,10 @@ export const updateSequenceFn = createServerFn({ method: 'POST' })
               ),
               aspectRatio: sequence.aspectRatio,
               resolution: sequence.resolution,
-              autoGenerateMotion: sequence.autoGenerateMotion,
               stopAt,
               videoModels: [
                 safeImageToVideoModel(sequence.videoModel, DEFAULT_VIDEO_MODEL),
               ],
-              autoGenerateMusic: sequence.autoGenerateMusic,
               audioModels: [
                 safeAudioModel(sequence.musicModel, DEFAULT_MUSIC_MODEL),
               ],
@@ -451,9 +427,8 @@ export const updateSequenceFn = createServerFn({ method: 'POST' })
             aiProvider: 'openrouter',
             regenerateAll: true,
           },
-          autoGenerateMotion: sequence.autoGenerateMotion,
-          autoGenerateMusic: sequence.autoGenerateMusic,
-          stopAt: sequence.generationStopAt ?? undefined,
+          ...flagsFromStopAt(stopAt),
+          stopAt,
         })
       );
     }
@@ -607,8 +582,6 @@ export const retryStoryboardFn = createServerFn({ method: 'POST' })
 
     const stopAt = resolveStopAt({
       generationStopAt: sequence.generationStopAt,
-      autoGenerateMotion: sequence.autoGenerateMotion,
-      autoGenerateMusic: sequence.autoGenerateMusic,
     });
     const reservationId = allowsUnfundedGeneration(stopAt)
       ? undefined
@@ -622,12 +595,10 @@ export const retryStoryboardFn = createServerFn({ method: 'POST' })
             ),
             aspectRatio: sequence.aspectRatio,
             resolution: sequence.resolution,
-            autoGenerateMotion: sequence.autoGenerateMotion,
             stopAt,
             videoModels: [
               safeImageToVideoModel(sequence.videoModel, DEFAULT_VIDEO_MODEL),
             ],
-            autoGenerateMusic: sequence.autoGenerateMusic,
             audioModels: [
               safeAudioModel(sequence.musicModel, DEFAULT_MUSIC_MODEL),
             ],
@@ -656,8 +627,7 @@ export const retryStoryboardFn = createServerFn({ method: 'POST' })
         aiProvider: 'openrouter',
         regenerateAll: true,
       },
-      autoGenerateMotion: sequence.autoGenerateMotion,
-      autoGenerateMusic: sequence.autoGenerateMusic,
+      ...flagsFromStopAt(stopAt),
       stopAt,
     };
 

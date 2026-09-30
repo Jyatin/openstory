@@ -28,6 +28,11 @@ the continue slider. Casting is part of `script`.
 - Each unit kind has a stop (`PLAN_KIND_STAGE`, below); `stopAt` caps the
   kinds a run makes. Where a run starts is not a choice: it is wherever the
   plan has work.
+- A stop the continue slider does not offer is the next tick it does
+  (`sliderCommittedStop`). Reference-only has no Images tick, and the music
+  prompt's stop is Images, so that thumb is Motion & Music — the quote and
+  the click run through music, including missing clips. Stale units stay in
+  the work and regenerate.
 - **Script is a fresh, whole run** (`AnalyzeScriptWorkflow`). It persists no
   stage: `stageComplete` only emits the banner's `generation.phase:complete`.
   Analysis ends after scene split, matching, persisted bibles and initial
@@ -184,9 +189,10 @@ prompts, 12 images`, `planWorkLine` — a Generate that also redoes stale
   References (voices ride that step), Start frames from Images, Draft first
   from Motion, Music at the Music stop. Turning on one that was skipped caps
   the thumb at its step (Images / Dialogue; `switchStopAt`, shared by the
-  footer and the server, so the label, the quote and the run agree) and the
-  plan grows its units. The cap is derived, never written: turning the switch
-  off again frees the thumb to where it was. Voices is locked on once a shot has a recording
+  footer and the server, so the label, the quote and the run agree) only when
+  a later unit is already done or stale. Nothing past that step yet — no clip,
+  no track — and the thumb can still run on to Motion. The cap is derived,
+  never written: turning the switch off again frees the thumb to where it was. Voices is locked on once a shot has a recording
   (`switchLocks`; a `blocked` unit does not count as existing): the recording
   would still ride the clip. Start frames can always turn off — the stills
   stay, shots render from references, and their motion prompts go stale. Draft
@@ -199,7 +205,8 @@ prompts, 12 images`, `planWorkLine` — a Generate that also redoes stale
   the scenes' music presence says. It saves on toggle.
 - **Going back never redoes finished work (#1780 §3).** `continueFromPlan`
   caps the stop at the step of a switch turned on (`switchStopAt`: Voices →
-  Dialogue, Start frames → Images, the later when both). Clips rendered from
+  Dialogue, Start frames → Images, the later when both) when a later unit is
+  already done or stale. A missing clip stays in the run. Clips rendered from
   the old inputs then read stale, and Update all re-renders them with each
   cost shown.
 - **Lines from the Video tab (#1780 §7).** `MotionDialoguePanel` shows the

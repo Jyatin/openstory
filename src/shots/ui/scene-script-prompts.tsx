@@ -1,5 +1,5 @@
 import { ThinkingBar } from '@/ui/ai/thinking-bar';
-import { ActionCost } from '@/billing/ui/action-cost';
+import { InButtonCost, costButtonClassName } from '@/billing/ui/action-cost';
 import type { ModelGenerationStatus } from '@/models/ui/pickers/base-model-selector';
 import { ImageModelSelector } from '@/models/ui/pickers/image-model-selector';
 import { MotionModelSelector } from '@/models/ui/pickers/motion-model-selector';
@@ -1223,18 +1223,19 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
       : [];
 
   // Transparent pricing under Generate Image / Generate Motion (#1140).
-  const { pricing: falPricing } = useFalPricing();
+  const { pricing: falPricing, isPending: pricingPending } = useFalPricing();
   const imageCostEstimate = useMemo(() => {
-    if (!falPricing) return null;
+    if (!falPricing) return pricingPending ? undefined : null;
     return estimateImageCost(
       regenImageModel,
       aspectRatio ?? DEFAULT_ASPECT_RATIO,
       1,
       { pricing: falPricing, resolution }
     );
-  }, [falPricing, regenImageModel, aspectRatio, resolution]);
+  }, [falPricing, pricingPending, regenImageModel, aspectRatio, resolution]);
   const motionCostEstimate = useMemo(() => {
-    if (!falPricing || !shot) return null;
+    if (!shot) return null;
+    if (!falPricing) return pricingPending ? undefined : null;
     const duration = resolveShotDuration({
       durationMs: promptPreview?.packedDurationMs ?? shot.durationMs,
       model: regenMotionModel,
@@ -1252,6 +1253,7 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
     });
   }, [
     falPricing,
+    pricingPending,
     shot,
     regenMotionModel,
     regenAsDraft,
@@ -1262,7 +1264,8 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
   ]);
   // The final of an approved draft is always 1080p (#1756).
   const finalCostEstimate = useMemo(() => {
-    if (!falPricing || !shot || !selectedDraft) return null;
+    if (!shot || !selectedDraft) return null;
+    if (!falPricing) return pricingPending ? undefined : null;
     const duration = resolveShotDuration({
       durationMs: promptPreview?.packedDurationMs ?? shot.durationMs,
       model: regenMotionModel,
@@ -1277,6 +1280,7 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
     });
   }, [
     falPricing,
+    pricingPending,
     shot,
     selectedDraft,
     regenMotionModel,
@@ -1926,16 +1930,18 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
               disabled={
                 isGenerating || variantIsGenerating || !shot || !hasVisualPrompt
               }
-              className="w-full"
+              className={costButtonClassName}
             >
-              {(isGenerating || variantIsGenerating) && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              )}
-              {isGenerating || variantIsGenerating
-                ? 'Generating…'
-                : imageModelGenerated
-                  ? 'Regenerate Image'
-                  : 'Generate Image'}
+              <InButtonCost estimate={imageCostEstimate}>
+                {(isGenerating || variantIsGenerating) && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                {isGenerating || variantIsGenerating
+                  ? 'Generating…'
+                  : imageModelGenerated
+                    ? 'Regenerate Image'
+                    : 'Generate Image'}
+              </InButtonCost>
             </Button>
             <p
               className={
@@ -1949,7 +1955,6 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
             >
               {EMPTY_GENERATION_PROMPT_MESSAGE}
             </p>
-            <ActionCost estimate={imageCostEstimate} />
           </div>
 
           {/* Manual still inject (#1108) — upload replaces the selected image;
@@ -2373,7 +2378,7 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
             <div className="flex flex-col gap-1">
               <Button
                 type="button"
-                className="w-full"
+                className={costButtonClassName}
                 disabled={
                   renderAtQuality.isPending ||
                   isGeneratingMotion ||
@@ -2381,13 +2386,9 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
                 }
                 onClick={() => renderAtQuality.mutate()}
               >
-                <span className="relative">
+                <InButtonCost estimate={finalCostEstimate} amountWidth="double">
                   {renderAtQuality.isPending ? 'Starting…' : 'Render final'}
-                  <ActionCost
-                    estimate={finalCostEstimate}
-                    className="absolute top-1/2 left-full ml-2 -translate-y-1/2"
-                  />
-                </span>
+                </InButtonCost>
               </Button>
             </div>
           )}
@@ -2417,12 +2418,16 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
                 !shot ||
                 !hasMotionPrompt
               }
-              className="w-full"
+              className={costButtonClassName}
             >
               {(isGeneratingMotion || videoVariantIsGenerating) && (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               )}
-              <span className="relative">
+              <InButtonCost
+                estimate={motionCostEstimate}
+                onPrimary={!selectedDraft}
+                amountWidth="double"
+              >
                 {isGeneratingMotion || videoVariantIsGenerating
                   ? 'Generating…'
                   : motionGenerateLabel(
@@ -2430,11 +2435,7 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
                       videoModelGenerated,
                       regenAsDraft
                     )}
-                <ActionCost
-                  estimate={motionCostEstimate}
-                  className="absolute top-1/2 left-full ml-2 -translate-y-1/2"
-                />
-              </span>
+              </InButtonCost>
             </Button>
             <p
               className={

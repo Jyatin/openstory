@@ -993,7 +993,8 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
           f.id === shot.id
             ? {
                 ...f,
-                frame: { ...f.frame, imageStatus: 'generating' as const },
+                imageStatus: 'generating' as const,
+                imageError: null,
                 imagePromptVersion:
                   promptOverride && f.imagePromptVersion
                     ? { ...f.imagePromptVersion, text: promptOverride }
@@ -1010,7 +1011,8 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
       if (!oldShot) return oldShot;
       return {
         ...oldShot,
-        frame: { ...oldShot.frame, imageStatus: 'generating' as const },
+        imageStatus: 'generating' as const,
+        imageError: null,
         imagePromptVersion:
           promptOverride && oldShot.imagePromptVersion
             ? { ...oldShot.imagePromptVersion, text: promptOverride }
@@ -1434,7 +1436,7 @@ export const SceneScriptPrompts: React.FC<SceneScriptPromptsProps> = ({
 
   // Check if image is currently generating
   const isGenerating =
-    shot?.frame.imageStatus === 'generating' ||
+    shot?.imageStatus === 'generating' ||
     (shot?.id ? regeneratingImages.has(shot.id) : false);
 
   // Check if motion is currently generating

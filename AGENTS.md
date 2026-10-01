@@ -254,6 +254,11 @@ Each feature's rules, traps and rationale live in `docs/architecture/`. The
 lines here are only the traps that bite without warning. **Read the doc before
 changing the area, and update it in the same PR.**
 
+- **Publishing to social (#1267)** — `docs/architecture/social-publishing.md`.
+  Opt-in per team (`upload_post` key, no platform fallback); no key means no
+  menu item. Only a definitive 4xx (or a refusal before sending) is
+  `not_sent` — a 5xx, dropped connection or lost reply is `unconfirmed` and
+  is never re-sent automatically; a failed pre-send lookup sends nothing.
 - **Reference-only motion (no start frames)** —
   `docs/architecture/reference-only-motion.md`. Resolved per shot, never per
   sequence: always go through `usesStartFrame()` / `rendersReferenceOnly()`,

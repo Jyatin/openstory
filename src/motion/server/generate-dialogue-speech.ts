@@ -376,6 +376,9 @@ async function recordClaimed(
             speechId: call.speechId,
             sourceKey,
             spokenLines: spokenLines ?? null,
+            source: 'generated',
+            speechTurns: call.turns,
+            shotId,
           },
           cut
         ),
@@ -419,6 +422,7 @@ async function recordClaimed(
           inputHash,
           characterCount: call.characterCount,
           workflowRunId: args.workflowRunId,
+          adoptedAs: 'generated',
           sections: call.windows.map((window) => {
             const { sourceKey, spokenLines } = spokenOf(window.shotId);
             return {

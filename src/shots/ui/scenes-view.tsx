@@ -1685,6 +1685,7 @@ export const ScenesView: React.FC<ScenesViewProps> = ({
                     autoPlay={autoPlaySequence}
                     onAutoPlayConsumed={handleAutoPlayConsumed}
                     onPlayingShot={setPlayheadShotId}
+                    playingShotId={playingShotId}
                     selection={selection}
                     shots={shots}
                     scenes={scenes}
@@ -1723,6 +1724,7 @@ export const ScenesView: React.FC<ScenesViewProps> = ({
                     }
                     retry={selectedShotRetry}
                     onSelectShot={handleSelectShot}
+                    onSelectScene={handleFocusScene}
                     sceneImageModel={resolvedImageModel}
                     regeneratingSceneVariants={regeneratingSceneVariants}
                     onGenerateSceneVariantsStart={(id) =>
@@ -1798,6 +1800,8 @@ export const ScenesView: React.FC<ScenesViewProps> = ({
                       scopeStaleness={scopeStaleness}
                       scopeStalenessFailed={scopeStalenessFailed}
                       onSelectShot={handleSelectShot}
+                      scenes={scenes}
+                      onSelectScene={handleFocusScene}
                     />
                   </div>
                 </ScrollArea>

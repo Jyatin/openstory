@@ -151,7 +151,20 @@ of a reply the model never heard — the call speaks the whole conversation.
 What is KEPT is narrow, so one edit disturbs one shot: only a shot whose
 working-set clip no longer matches its lines (`matchingDialogueClips` empty →
 `adoptShotIds`) adopts the new audio; every other shot keeps the section it
-had, so nothing of theirs goes stale. Three tables, all append-only:
+had, so nothing of theirs goes stale. **A voice is the exception (#1802):**
+a voice change dates the whole scene (`voiceMovedShotIds`). A shot reads out
+of date, and is adopted by its scene's next speech though its own key still
+matches, when its speech was spoken by a voice the cast no longer uses, or
+predates the current voice of anyone who speaks in its scene — a speech can
+leave a scene-mate out (Seed and ElevenLabs voices never share a call).
+Speakers are read off the speeches' per-turn `voiceId`, mapped to characters
+through their voice history. `loadVoiceMovedShotIds` feeds every job builder (`sceneDialogueJobs`
+→ `forceAdoptShotIds`, `snapshotBatchDialogue` counts their clips as not
+matching) and the media staleness verdict. A line edit stays narrow.
+"Regenerate" on a scene in the dialogue list (`regenerateShotDialogueFn`,
+`scope: 'scene'`) forces every voiced shot in the scene. Cut clips carry the
+section's `source`, so the list can mark the user's own take. Three tables,
+all append-only:
 
 - `shot_dialogue_versions` — the authored lines, one selected row per shot.
 - `dialogue_speeches` — a **speech** (#1913): one row per synthesis call,
@@ -312,17 +325,18 @@ The panel shows a claim as "Generating…" with Cancel
 realtime `dialogue-audio` event refreshes both).
 
 **Going back.** `listShotDialogueVersionsFn` / `selectShotDialogueVersionFn`
-(the History list in the prompt editor) re-point the selected version, and
+(the History list under the shot's video) re-point the selected version, and
 that is the whole change: every reader follows the pointer. The current
 reading stops matching (the next render records), and a reading of the
 restored wording becomes usable again — `sourceKey` finds it.
 
-`shot_dialogue_versions` is the authored node. The shot-list pass seeds a `prompt` row per shot; the prompt
-editor appends `user-edit` (`scopedDb.shotDialogue.write`, which returns the
+`shot_dialogue_versions` is the authored node. The shot-list pass seeds a `prompt` row per shot; a line edit
+appends `user-edit` (`scopedDb.shotDialogue.write`, which returns the
 selected row unchanged when the lines are identical). The lines are edited in
-place (#1773) — character, words, tone — in the shot's Dialogue section and,
-for every shot of the scene, under the Script tab (`ShotDialogueLines`,
-`saveShotDialogueFn`): the edit writes only that shot's version, never the
+place (#1773) — character, words, tone — in the shot's dialogue under its
+video and,
+for every shot of the scene, under the Script tab and the sequence player
+(`DialogueLineRows`, `saveShotDialogueFn`): the edit writes only that shot's version, never the
 motion prompt. History labels a version whose words match the one before it
 "Audio source changed", not "Edited": only the voice binding moved. The save touches one
 shot's row, so it cannot drop a concurrent edit to another shot — the
@@ -448,8 +462,46 @@ JSON carries the audio refs for paste-into-Videos. Models with no audio
 reference slot (Grok, Omni Flash, Kling) still get a section and a cut clip
 in References; motion just does not bind it.
 
-Out of scope here: voice cloning from an uploaded sample, realtime/agents,
-auditioning/regenerating a single line from the scene panel.
+**The shot's dialogue lives under its video (#1802).** The audio source
+(Generated / Video model / an audio element — a write of the lines, so it
+needs no motion prompt), readings and history are in
+`ShotDialogueUnderVideo`; the Video tab has none of it. Every list of lines
+— the shot's, the Script tab's, and `SequenceDialogueLines` under the
+player with a sequence or scenes on the canvas — is `DialogueLineRows`
+(`dialogue-lines.tsx`): speaker and words, with Edit beside every line (and
+Record beside each voiced one, once `MIC_TAKES_ENABLED`). The tone shows only
+in the edit form. Play dialogue (`useDialoguePlayer`) plays the shot's audio,
+a scene's one speech when the scene is one take, or else its shots'
+`audioClips` back to back, and marks the shot being heard. Per shot, not per
+word — no word timings are stored.
+
+**A line at the mic (#1802).** Record is behind `MIC_TAKES_ENABLED` (off)
+until the Seed voice-change prompt is reliable; the server fn and workflow
+ship. Record beside a line records it in the browser, plays it back, and on "Use"
+sends it as 16-bit mono PCM (`recordShotDialogueLineFn`, parked in R2 under
+`dialogue-takes/`). `DialogueTakeWorkflow` turns it into the speaker's voice
+with the user's delivery kept: an ElevenLabs voice goes through **Voice
+Changer** (`eleven_multilingual_sts_v2`, `removeBackgroundNoise`, $0.12/min
+on the card as `elevenlabs-voice-changer`); a Seed voice is sent to Seed
+Audio with the take as `@Audio2` (see `seed-voices.md`; the prompt is still
+experimental). The converted line is **spliced into the shot's current
+reading** — that line's turn window is replaced, the shot's other lines keep
+their delivery — and the file is its own `dialogue_speeches` row
+(`inputHash: mic:<id>`), only this shot's turns re-timed onto it. Provider
+speeches are still never joined; this is a file we made, from a ranged read
+of one section. The reading lands through a claim as `source: 'mic'`
+("Your take"), selected. A shot with two or more voiced lines needs a current
+reading that still matches its lines; a one-line shot without one takes the
+line as the whole recording. The take is trimmed to its speech at both ends
+(`trimmedStartSeconds` / `trimmedEndSeconds`, Scribe's span for Seed), and a
+result over `dialogueFitBudget`'s limit fails rather than being rewritten.
+`recordShotDialogueLineFn` refuses, before reserving credits, a silent take
+(`isSilentWav`), a shot with a live dialogue claim (the take's claim would
+collide with it), and a take whose estimated length cannot fit. The run
+charges only after its own fit check, and its unclear-line flags follow the
+spliced speech's turns: the taken line is clean, the others keep theirs.
+
+Out of scope here: voice cloning from an uploaded sample, realtime/agents.
 
 **Continuous preview playback (#1690).** The existing scene/sequence player
 includes every shot before rendering is complete. `toPlaybackClips` uses

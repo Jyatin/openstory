@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { DialogueTakeWorkflowInput } from '@/platform/server/workflow/types';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import { asStub } from '@/test/as-stub';
 
 const mockRecord = vi.fn();
 const mockCut = vi.fn();
@@ -49,13 +50,12 @@ function makeWorkflow(): Probe {
 
 const steps: string[] = [];
 function makeStep(): WorkflowStep {
-  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- minimal WorkflowStep stub: runImpl only uses `do`
-  return {
+  return asStub<WorkflowStep>({
     do: vi.fn((name: string, fn: () => Promise<unknown>) => {
       steps.push(name);
       return fn();
     }),
-  } as unknown as WorkflowStep;
+  });
 }
 
 function makeScopedDb(claimId: string | null) {
@@ -71,11 +71,10 @@ function makeScopedDb(claimId: string | null) {
     }) => ({ promotedShotIds: ['shot-1'] })
   );
   const failClaims = vi.fn(async () => undefined);
-  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- stub covering only the scoped-db surface runImpl touches
-  const scopedDb = {
+  const scopedDb = asStub<WorkflowScopedDb>({
     shotDialogue: { claimSpeech, appendSpeech, failClaims },
     credentials: { resolveKey: vi.fn(async () => ({ key: 'el-key' })) },
-  } as unknown as WorkflowScopedDb;
+  });
   return { scopedDb, claimSpeech, appendSpeech, failClaims };
 }
 
@@ -106,11 +105,10 @@ const input: DialogueTakeWorkflowInput = {
   maxDurationSeconds: 15,
 };
 
-// oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- the workflow reads only payload and instanceId
-const event = {
+const event = asStub<WorkflowEvent<DialogueTakeWorkflowInput>>({
   payload: input,
   instanceId: 'run-1',
-} as unknown as WorkflowEvent<DialogueTakeWorkflowInput>;
+});
 
 const take = (durationSeconds: number) => ({
   speechId: 'speech-2',

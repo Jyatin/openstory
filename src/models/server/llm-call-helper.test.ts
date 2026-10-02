@@ -71,7 +71,7 @@ const callConfig = {
   phase: { number: 3, name: 'Visual prompts' },
   promptName: 'phase/shot-spec-rewrite-chat',
   promptVariables: {},
-  modelId: 'x-ai/grok-4.6' as const,
+  modelId: 'x-ai/grok-4.7' as const,
   responseSchema: schema,
 };
 

@@ -265,6 +265,13 @@ describe('tools/list and whoami', () => {
       'openstory.regenerate_shot_dialogue',
       'openstory.cancel_shot_dialogue',
       'openstory.cancel_pending_shot_artifact',
+      'openstory.create_studio_assets',
+      'openstory.edit_studio_asset',
+      'openstory.render_studio_asset_at_quality',
+      'openstory.set_studio_asset_favorite',
+      'openstory.delete_studio_asset',
+      'openstory.draft_studio_prompt',
+      'openstory.get_studio_edit_history',
       'openstory.plan_generation',
       'openstory.execute_generation',
       'openstory.get_operation_status',
@@ -352,13 +359,18 @@ describe('tools/list and whoami', () => {
       'openstory.regenerate_shot_dialogue',
       'openstory.cancel_shot_dialogue',
       'openstory.cancel_pending_shot_artifact',
+      'openstory.create_studio_assets',
+      'openstory.edit_studio_asset',
+      'openstory.render_studio_asset_at_quality',
+      'openstory.set_studio_asset_favorite',
+      'openstory.delete_studio_asset',
+      'openstory.draft_studio_prompt',
       'openstory.plan_generation',
       'openstory.execute_generation',
       'openstory.retry_failed_work',
       'openstory.start_export',
     ]);
     const destructive = new Set([
-      'openstory.regenerate_storyboard',
       'openstory.archive_sequence',
       'openstory.delete_scene',
       'openstory.delete_shot',
@@ -369,6 +381,7 @@ describe('tools/list and whoami', () => {
       'openstory.discard_location_sheet_version',
       'openstory.delete_element',
       'openstory.discard_music_track',
+      'openstory.delete_studio_asset',
     ]);
     for (const tool of tools.slice(1))
       expect(tool.annotations, tool.name).toMatchObject({
@@ -492,6 +505,56 @@ describe('tools/list and whoami', () => {
       expect(whoamiResult.parse(body.result).structuredContent.team.id).toBe(
         'team_1'
       );
+    });
+
+    it('lists tools with their views linked', async () => {
+      const res = await serveMcpRequest(
+        legacyPost('tools/list', {}),
+        auth,
+        'tools/list'
+      );
+      expect(res.status).toBe(200);
+      const body = await readRpc(res);
+      const tools = z
+        .object({
+          tools: z.array(
+            z.object({
+              name: z.string(),
+              _meta: z.record(z.string(), z.unknown()).optional(),
+            })
+          ),
+        })
+        .parse(body.result).tools;
+      expect(
+        tools.find((t) => t.name === 'openstory.get_sequence')?._meta
+      ).toMatchObject({
+        ui: { resourceUri: 'ui://openstory/sequence-card.html' },
+      });
+    });
+
+    it('reads a resource with no session (the connector reads views this way)', async () => {
+      const templates = await serveMcpRequest(
+        legacyPost('resources/templates/list', {}),
+        auth,
+        'resources/templates/list'
+      );
+      expect(templates.status).toBe(200);
+      expect((await readRpc(templates)).error).toBeUndefined();
+      const res = await serveMcpRequest(
+        legacyPost('resources/read', {
+          uri: 'ui://openstory/sequence-card.html',
+        }),
+        auth,
+        'resources/read'
+      );
+      expect(res.status).toBe(200);
+      const body = await readRpc(res);
+      expect(body.error).toBeUndefined();
+      expect(
+        z
+          .object({ contents: z.array(z.object({ mimeType: z.string() })) })
+          .parse(body.result).contents[0]?.mimeType
+      ).toBe('text/html;profile=mcp-app');
     });
   });
 });
@@ -719,6 +782,18 @@ describe('generation and upload tool authorization (#1979)', () => {
     ['generate_music', { sequenceId }],
     ['rewrite_music_prompt', { sequenceId }],
     ['regenerate_shot_dialogue', { sequenceId, shotId, scope: 'shot' }],
+    [
+      'create_studio_assets',
+      {
+        activity: 'image',
+        prompt: 'A lighthouse',
+        imageModel: 'nano_banana_2',
+        aspectRatio: '16:9',
+      },
+    ],
+    ['edit_studio_asset', { id: otherId, prompt: 'Make it night' }],
+    ['render_studio_asset_at_quality', { id: otherId }],
+    ['draft_studio_prompt', { activity: 'image' }],
   ])(
     'refuses %s for an OAuth token with sequences:write but not generate',
     async (name, args) => {
@@ -766,6 +841,9 @@ describe('generation and upload tool authorization (#1979)', () => {
       'cancel_pending_shot_artifact',
       { sequenceId, shotId, versionId: otherId, artifact: 'image' },
     ],
+    ['upload_media', { use: 'studio', data: 'AA==', mimeType: 'image/png' }],
+    ['set_studio_asset_favorite', { id: otherId, isFavorite: true }],
+    ['delete_studio_asset', { id: otherId }],
   ])(
     'refuses %s for an OAuth token without sequences:write, before any db',
     async (name, args) => {
@@ -964,6 +1042,31 @@ describe('withToolViews passthrough', () => {
       headers: { 'content-type': 'application/json' },
     });
     expect(await withToolViews(broken)).toBe(broken);
+  });
+
+  it('links views inside a legacy SSE frame and keeps its framing', async () => {
+    const list = JSON.stringify({
+      result: { tools: [{ name: 'openstory.get_sequence' }] },
+    });
+    const linked = await withToolViews(
+      new Response(`event: message\nid: 1\ndata: ${list}\n\n`, {
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    );
+    const text = await linked.text();
+    expect(linked.headers.get('content-type')).toBe('text/event-stream');
+    expect(text.startsWith('event: message\nid: 1\ndata: ')).toBe(true);
+    expect(text.endsWith('\n\n')).toBe(true);
+    expect(JSON.parse(text.split('\n')[2]?.slice(5) ?? '')).toMatchObject({
+      result: {
+        tools: [
+          {
+            name: 'openstory.get_sequence',
+            _meta: { ui: { resourceUri: 'ui://openstory/sequence-card.html' } },
+          },
+        ],
+      },
+    });
   });
 });
 

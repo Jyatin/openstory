@@ -138,6 +138,8 @@ describe('tools/list and whoami', () => {
       'openstory.get_scene',
       'openstory.list_shots',
       'openstory.get_shot',
+      'openstory.get_shot_frames',
+      'openstory.get_sequence_contact_sheet',
       'openstory.list_characters',
       'openstory.get_character',
       'openstory.list_locations',
@@ -195,6 +197,7 @@ describe('tools/list and whoami', () => {
       'openstory.reorder_shots',
       'openstory.delete_shot',
       'openstory.restore_shot',
+      'openstory.apply_sequence_edits',
       'openstory.get_shot_spec',
       'openstory.list_shot_dialogue',
       'openstory.update_shot_prompt',
@@ -280,6 +283,14 @@ describe('tools/list and whoami', () => {
       'openstory.start_export',
     ]);
     expect(tools[0]?.description).toMatch(/user and team/i);
+    const batch = tools.find(
+      (tool) => tool.name === 'openstory.apply_sequence_edits'
+    );
+    const batchSchema = JSON.stringify(batch?.inputSchema);
+    expect(batch?.description).toContain('update_shot_prompt');
+    expect(batch?.description).toContain('update_music_prompt');
+    expect(batchSchema).toContain('expectedScriptVersionId');
+    expect(batchSchema).not.toContain('generate_shot_video');
     const writes = new Set([
       'openstory.update_scene',
       'openstory.create_sequence',
@@ -296,6 +307,7 @@ describe('tools/list and whoami', () => {
       'openstory.reorder_shots',
       'openstory.delete_shot',
       'openstory.restore_shot',
+      'openstory.apply_sequence_edits',
       'openstory.update_shot_prompt',
       'openstory.restore_shot_prompt_version',
       'openstory.rebuild_shot_prompts',
@@ -382,6 +394,7 @@ describe('tools/list and whoami', () => {
       'openstory.delete_element',
       'openstory.discard_music_track',
       'openstory.delete_studio_asset',
+      'openstory.apply_sequence_edits',
     ]);
     for (const tool of tools.slice(1))
       expect(tool.annotations, tool.name).toMatchObject({

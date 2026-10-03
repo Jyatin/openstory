@@ -39,6 +39,9 @@ import { migrate } from 'drizzle-orm/libsql/migrator';
 import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { mcpServer } from './server';
+import { serveResourceRequest } from './resources';
+import { asStub } from '@/test/as-stub';
+import type { User } from '@/platform/server/auth/config';
 // oxlint-disable-next-line boundaries/no-raw-db -- substitute the isolated in-memory DB at the factory boundary
 import { getDb } from '#db-client';
 import type { Database } from '@/platform/server/db/client';
@@ -2198,5 +2201,188 @@ describe('get_export_status without an exportId (#1461)', () => {
       (await call('get_export_status', { sequenceId, exportId: generateId() }))
         .isError
     ).toBe(true);
+  });
+});
+
+describe('production-context resources (#1462)', () => {
+  async function resourceRpc(method: string, params: Record<string, unknown>) {
+    const response = await serveResourceRequest(
+      new Request('https://openstory.test/mcp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-protocol-version': '2026-07-28',
+          'mcp-method': method,
+          ...(typeof params.uri === 'string' ? { 'mcp-name': params.uri } : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method,
+          params: {
+            ...params,
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+              'io.modelcontextprotocol/clientInfo': {
+                name: 'vitest',
+                version: '1',
+              },
+              'io.modelcontextprotocol/clientCapabilities': {},
+            },
+          },
+        }),
+      }),
+      {
+        caller: {
+          user: asStub<User>({ id: actorId, email: 'a@b.c', name: 'A' }),
+          teamId,
+          teamName: 'T',
+        },
+        scoped: () => ({
+          scopedDb,
+          origin: 'https://openstory.test',
+          userId: actorId,
+        }),
+      }
+    );
+    return z
+      .object({
+        result: z.record(z.string(), z.unknown()).optional(),
+        error: z
+          .object({ code: z.number(), message: z.string() })
+          .passthrough()
+          .optional(),
+      })
+      .parse(await response.json());
+  }
+  async function read(uri: string) {
+    const { result, error } = await resourceRpc('resources/read', { uri });
+    if (error) return { error };
+    const contents = z
+      .array(z.object({ uri: z.string(), text: z.string() }))
+      .parse(result?.contents);
+    return { body: JSON.parse(contents[0]?.text ?? 'null') as unknown };
+  }
+
+  it('lists templates in templates/list and concrete resources in resources/list', async () => {
+    const templates = await resourceRpc('resources/templates/list', {});
+    expect(
+      z
+        .array(z.object({ uriTemplate: z.string() }))
+        .parse(templates.result?.resourceTemplates)
+        .map((t) => t.uriTemplate)
+    ).toEqual([
+      'openstory://sequences/{sequenceId}/summary',
+      'openstory://sequences/{sequenceId}/bible',
+      'openstory://sequences/{sequenceId}/scenes/{sceneId}',
+    ]);
+    const listed = z
+      .array(z.object({ uri: z.string() }))
+      .parse((await resourceRpc('resources/list', {})).result?.resources)
+      .map((r) => r.uri);
+    expect(listed).toEqual([
+      `openstory://sequences/${sequenceId}/summary`,
+      `openstory://sequences/${sequenceId}/bible`,
+    ]);
+    expect(listed.some((uri) => uri.includes('{'))).toBe(false);
+  });
+
+  it('serves the same projections as get_sequence and get_scene', async () => {
+    expect(
+      (await read(`openstory://sequences/${sequenceId}/summary`)).body
+    ).toEqual(await data('get_sequence', { sequenceId }));
+    expect(
+      (await read(`openstory://sequences/${sequenceId}/scenes/${sceneId}`)).body
+    ).toEqual(await data('get_scene', { sequenceId, sceneId }));
+  });
+
+  it('serves the bible with explicit truncation, equal to its tool', async () => {
+    const { body } = await read(`openstory://sequences/${sequenceId}/bible`);
+    expect(body).toMatchObject({
+      sequenceId,
+      charactersTruncated: null,
+      scenesTruncated: null,
+    });
+    expect(body).toEqual(await data('get_production_bible', { sequenceId }));
+  });
+
+  it('shrinks an over-budget bible to fit, with a real cursor to continue', async () => {
+    await db.insert(characters).values(
+      Array.from({ length: 30 }, (_, i) => ({
+        id: generateId(),
+        sequenceId,
+        characterId: `char_${i}`,
+        legacyName: `C${i}`,
+        legacyPersonality: 'x'.repeat(8000),
+      }))
+    );
+    const bible = z
+      .object({
+        characters: z.array(z.unknown()),
+        charactersTruncated: z.object({
+          continueWith: z.literal('list_characters'),
+          cursor: z.string(),
+        }),
+      })
+      .parse(await data('get_production_bible', { sequenceId }));
+    expect(bible.characters).toHaveLength(5);
+    expect(
+      await data('list_characters', {
+        sequenceId,
+        cursor: bible.charactersTruncated.cursor,
+        limit: 5,
+      })
+    ).toMatchObject({ characters: expect.any(Array) });
+  });
+
+  it('drops a deleted scene from the bible', async () => {
+    const before = z
+      .object({ totalScenes: z.number() })
+      .parse((await read(`openstory://sequences/${sequenceId}/bible`)).body);
+    await db
+      .update(scenes)
+      .set({ deletedAt: new Date() })
+      .where(eq(scenes.id, dbSceneId(sceneId)));
+    expect(
+      (await read(`openstory://sequences/${sequenceId}/bible`)).body
+    ).toMatchObject({ totalScenes: before.totalScenes - 1 });
+  });
+
+  it('rejects malformed URIs, shot ids, wrong-sequence, deleted and foreign scenes', async () => {
+    const otherSequence = generateId();
+    await db.insert(sequences).values({
+      id: otherSequence,
+      teamId,
+      title: 'Other',
+      styleId: (await db.select().from(sequences))[0]?.styleId ?? '',
+    });
+    for (const uri of [
+      `openstory://sequences/${sequenceId}/summary?x=1`,
+      `openstory://sequences/not-a-ulid/summary`,
+      `openstory://sequences/${sequenceId}/scenes/${shotId}`,
+      `openstory://sequences/${otherSequence}/scenes/${sceneId}`,
+      `openstory://sequences/${sequenceId}/scenes/${sceneId}/extra`,
+    ]) {
+      expect((await read(uri)).error, uri).toMatchObject({
+        code: -32602,
+        data: { uri },
+      });
+    }
+    await db
+      .update(scenes)
+      .set({ deletedAt: new Date() })
+      .where(eq(scenes.id, dbSceneId(sceneId)));
+    expect(
+      (await read(`openstory://sequences/${sequenceId}/scenes/${sceneId}`))
+        .error
+    ).toMatchObject({ code: -32602 });
+    scopedDb = createScopedDb(generateId(), actorId);
+    for (const path of ['summary', 'bible', `scenes/${sceneId}`]) {
+      expect(
+        (await read(`openstory://sequences/${sequenceId}/${path}`)).error,
+        path
+      ).toMatchObject({ code: -32602 });
+    }
   });
 });

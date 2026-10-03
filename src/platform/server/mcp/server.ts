@@ -13,7 +13,7 @@
 import { toolDefinition } from '@tanstack/ai';
 import { createMCPServer } from '@tanstack/ai-mcp/server';
 import { z } from 'zod';
-import { AuthenticationError } from '@/platform/errors';
+import { InsufficientScopeError } from '@/platform/errors';
 import { getLogger, toErrorPayload } from '@/platform/logger';
 import { createScopedDb } from '@/platform/server/db/scoped';
 import type { McpAuthContext } from './auth';
@@ -25,6 +25,7 @@ import { listScenes } from './tools/list-scenes';
 import { getScene } from './tools/get-scene';
 import { listShots } from './tools/list-shots';
 import { getShot } from './tools/get-shot';
+import { updateSceneTool } from './tools/update-scene';
 import { castReadTools } from './tools/cast-reads';
 import { productionReadTools } from './tools/production-reads';
 import { contextReadTools } from './tools/context-reads';
@@ -80,6 +81,7 @@ export const mcpServer = createMCPServer({
     ...productionReadTools,
     ...contextReadTools,
     ...libraryReadTools,
+    updateSceneTool,
   ],
   // Many Worker isolates: a 2025 session opened here would not be found on
   // the next request, so a 2025 client gets a fresh server per request and
@@ -92,9 +94,9 @@ export const mcpServer = createMCPServer({
 });
 
 /**
- * Per-request tool context. API keys are unscoped; OAuth tokens must carry
- * `sequences:read`, checked when a production tool runs so discovery and
- * `whoami` work without it.
+ * Per-request tool context. API keys are unscoped; an OAuth token must carry
+ * the tool's scope, checked when a production tool runs so discovery and
+ * `whoami` work without one.
  */
 function mcpToolContext(
   auth: McpAuthContext,
@@ -102,15 +104,14 @@ function mcpToolContext(
 ): OpenStoryMcpContext {
   return {
     caller: { user: auth.user, teamId: auth.teamId, teamName: auth.teamName },
-    readContext: () => {
-      if (auth.kind === 'oauth' && !auth.scopes.includes('sequences:read')) {
-        throw new AuthenticationError(
-          'This token requires the sequences:read scope.'
-        );
+    scoped: (scope) => {
+      if (auth.kind === 'oauth' && !auth.scopes.includes(scope)) {
+        throw new InsufficientScopeError(scope);
       }
       return {
         scopedDb: createScopedDb(auth.teamId, auth.user.id),
         origin,
+        userId: auth.user.id,
       };
     },
   };

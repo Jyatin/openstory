@@ -74,6 +74,36 @@ function toolError(
 }
 
 /**
+ * Some clients (Claude's connector among them) send every scalar argument as a
+ * string. A top-level string the schema rejects is retried as the boolean or
+ * number it spells, and kept only if the schema then accepts it, so unions
+ * (`number | 'auto'`) and literals (`confirm: true`) work as well as plain
+ * numbers and booleans. A string the schema already accepts, such as
+ * `'auto'`, is left alone; anything else is left for zod to reject.
+ */
+export function coerceScalars(schema: z.ZodObject, input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input;
+  const out: Record<string, unknown> = { ...input };
+  for (const [key, value] of Object.entries(out)) {
+    const field = schema.shape[key];
+    if (typeof value !== 'string' || !field || field.safeParse(value).success) {
+      continue;
+    }
+    const text = value.trim();
+    const candidates = [
+      text === 'true' ? true : text === 'false' ? false : undefined,
+      text !== '' && Number.isFinite(Number(text)) ? Number(text) : undefined,
+    ];
+    const spelled = candidates.find(
+      (candidate) =>
+        candidate !== undefined && field.safeParse(candidate).success
+    );
+    if (spelled !== undefined) out[key] = spelled;
+  }
+  return out;
+}
+
+/**
  * Run one read and bound its response, including opt-in prompts, without
  * silently cutting data. Input is parsed with zod here (the SDK only checks
  * the JSON Schema, so it applies no defaults); output is parsed against the
@@ -87,7 +117,7 @@ async function runTool<I extends z.ZodObject, O extends z.ZodObject>(
 ): Promise<CallToolResult> {
   try {
     const { data, summary } = await spec.run(
-      spec.inputSchema.parse(input),
+      spec.inputSchema.parse(coerceScalars(spec.inputSchema, input)),
       context()
     );
     const parsed = spec.outputSchema.safeParse(data);
@@ -96,15 +126,19 @@ async function runTool<I extends z.ZodObject, O extends z.ZodObject>(
         cause: parsed.error,
       });
     }
+    // Through JSON so an `undefined` optional field is dropped: the SDK's
+    // output validator rejects the key, and the call failed after it ran.
+    const json = JSON.stringify(parsed.data);
     const result: CallToolResult = {
       content: [
         {
           type: 'text',
           text: summary.length > 500 ? `${summary.slice(0, 500)}…` : summary,
         },
-        { type: 'text', text: JSON.stringify(parsed.data) },
+        { type: 'text', text: json },
       ],
-      structuredContent: parsed.data,
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the parsed output, round-tripped through JSON
+      structuredContent: JSON.parse(json) as Record<string, unknown>,
     };
     if (overResponseCap(JSON.stringify(result))) {
       return toolError(

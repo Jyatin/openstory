@@ -2,14 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as dbModule from '@/platform/server/db/scoped';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { z } from 'zod';
-import {
-  createOpenStoryMcpServer,
-  getMcpHttpHandler,
-  MCP_SERVER_NAME,
-  MCP_SERVER_VERSION,
-  resetMcpHttpHandler,
-  toMcpAuthInfo,
-} from './server';
+import { MCP_SERVER_NAME, MCP_SERVER_VERSION, serveMcpRequest } from './server';
 import type { User } from '@/platform/server/auth/config';
 import { asStub } from '@/test/as-stub';
 
@@ -28,6 +21,8 @@ const auth = {
   user,
   teamId: 'team_1',
   teamName: "Ada's Team",
+  session: null,
+  oauth: null,
   kind: 'api_key' as const,
   keyHint: 'osk_…XXXX',
   clientId: 'api_key',
@@ -107,27 +102,14 @@ function mcpPost(
 async function rpc(
   method: string,
   params?: Record<string, unknown>,
-  caller: Parameters<typeof toMcpAuthInfo>[0] = auth
+  caller: Parameters<typeof serveMcpRequest>[1] = auth
 ) {
-  resetMcpHttpHandler();
-  const res = await getMcpHttpHandler().fetch(mcpPost(method, { params }), {
-    authInfo: toMcpAuthInfo(caller),
-  });
+  const res = await serveMcpRequest(mcpPost(method, { params }), caller);
   return {
     status: res.status,
     body: rpcEnvelope.parse(await res.json()),
   };
 }
-
-describe('createOpenStoryMcpServer', () => {
-  it('names the server openstory', () => {
-    expect(MCP_SERVER_NAME).toBe('openstory');
-    expect(MCP_SERVER_VERSION).toBe('0.1.0');
-    expect(
-      createOpenStoryMcpServer(auth, { origin: 'https://openstory.so' })
-    ).toBeDefined();
-  });
-});
 
 describe('tools/list and whoami', () => {
   it('lists whoami and all production read tools with input/output schemas', async () => {
@@ -189,40 +171,26 @@ describe('tools/list and whoami', () => {
         readOnlyHint: true,
         destructiveHint: false,
       });
+    // MCP input schemas are object-rooted, so the kind/parentId union is
+    // advertised flat and enforced by the handler (tools.test.ts).
     for (const name of [
       'openstory.list_library_resources',
       'openstory.get_library_resource',
     ]) {
       const libraryResourceSchema = z
         .object({
-          oneOf: z.array(
-            z.object({
-              properties: z.object({
-                kind: z.object({ enum: z.array(z.string()) }),
-              }),
-              required: z.array(z.string()),
-            })
-          ),
+          type: z.literal('object'),
+          properties: z.object({
+            kind: z.object({ enum: z.array(z.string()) }),
+            parentId: z.object({ type: z.literal('string') }),
+          }),
+          required: z.array(z.string()),
         })
         .parse(tools.find((tool) => tool.name === name)?.inputSchema);
-      expect(
-        libraryResourceSchema.oneOf
-          .filter((entry) =>
-            entry.properties.kind.enum.some(
-              (kind) => kind !== 'audio' && kind !== 'vfx'
-            )
-          )
-          .every((entry) => entry.required.includes('parentId'))
-      ).toBe(true);
-      expect(
-        libraryResourceSchema.oneOf
-          .filter((entry) =>
-            entry.properties.kind.enum.every(
-              (kind) => kind === 'audio' || kind === 'vfx'
-            )
-          )
-          .every((entry) => !entry.required.includes('parentId'))
-      ).toBe(true);
+      expect(libraryResourceSchema.properties.kind.enum).toEqual(
+        expect.arrayContaining(['talent_sheet', 'audio', 'vfx'])
+      );
+      expect(libraryResourceSchema.required).not.toContain('parentId');
     }
   });
 
@@ -261,29 +229,63 @@ describe('tools/list and whoami', () => {
     });
   });
 
-  it('rejects a 2025-era initialize (legacy: reject)', async () => {
-    resetMcpHttpHandler();
-    const res = await getMcpHttpHandler().fetch(
+  describe('a 2025-era client (sessions: stateless)', () => {
+    const legacyPost = (method: string, params: Record<string, unknown>) =>
       new Request('https://openstory.test/mcp', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           accept: 'application/json, text/event-stream',
+          'mcp-protocol-version': '2025-11-25',
         },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'initialize',
-          params: {
-            protocolVersion: '2025-11-25',
-            capabilities: {},
-            clientInfo: { name: 'legacy', version: '0' },
-          },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+
+    // The legacy transport may answer as JSON or as one SSE event.
+    const readRpc = async (res: Response) => {
+      const text = await res.text();
+      const data = res.headers
+        .get('content-type')
+        ?.includes('text/event-stream')
+        ? text
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('')
+        : text;
+      return rpcEnvelope.parse(JSON.parse(data));
+    };
+
+    it('initializes without opening a session', async () => {
+      const res = await serveMcpRequest(
+        legacyPost('initialize', {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'legacy', version: '0' },
         }),
-      }),
-      { authInfo: toMcpAuthInfo(auth) }
-    );
-    expect(res.status).toBeGreaterThanOrEqual(400);
+        auth
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get('mcp-session-id')).toBeNull();
+      const body = await readRpc(res);
+      expect(body.error).toBeUndefined();
+      expect(
+        z.object({ protocolVersion: z.string() }).parse(body.result)
+          .protocolVersion
+      ).toBe('2025-11-25');
+    });
+
+    it('calls a tool with no session, on any isolate', async () => {
+      const res = await serveMcpRequest(
+        legacyPost('tools/call', { name: 'whoami', arguments: {} }),
+        auth
+      );
+      expect(res.status).toBe(200);
+      const body = await readRpc(res);
+      expect(whoamiResult.parse(body.result).structuredContent.team.id).toBe(
+        'team_1'
+      );
+    });
   });
 });
 

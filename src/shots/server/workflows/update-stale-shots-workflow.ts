@@ -48,6 +48,7 @@
  */
 
 import { generateId } from '@/platform/id';
+import { sanitizeFailResponse } from '@/platform/server/workflow/sanitize-fail-response';
 import {
   DEFAULT_MUSIC_MODEL,
   supportsDraftMode,
@@ -2043,11 +2044,7 @@ export function dialogueTargetOutcome(
         });
       }
     } else if (!target.regenVideo) {
-      failures.push({
-        shotId: target.shotId,
-        stage: 'dialogue',
-        error: outcome.error,
-      });
+      failures.push(toFailure(target.shotId, 'dialogue', outcome.error));
     }
   }
   return { updated, failures };
@@ -2061,6 +2058,6 @@ function toFailure(
   return {
     shotId,
     stage,
-    error: error instanceof Error ? error.message : String(error),
+    error: sanitizeFailResponse(error),
   };
 }

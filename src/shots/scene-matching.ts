@@ -172,6 +172,9 @@ export function matchCharactersToShotImage<T extends CharacterMatchInput>(
   const named = allCharacters.filter((c) =>
     characterMentionedInPrompt(c, prompt)
   );
+  // Stills keep the tag fallback for a prompt with no identifiable subject
+  // so stored still digests do not move. Prompt hashes and clips do not: see
+  // `resolveShotReferences`.
   return named.length > 0 ? named : tagged;
 }
 
@@ -413,6 +416,75 @@ export function matchElementsToMotion<T extends ElementMatchInput>(
       ...named,
     ]),
   ];
+}
+
+/** The scene fields a shot's references are resolved against. */
+export type ShotReferenceScene = {
+  characterTags?: string[] | null;
+  environmentTag?: string | null;
+  sceneLocation?: string | null;
+  elementTags?: string[] | null;
+  sceneExtract?: string | null;
+};
+
+/**
+ * One prompt channel of a shot. `prompt` is the channel's own text; `null`
+ * means no prompt exists yet, so the scene's continuity tags are the only
+ * word on who is in the shot.
+ */
+export type ShotPromptView =
+  | { channel: 'visual'; prompt: string | null }
+  | { channel: 'motion'; prompt: string | null; referenceOnly: boolean };
+
+/**
+ * Who and what one prompt of one shot references (#2012).
+ *
+ * The prompt hash, the staleness cause list, the clip's `referenceKeys` and
+ * the motion render all read this, so the thing verified is the thing a
+ * re-render would be sent. A prompt that names a person, a room or a prop
+ * keeps only those; one that names nobody keeps nobody. The scene cast is not
+ * inherited. Characters and locations follow the prompt text on both
+ * channels. Elements follow it on a still and on a reference-only clip; with a
+ * start frame they stay additive, per `matchElementsToMotion`.
+ *
+ * For locations, text falls through to the scene slugline when the prompt
+ * names no room, and the scene extract is read only while there is no prompt:
+ * it names every room in the scene.
+ */
+export function resolveShotReferences<
+  C extends CharacterMatchInput,
+  L extends LocationMatchInput,
+  E extends ElementMatchInput,
+>(
+  all: { characters: C[]; locations: L[]; elements: E[] },
+  scene: ShotReferenceScene,
+  view: ShotPromptView
+): { characters: C[]; locations: L[]; elements: E[] } {
+  const text = (view.prompt ?? '').trim();
+  const characters = text
+    ? all.characters.filter((c) => characterMentionedInPrompt(c, text))
+    : matchCharactersToScene(all.characters, scene.characterTags ?? []);
+  const locations = matchLocationsToScene(
+    all.locations,
+    scene.environmentTag ?? '',
+    scene.sceneLocation ?? '',
+    text ? undefined : scene.sceneExtract,
+    text || undefined
+  );
+  const elements =
+    view.channel === 'visual'
+      ? matchElementsToShotImage(all.elements, {
+          visualPrompt: text,
+          elementTags: scene.elementTags,
+          sceneExtract: scene.sceneExtract,
+        })
+      : matchElementsToMotion(all.elements, {
+          motionPrompt: text,
+          elementTags: scene.elementTags,
+          sceneExtract: scene.sceneExtract,
+          referenceOnly: view.referenceOnly,
+        });
+  return { characters, locations, elements };
 }
 
 /**

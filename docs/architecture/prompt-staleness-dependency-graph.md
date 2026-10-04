@@ -23,10 +23,20 @@ code now says "shot"; the file map in §7 is current.
 
 1. **Membership moved upstream.** Scene-split now emits each scene's `continuity`
    (`response-schemas.ts`); the visual-prompt LLM no longer authors it. The
-   visual/motion prompt workflows **narrow their bible input to the scene's
-   entities before the LLM call** (`frame-prompt-workflow.ts`,
-   `motion-prompt-workflow.ts`) — the model and the hash see the same
-   minimal input.
+   prompt hashes **narrow their bible input** (`narrowShotPromptContext`) so
+   the hash reads only what can change the prompt. #867 narrowed to the
+   scene. #2012 narrows per shot and per prompt channel:
+   `resolveShotReferences` keeps the characters, locations and elements the
+   prompt's own text names, so a visual digest reads the visual prompt and a
+   motion digest the motion prompt. Continuity tags pick the bibles only
+   while that prompt is unwritten. Every stamp site passes the text it
+   writes (`ShotPromptView` is required), and verify passes the selected
+   text, so stamp and verify hash the same set. Causes, the clip's
+   `referenceKeys` compare and the motion render's reference attachment use
+   the same resolution. A digest stamped on the scene roster before #2012 is
+   still accepted at verify until `LEGACY_HASH_UNTIL`. Still sheets keep the
+   scene-tag fallback when the visual prompt names nobody, so an off-camera
+   sheet can stale a still.
 2. **Cast bible fed into prompt generation.** `analyze-script-workflow.ts`
    computes the cast bible (`buildCastCharacterBible`) right after talent matching
    and hands it to the prompt branches, so the stamped hash equals the cast DB row
@@ -60,7 +70,12 @@ it.
 ---
 
 > Interactive version: `/docs/dependency-graph` in the app (#1595), data in
-> `src/ui/docs/dependency-graph.ts`. Keep it in step with `input-hash.ts`.
+> `src/ui/docs/dependency-graph.ts`. It shows this same graph.
+>
+> **Update both together.** A change to what a hash or a pointer compare reads
+> updates `src/ui/docs/dependency-graph.ts` and this doc in the same PR. The
+> interactive graph is the one people open; leaving it on the old rule is how
+> #2012 shipped with the page still saying continuity tags pick the bibles.
 
 ## 1. The model in one paragraph
 
@@ -161,7 +176,7 @@ stale."** Diamonds are inputs; rounded boxes are hashed artifacts.
 ```mermaid
 flowchart LR
     subgraph inputs["upstream inputs"]
-        scene{{"scene input surface<br/>originalScript<br/>· metadata location/timeOfDay/storyBeat<br/>· continuity tags pick the bible entries"}}
+        scene{{"scene input surface<br/>originalScript<br/>· metadata location/timeOfDay/storyBeat<br/>· per shot: prompts name the bibles (#2012)<br/>· continuity tags only while prompts are empty"}}
         style{{"styleConfig"}}
         cbible{{"character bible<br/>(age, physicalDescription, …)<br/>name is a display label"}}
         lbible{{"location bible"}}
@@ -274,7 +289,11 @@ Key consequences of the shape:
   compare (`isSelectedVersionStale`) checks them against the shot's current
   selections. A stale still does not stale the clip; selecting a new still
   does. The same holds for the sheets and element images a render sent
-  (`referenceKeys`): re-selecting one re-stales the clip.
+  (`referenceKeys`): re-selecting one re-stales the clip. A stamped key for
+  an entity that still exists but the motion prompt no longer names is not
+  compared (#2012): a re-render would not send it. A prop close-up rendered
+  with a scene-mate's sheet does not go stale when that sheet changes. A
+  stamped entity that was deleted always reads stale.
 - **A new still re-stales the motion prompt.** The motion prompt is written
   looking at the still, so its hash reads the still's URL (unless the shot
   renders reference-only).
@@ -540,10 +559,14 @@ projection. Combined with the cast bible feeding generation, a casting rewrite n
 longer flips the prompt hash (`physicalDescription` is now identical on both
 sides; `consistencyTag` is no longer hashed at all).
 
-> The bibles are first **narrowed** to the entries this scene references
-> (`narrowFramePromptContext`) and then **sorted** by identity field, but the
-> entries themselves are hashed field-for-field. A single differing character
-> field (e.g. a cast `physicalDescription`) flips the whole digest.
+> The bibles are first **narrowed to what this prompt's text names**
+> (`resolveShotReferences` in `narrowShotPromptContext`, #2012; the scene-tag
+> narrow was `narrowFramePromptContext`) and then **sorted** by identity
+> field, but the entries themselves are hashed field-for-field. A single
+> differing character field (e.g. a cast `physicalDescription`) flips the
+> whole digest when that character is one the prompt names. Because the set
+> depends on the text, a rebuild hashes the text it is about to write and
+> stamps that digest, never the claim's pending hash.
 
 #### 4. Motion prompt — `hashMotionPromptInput`
 

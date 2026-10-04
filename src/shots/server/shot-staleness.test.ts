@@ -465,7 +465,11 @@ describe('staleness causes (#1194)', () => {
     const generated = new Date('2026-01-01T00:00:00Z');
     const before = new Date('2025-12-31T00:00:00Z');
     const afterGen = new Date('2026-01-02T00:00:00Z');
-    const scopedDb = makeScopedDb({ motionSelectedHash: 'motion-stored' });
+    const scopedDb = makeScopedDb({
+      motionSelectedHash: 'motion-stored',
+      // Causes name only what the shot's prompts reference (#2012).
+      visualSelected: { text: 'WOMAN picks up the BOTTLE in the BATHROOM.' },
+    });
     Object.assign(scopedDb, {
       scenes: { getById: vi.fn().mockResolvedValue({ updatedAt: afterGen }) },
       sceneScriptVersions: {
@@ -511,10 +515,29 @@ describe('staleness causes (#1194)', () => {
       scene,
       refs: asStub({
         characters: [
-          { name: 'Woman', updatedAt: afterGen, sheetGeneratedAt: null },
-          { name: 'Man', updatedAt: before, sheetGeneratedAt: before },
+          {
+            name: 'Woman',
+            characterId: 'woman',
+            consistencyTag: null,
+            updatedAt: afterGen,
+            sheetGeneratedAt: null,
+          },
+          {
+            name: 'Man',
+            characterId: 'man',
+            consistencyTag: null,
+            updatedAt: before,
+            sheetGeneratedAt: before,
+          },
         ],
-        locations: [{ name: 'Bathroom', updatedAt: before }],
+        locations: [
+          {
+            name: 'Bathroom',
+            locationId: 'bathroom',
+            consistencyTag: null,
+            updatedAt: before,
+          },
+        ],
         elements: [{ token: 'BOTTLE', updatedAt: afterGen }],
         style: null,
       }),
@@ -556,6 +579,7 @@ describe('staleness causes (#1194)', () => {
     };
     const scopedDb = makeScopedDb({
       motionSelectedHash: 'motion-stored',
+      visualSelected: { text: 'WOMAN in a dress; MAN behind her.' },
       characterBibleVersions: [
         { ...bible, characterId: 'c-woman', createdAt: before },
         // An edit after the still: this is the one live now.
@@ -597,6 +621,7 @@ describe('staleness causes (#1194)', () => {
             ...bible,
             standardClothing: 'dress',
             id: 'c-woman',
+            characterId: 'woman',
             updatedAt: afterGen,
             sheetGeneratedAt: afterGen,
           },
@@ -605,6 +630,7 @@ describe('staleness causes (#1194)', () => {
             ...bible,
             name: 'Man',
             id: 'c-man',
+            characterId: 'man',
             updatedAt: afterGen,
             sheetGeneratedAt: null,
           },
@@ -616,6 +642,102 @@ describe('staleness causes (#1194)', () => {
     });
 
     expect(result.causes).toEqual(['Character "Woman": clothing, sheet']);
+  });
+
+  it('names only the characters and locations this shot references (#2012)', async () => {
+    buildRegenerateShotSnapshot.mockResolvedValue({
+      snapshotInputHash: 'image-live',
+    });
+    loadNarrowShotPromptContext.mockResolvedValue({});
+    hashVisualPromptInput.mockResolvedValue('visual-moved');
+    hashMotionPromptInput.mockResolvedValue('motion-stored');
+
+    const before = new Date('2025-12-31T00:00:00Z');
+    const afterGen = new Date('2026-01-02T00:00:00Z');
+    const scopedDb = makeScopedDb({
+      motionSelectedHash: 'motion-stored',
+      visualSelected: {
+        text: 'WOMAN studies the vase. The LIVING ROOM is empty.',
+      },
+    });
+    Object.assign(scopedDb, {
+      scenes: {
+        getById: vi.fn().mockResolvedValue({
+          updatedAt: before,
+          location: 'Living room',
+          continuity: {
+            characterTags: ['woman', 'man'],
+            environmentTag: 'house',
+            elementTags: [],
+          },
+        }),
+      },
+      sceneScriptVersions: {
+        getSelected: vi.fn().mockResolvedValue({
+          createdAt: before,
+          content: {
+            extract: 'She walks from the bathroom onto the verandah.',
+            dialogue: [],
+          },
+        }),
+        listBySequence: vi.fn().mockResolvedValue([]),
+      },
+      sequenceEvents: { listByTarget: vi.fn().mockResolvedValue([]) },
+    });
+
+    const result = await computeShotStaleness({
+      dialogue: NO_LINES,
+      scopedDb,
+      sequence,
+      shot: asStub<Shot>({ id: 'shot-1', sceneId: 'scene-1' }),
+      frame,
+      selectedImage: asStub<FrameVariant>({
+        id: 'fv-1',
+        inputHash: 'image-old',
+        model: null,
+        url: null,
+        generatedAt: new Date('2026-01-01T00:00:00Z'),
+      }),
+      scene,
+      refs: asStub({
+        characters: [
+          {
+            id: 'c-woman',
+            characterId: 'woman',
+            name: 'Woman',
+            consistencyTag: '',
+            updatedAt: afterGen,
+            sheetGeneratedAt: afterGen,
+          },
+        ],
+        locations: [
+          {
+            id: 'l-bath',
+            locationId: 'bath',
+            name: 'Bathroom',
+            consistencyTag: '',
+            updatedAt: afterGen,
+            referenceGeneratedAt: afterGen,
+          },
+          {
+            id: 'l-live',
+            locationId: 'living',
+            name: 'Living room',
+            consistencyTag: '',
+            updatedAt: before,
+            referenceGeneratedAt: before,
+          },
+        ],
+        elements: [],
+        style: null,
+      }),
+    });
+
+    expect(result.visualPrompt).toBe('stale');
+    // The woman is in the shot; the bathroom (edited later) is not.
+    expect(result.causes).toEqual([
+      expect.stringMatching(/^Character "Woman"/),
+    ]);
   });
 
   it('names the scene fields that moved, not the script, when only they did (#1600)', async () => {
@@ -777,7 +899,8 @@ describe('per-shot start-frame override', () => {
   it('stamps the next LLM version over a derived one with the still it will see', async () => {
     loadNarrowShotPromptContext.mockImplementation(
       async (args: { startingFrameImageUrl?: string | null }) => ({
-        frameUrl: args.startingFrameImageUrl ?? null,
+        shot: { frameUrl: args.startingFrameImageUrl ?? null },
+        sceneRoster: {},
       })
     );
     hashMotionPromptInput.mockImplementation(
@@ -1042,6 +1165,7 @@ describe('causes left for #1787', () => {
     hashMotionPromptInput.mockResolvedValue('motion-stored');
     const bible = {
       name: 'Diner',
+      locationId: 'diner',
       type: 'interior',
       timeOfDay: 'night',
       description: 'neon',
@@ -1054,6 +1178,7 @@ describe('causes left for #1787', () => {
     };
     const scopedDb = makeScopedDb({
       motionSelectedHash: 'motion-stored',
+      visualSelected: { text: 'Night at the DINER.' },
       locationBibleVersions: [
         { ...bible, locationId: 'l-diner', createdAt: before },
       ],

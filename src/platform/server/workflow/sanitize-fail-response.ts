@@ -22,29 +22,20 @@ function isGenericError(text: string): boolean {
  * Strip repetitive child-workflow prefixes so user-facing errors name the
  * underlying cause rather than the spawn hierarchy (#1694).
  *
- * Handles arbitrary nesting depths and status-fallback `Error:` wrappers. If
- * stripping would leave only an empty or generic placeholder (e.g. "no error
- * detail" or "Unknown error"), the wrapper is preserved so the child workflow
- * ID is not destroyed.
+ * Handles arbitrary nesting depths and the error name the status fallback
+ * puts in front of a message (`Error:`, `NonRetryableError:` — see
+ * `spawnAndAwaitChild`). If stripping would leave only an empty or generic
+ * placeholder (e.g. "no error detail" or "Unknown error"), the wrapper is
+ * preserved so the child workflow ID is not destroyed.
  */
 function unwrapChildWorkflowError(message: string): string {
-  let unwrapped = message.trim();
-  while (
-    /^(?:(?:Error:\s*)?Child workflow\s+\S+\s+failed:\s*)+/i.test(unwrapped)
-  ) {
-    unwrapped = unwrapped
-      .replace(/^(?:(?:Error:\s*)?Child workflow\s+\S+\s+failed:\s*)+/i, '')
-      .trim();
-  }
-  if (/^Error:\s*/i.test(unwrapped)) {
-    unwrapped = unwrapped.replace(/^Error:\s*/i, '').trim();
-  }
-
-  if (isGenericError(unwrapped)) {
-    return message.trim();
-  }
-
-  return unwrapped;
+  const unwrapped = message
+    .replace(
+      /^(?:(?:\w*Error:\s*)?Child workflow\s+\S+\s+failed:\s*)+(?:\w*Error:\s*)?/i,
+      ''
+    )
+    .trim();
+  return isGenericError(unwrapped) ? message : unwrapped;
 }
 
 /**
@@ -52,10 +43,9 @@ function unwrapChildWorkflowError(message: string): string {
  * Cloudflare error codes to friendly text and capping the length.
  */
 export function sanitizeFailResponse(failResponse: unknown): string {
-  const raw = extractRawMessage(failResponse).trim();
-  if (!raw) return 'Unknown error';
-
-  const message = unwrapChildWorkflowError(raw);
+  const message = unwrapChildWorkflowError(
+    extractRawMessage(failResponse).trim()
+  );
   if (!message) return 'Unknown error';
 
   // Map known CF error codes

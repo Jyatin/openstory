@@ -437,7 +437,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               scopedDb.characters.failSheetClaim(
                 id,
                 sheetVersionId,
-                error instanceof Error ? error.message : String(error)
+                sanitizeFailResponse(error)
               )
             );
           }
@@ -485,7 +485,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               scopedDb.sequenceLocations.failReferenceClaim(
                 id,
                 referenceVersionId,
-                error instanceof Error ? error.message : String(error)
+                sanitizeFailResponse(error)
               )
             );
           }
@@ -557,7 +557,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                 scopedDb.characters.markVoiceClaimTerminal(
                   husk,
                   'failed',
-                  error instanceof Error ? error.message : String(error)
+                  sanitizeFailResponse(error)
                 )
               );
             }
@@ -1715,7 +1715,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             await step.do('fail-music-track-claim', async () => {
               await scopedDb.sequenceVariants.failMusicClaim(
                 { sequenceId, variantId: claimedTrack },
-                error instanceof Error ? error.message : String(error)
+                sanitizeFailResponse(error)
               );
             });
           };

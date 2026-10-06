@@ -49,6 +49,25 @@ describe('sanitizeFailResponse', () => {
     ).toBe('Something went wrong');
   });
 
+  test('unwraps the error name the status fallback puts in front', () => {
+    expect(
+      sanitizeFailResponse(
+        'Child workflow a failed: NonRetryableError: Child workflow b failed: Shot too long'
+      )
+    ).toBe('Shot too long');
+    expect(
+      sanitizeFailResponse(
+        'Child workflow a failed: NonRetryableError: fal rejected the job'
+      )
+    ).toBe('fal rejected the job');
+  });
+
+  test('leaves an error name alone when there is no child wrapper', () => {
+    expect(sanitizeFailResponse('HTTPError: 502 from provider')).toBe(
+      'HTTPError: 502 from provider'
+    );
+  });
+
   test('preserves child workflow context when unwrapping leaves generic "Unknown error"', () => {
     expect(
       sanitizeFailResponse('Child workflow abc failed: Unknown error')
@@ -94,7 +113,9 @@ describe('sanitizeFailResponse', () => {
 
   test('handles mixed casing and whitespace in child workflow prefix', () => {
     expect(
-      sanitizeFailResponse('CHILD WORKFLOW abc FAILED:   custom failure message')
+      sanitizeFailResponse(
+        'CHILD WORKFLOW abc FAILED:   custom failure message'
+      )
     ).toBe('custom failure message');
   });
 

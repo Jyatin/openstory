@@ -4,6 +4,7 @@ import { Button } from '@/ui/shadcn/button';
 import { SequenceImageModelSelector } from '@/models/ui/pickers/sequence-image-model-selector';
 import { SequenceVideoModelSelector } from '@/models/ui/pickers/sequence-video-model-selector';
 import { StyleBadge } from '@/look/ui/style-badge';
+import { RenameSequenceButton } from '@/sequences/ui/rename-sequence-button';
 import { TargetDurationChip } from '@/sequences/ui/target-duration-chip';
 import { Kbd } from '@/ui/shadcn/kbd';
 import type { ImageToVideoModel, TextToImageModel } from '@/models/models';
@@ -42,6 +43,11 @@ type SceneModelBarProps = {
   scenes?: SceneWithScript[];
   shots?: ShotView[];
   sequenceId?: string;
+  /**
+   * The sequence title, renamed from the Title row (#2102). Undefined only
+   * while the sequence is loading.
+   */
+  title: string | undefined;
   resolvedSequenceImageModel: TextToImageModel;
   resolvedSequenceVideoModel: ImageToVideoModel;
   styleId?: string;
@@ -59,7 +65,7 @@ const SettingRow: React.FC<{ label: string; children: React.ReactNode }> = ({
   children,
 }) => (
   <div className="flex items-center justify-between gap-2">
-    <span className="text-sm text-muted-foreground">{label}</span>
+    <span className="shrink-0 text-sm text-muted-foreground">{label}</span>
     {children}
   </div>
 );
@@ -69,6 +75,7 @@ export const SceneModelBar: React.FC<SceneModelBarProps> = ({
   scenes,
   shots,
   sequenceId,
+  title,
   resolvedSequenceImageModel,
   resolvedSequenceVideoModel,
   styleId,
@@ -96,6 +103,11 @@ export const SceneModelBar: React.FC<SceneModelBarProps> = ({
       </div>
       {showSequenceSettings && (
         <div className="space-y-2">
+          {sequenceId && title !== undefined && (
+            <SettingRow label="Title">
+              <RenameSequenceButton sequenceId={sequenceId} title={title} />
+            </SettingRow>
+          )}
           <SettingRow label="Style">
             <StyleBadge
               styleId={styleId}

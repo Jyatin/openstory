@@ -490,7 +490,7 @@ describe('StoryboardWorkflow stop-at + resume (#1408)', () => {
     );
   });
 
-  test('a continue with a failed unit ends failed and sends no ready email', async () => {
+  test('a failed unit stays on the unit: the sequence completes and sends no ready email (#2104)', async () => {
     // the wrapper only forwards it
     const plan = asStub<NonNullable<StoryboardWorkflowInput['plan']>>({
       targets: [],
@@ -505,16 +505,16 @@ describe('StoryboardWorkflow stop-at + resume (#1408)', () => {
     );
 
     expect(updateStatus).toHaveBeenCalledWith(
-      'failed',
-      'Insufficient credits',
-      expect.objectContaining({
-        kind: 'run.failed',
-        summary: 'Storyboard failed',
-        id: expect.any(String),
-      })
+      'completed',
+      null,
+      expect.objectContaining({ kind: 'storyboard.completed' })
     );
-    expect(updateStatus).not.toHaveBeenCalledWith('completed');
-    expect(names).toContain('emit-failed');
+    expect(updateStatus).not.toHaveBeenCalledWith(
+      'failed',
+      expect.anything(),
+      expect.anything()
+    );
+    expect(names).toContain('emit-complete');
     expect(names).not.toContain('email-ready');
   });
 

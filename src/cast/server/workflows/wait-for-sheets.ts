@@ -3,15 +3,15 @@
  *
  * When a user adds new talent or a new location while creating a sequence
  * (`TalentSuggestionSelector` → `createTalentFn`,
- * `LocationSuggestionSelector` → `createLibraryLocationFn`), the sheet /
+ * `LocationSuggestionSelector` → `createTeamLocationFn`), the sheet /
  * reference-image generation runs in a *separate*, fire-and-forget workflow
- * (`/library-talent-sheet`, `/library-location-sheet`). The sequence's
+ * (`/library-talent-sheet`, `/location-sheet`). The sequence's
  * `analyze-script-workflow` then spawns `talent-matching` / `location-matching`
  * which read those sheets:
  *
  *   - talent matching uses `talent.defaultSheet?.imageUrl` as the casting
  *     reference image, and
- *   - location matching SKIPS any library location without a
+ *   - location matching SKIPS any team location without a
  *     `referenceImageUrl`.
  *
  * If the sheet workflow hasn't finished by the time matching reads the row, the
@@ -26,7 +26,7 @@
  */
 
 import type {
-  LibraryLocation,
+  LocationWithReference,
   SequenceElement,
   TalentWithSheets,
 } from '@/platform/server/db/schema';
@@ -43,7 +43,7 @@ const logger = getLogger(['openstory', 'workflow', 'wait-for-sheets']);
  */
 export type WaitForSheetsReadDb = {
   talent: Pick<ScopedDb['talent'], 'getByIds'>;
-  locations: Pick<ScopedDb['locations'], 'getByIds'>;
+  locations: Pick<ScopedDb['locations'], 'getCurrentByIds'>;
   sequenceElements: Pick<ScopedDb['sequenceElements'], 'listByIds'>;
 };
 
@@ -173,24 +173,23 @@ export async function waitForTalentSheets(
 }
 
 /**
- * Block until every requested library location has a reference image, or the
- * timeout expires. A location created with an uploaded reference image has one
- * immediately (short-circuit); one created from name/description only gets it
- * once `/library-location-sheet` finishes.
+ * Block until every requested team location has a sheet, or the timeout
+ * expires. One that already has a sheet short-circuits; one just made on the
+ * create screen gets it once its `/location-sheet` run finishes.
  */
 export async function waitForLocationReferences(
   step: WorkflowStep,
   scopedDb: WaitForSheetsReadDb,
   locationIds: string[],
   opts?: { onWaitNeeded?: OnWaitNeeded }
-): Promise<WaitForSheetsResult<LibraryLocation>> {
+): Promise<WaitForSheetsResult<LocationWithReference>> {
   return pollUntilReady(step, {
     ids: locationIds,
     stepPrefix: 'wait-location-refs',
     label: 'location references',
     onWaitNeeded: opts?.onWaitNeeded,
     check: async () => {
-      const rows = await scopedDb.locations.getByIds(locationIds);
+      const rows = await scopedDb.locations.getCurrentByIds(locationIds);
       return {
         rows,
         pendingIds: rows.filter((l) => !l.referenceImageUrl).map((l) => l.id),

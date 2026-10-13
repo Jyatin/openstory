@@ -45,12 +45,11 @@ export class LocationMatchingWorkflow extends OpenStoryWorkflowEntrypoint<Locati
 
     const locationBible = input.locationBible;
 
-    // Location matching drops any library location without a `referenceImageUrl`
+    // Location matching drops any team location without a `referenceImageUrl`
     // (see build-location-matches below). A location the user just added while
-    // creating this sequence — especially one created from name/description with
-    // no uploaded image — only gets its reference once the fire-and-forget
-    // `/library-location-sheet` workflow finishes. Wait (bounded) for those
-    // references first so pre-selected locations aren't silently skipped.
+    // creating this sequence only gets its sheet once its fire-and-forget
+    // `/location-sheet` run finishes. Wait (bounded) for those sheets first
+    // so pre-selected locations aren't silently skipped.
     const referenceRows =
       suggestedLocationIds?.length && input.teamId
         ? (
@@ -80,7 +79,7 @@ export class LocationMatchingWorkflow extends OpenStoryWorkflowEntrypoint<Locati
 
     // The wait's final poll IS the read. Name/description come from the
     // trigger-time snapshot; only `referenceImageUrl` legitimately arrives
-    // late (fire-and-forget `/library-location-sheet`).
+    // late (fire-and-forget `/location-sheet`).
     const snapshotById = new Map(
       (input.suggestedLocations ?? []).map((l) => [l.locationId, l])
     );
@@ -149,8 +148,6 @@ export class LocationMatchingWorkflow extends OpenStoryWorkflowEntrypoint<Locati
             libraryLocationId: match.libraryLocationId,
             libraryLocationName: libraryLoc.name,
             referenceImageUrl: libraryLoc.referenceImageUrl,
-            description: libraryLoc.description ?? undefined,
-            referenceInputHash: libraryLoc.referenceInputHash,
           });
         }
 
@@ -168,7 +165,6 @@ export class LocationMatchingWorkflow extends OpenStoryWorkflowEntrypoint<Locati
                   libraryLocationId: m.libraryLocationId,
                   libraryLocationName: m.libraryLocationName,
                   referenceImageUrl: m.referenceImageUrl,
-                  description: m.description ?? undefined,
                 };
               }),
             }

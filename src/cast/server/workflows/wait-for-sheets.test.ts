@@ -41,10 +41,10 @@ function talentDb(getByIds: ReturnType<typeof vi.fn>): ScopedDb {
   return asStub<ScopedDb>({ talent: { getByIds } });
 }
 
-/** ScopedDb stub exposing only `locations.getByIds`. */
-function locationDb(getByIds: ReturnType<typeof vi.fn>): ScopedDb {
-  // helper only reaches scopedDb.locations.getByIds
-  return asStub<ScopedDb>({ locations: { getByIds } });
+/** ScopedDb stub exposing only `locations.getCurrentByIds`. */
+function locationDb(getCurrentByIds: ReturnType<typeof vi.fn>): ScopedDb {
+  // helper only reaches scopedDb.locations.getCurrentByIds
+  return asStub<ScopedDb>({ locations: { getCurrentByIds } });
 }
 
 /** ScopedDb stub exposing `sequenceElements.listByIds`. */

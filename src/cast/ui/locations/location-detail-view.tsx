@@ -11,18 +11,16 @@ import { Skeleton } from '@/ui/shadcn/skeleton';
 import { useUploadLocationReference } from '@/shots/ui/use-media-upload';
 import {
   locationSheetVariantKeys,
-  useDiscardSequenceLocationSheetVariant,
+  useDiscardLocationSheetVariant,
+  useLocationDivergentVariants,
   useLocationSheetVersions,
-  usePromoteSequenceLocationSheetVariant,
+  usePromoteLocationSheetVariant,
   useSelectLocationSheetVersion,
-  useSequenceLocationDivergentVariants,
-  useUndiscardSequenceLocationSheetVariant,
+  useUndiscardLocationSheetVariant,
 } from '@/cast/ui/use-location-sheet-variants';
 import {
   restoreSequenceLocation,
-  sequenceLocationKeys,
-  type TeamLibraryLocation,
-  useAddLocationToLibrary,
+  useTeamLocationCurrent,
   useLocationSheetStaleness,
   useRegenerateLocationSheet,
   useShotIdsForLocation,
@@ -30,6 +28,10 @@ import {
   useSequenceLocations,
   useSoftDeleteSequenceLocation,
 } from '@/cast/ui/use-sequence-locations';
+import { locationChannelId } from '@/cast/cast-channel';
+import type { TeamLocation } from '@/cast/server/db/locations';
+import { invalidateLocations } from '@/cast/ui/location-keys';
+import { useLocationPhotos } from '@/cast/ui/use-team-locations';
 import type { LocationSheetVariant } from '@/platform/server/db/schema';
 import { errorMessage } from '@/platform/errors';
 import { useRealtime } from '@/platform/ui/realtime/client';
@@ -51,40 +53,47 @@ import { estimateImageCost } from '@/billing/cost-estimation';
 import { resolveSheetImageModel } from '@/cast/sheet-image-model';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import {
-  ArrowLeft,
-  Library,
-  Loader2,
-  MapPin,
-  RefreshCw,
-  Trash2,
-} from 'lucide-react';
+import { ArrowLeft, Loader2, MapPin } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { LocationBibleForm } from './location-bible-form';
+import { LocationPhotos } from './location-photos';
 import { LocationPickerDialog } from './location-picker-dialog';
 import { LocationRecastConfirmDialog } from './location-recast-confirm-dialog';
 import { AppImage } from '@/ui/shadcn/app-image';
 
 type LocationDetailViewProps = {
-  sequenceId: string;
+  /**
+   * The sequence the location is shown in, or null from no sequence (the
+   * Locations page, #1695): the same bible, sheet and photos, with nothing
+   * of a sequence's.
+   */
+  sequenceId: string | null;
   locationId: string;
+  /** `none` when the page around it already names the location. */
+  header?: 'sequence' | 'none';
 };
 
 export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
   sequenceId,
   locationId,
+  header = 'sequence',
 }) => {
   const queryClient = useQueryClient();
-  const {
-    data: locations,
-    isLoading,
-    error,
-  } = useSequenceLocations(sequenceId);
-  const addToLibrary = useAddLocationToLibrary();
+  // Through a sequence, the row of its own list: it carries the link (first
+  // mention) and names the locations Replace must not offer. From no
+  // sequence, the location's current version. Only one of the two is asked.
+  const sequenceList = useSequenceLocations(sequenceId ?? '');
+  const teamRead = useTeamLocationCurrent(locationId, sequenceId === null);
+  const sequenceLocations = sequenceList.data;
+  const link = sequenceLocations?.find((l) => l.id === locationId);
+  const location = sequenceId === null ? teamRead.data : link;
+  const { isLoading, error } = sequenceId === null ? teamRead : sequenceList;
+  const { data: photos } = useLocationPhotos(locationId);
+  const channelId = locationChannelId(sequenceId, locationId);
   const recastLocation = useRecastLocation();
   const regenerateSheet = useRegenerateLocationSheet();
-  const { data: sequence } = useSequence(sequenceId);
+  const { data: sequence } = useSequence(sequenceId ?? undefined);
   const [sheetModel, setSheetModel] = useState<TextToImageModel | null>(null);
   const { data: sheetStaleness } = useLocationSheetStaleness(
     sequenceId,
@@ -105,6 +114,7 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
   // 60s undo toast whose closure survives this component's unmount.
   const handleRemove = useCallback(
     (name: string) => {
+      if (sequenceId === null) return;
       softDelete.mutate(
         { sequenceId, locationDbId: locationId },
         {
@@ -143,8 +153,7 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
   // Dialog states for recasting
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
-  const [selectedLibraryLocation, setSelectedLibraryLocation] =
-    useState<TeamLibraryLocation | null>(null);
+  const [replacement, setReplacement] = useState<TeamLocation | null>(null);
 
   // Track regenerating state from realtime events
   const [isRegenerating, setIsRegenerating] = useState(false);
@@ -195,48 +204,43 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
           setIsRegenerating(false);
           setRetryLabel(null);
           // The reference and its version strip are separate queries. A
-          // completed run appends a version after the kickoff mutation returns.
-          void queryClient.invalidateQueries({
-            queryKey: sequenceLocationKeys.list(sequenceId),
-          });
-          void queryClient.invalidateQueries({
-            queryKey: locationSheetVariantKeys.history(sequenceId, locationId),
-          });
+          // completed run appends a version after the kickoff mutation
+          // returns, and every sequence that uses the location reads it.
+          void invalidateLocations(queryClient);
         }
       }
     },
-    [locationId, queryClient, sequenceId]
+    [locationId, queryClient]
   );
 
-  // Subscribe to realtime events
+  // The sequence's channel, or the location's own from no sequence: where
+  // the sheet run reports.
   useRealtime({
-    channels: sequenceId ? [sequenceId] : [],
+    channels: [channelId],
     events: ['generation.location-sheet:progress'] as const,
     onData: handleRealtimeEvent,
-    enabled: !!sequenceId,
   });
 
-  const { data: divergentVariants } =
-    useSequenceLocationDivergentVariants(sequenceId);
+  const { data: divergentVariants } = useLocationDivergentVariants(
+    sequenceId,
+    locationId
+  );
   const invalidateDivergentKeys = useCallback(
-    () => [locationSheetVariantKeys.divergentBySequence(sequenceId)],
-    [sequenceId]
+    () => [locationSheetVariantKeys.divergent()],
+    []
   );
   useSheetStaleDetected({
-    channelId: sequenceId,
+    channelId,
     entityTypes: ['location'],
     invalidateKeys: invalidateDivergentKeys,
   });
-  const promoteVariant = usePromoteSequenceLocationSheetVariant();
-  const discardVariant = useDiscardSequenceLocationSheetVariant();
-  const undiscardVariant = useUndiscardSequenceLocationSheetVariant();
+  const promoteVariant = usePromoteLocationSheetVariant();
+  const discardVariant = useDiscardLocationSheetVariant();
+  const undiscardVariant = useUndiscardLocationSheetVariant();
   const [compareVariant, setCompareVariant] =
     useState<LocationSheetVariant | null>(null);
 
-  const locationDivergentVariant = useMemo(() => {
-    if (!divergentVariants) return undefined;
-    return divergentVariants.find((v) => v.parentId === locationId);
-  }, [divergentVariants, locationId]);
+  const locationDivergentVariant = divergentVariants?.[0];
 
   const handleDiscardWithUndo = useCallback(
     (variant: LocationSheetVariant) => {
@@ -295,8 +299,6 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
     [sequenceId, promoteVariant]
   );
 
-  const location = locations?.find((l) => l.id === locationId);
-
   // Determine if currently regenerating
   const isSheetGenerating =
     isRegenerating ||
@@ -327,14 +329,10 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
     if (!falPricing) return pricingPending ? undefined : null;
     return estimateImageCost(selectedSheetModel, '16:9', 1, {
       pricing: falPricing,
-      edit: Boolean(location?.libraryLocationId),
+      // Drawn from the photos when it has any.
+      edit: (photos?.length ?? 0) > 0,
     });
-  }, [
-    falPricing,
-    pricingPending,
-    selectedSheetModel,
-    location?.libraryLocationId,
-  ]);
+  }, [falPricing, pricingPending, selectedSheetModel, photos?.length]);
 
   const handleRegenerateSheet = useCallback(() => {
     regenerateSheet.mutate(
@@ -352,31 +350,33 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
     );
   }, [regenerateSheet, sequenceId, locationId, sheetModel]);
 
-  // Handle library location selection from picker
-  const handleLibraryLocationSelect = (
-    libraryLocation: TeamLibraryLocation
-  ) => {
-    setSelectedLibraryLocation(libraryLocation);
-    setIsConfirmOpen(true);
-  };
-
-  // Handle recast confirmation
+  // Replace (#1695): the sequence is re-pointed at another team location,
+  // so this page's location is no longer in it. Open the one it uses now.
   const handleRecastConfirm = () => {
-    if (!selectedLibraryLocation || !location?.referenceImageUrl) return;
+    if (!replacement || sequenceId === null) return;
+    const withLocationId = replacement.id;
 
     recastLocation.mutate(
-      {
-        locationId: location.id,
-        libraryLocationId: selectedLibraryLocation.id,
-      },
+      { sequenceId, locationId, withLocationId },
       {
         onSuccess: () => {
           setIsConfirmOpen(false);
-          setSelectedLibraryLocation(null);
+          setReplacement(null);
+          void navigate({
+            to: '/sequences/$id/locations/$locationId',
+            params: { id: sequenceId, locationId: withLocationId },
+            search: true,
+          });
         },
       }
     );
   };
+
+  // Replace offers neither this location nor one the sequence already uses.
+  const usedLocationIds = new Set([
+    locationId,
+    ...(sequenceLocations ?? []).map((l) => l.id),
+  ]);
 
   if (error) {
     return (
@@ -413,13 +413,22 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
         <MapPin className="h-16 w-16 text-muted-foreground/30" />
         <div className="text-center">
           <p className="text-sm font-medium">Location not found</p>
-          <Link
-            to="/sequences/$id/locations"
-            params={{ id: sequenceId }}
-            className="mt-2 text-sm text-primary hover:underline"
-          >
-            Back to locations
-          </Link>
+          {sequenceId === null ? (
+            <Link
+              to="/locations"
+              className="mt-2 text-sm text-primary hover:underline"
+            >
+              Back to Locations
+            </Link>
+          ) : (
+            <Link
+              to="/sequences/$id/locations"
+              params={{ id: sequenceId }}
+              className="mt-2 text-sm text-primary hover:underline"
+            >
+              Back to locations
+            </Link>
+          )}
         </div>
       </div>
     );
@@ -427,17 +436,20 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* Header with back button */}
-      <div className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
-        <Link
-          to="/sequences/$id/locations"
-          params={{ id: sequenceId }}
-          className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Link>
-        <h1 className="text-lg font-semibold">{location.name}</h1>
-      </div>
+      {header === 'sequence' && sequenceId !== null && (
+        <div className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
+          <Button variant="ghost" size="icon" asChild>
+            <Link
+              to="/sequences/$id/locations"
+              params={{ id: sequenceId }}
+              aria-label="Back to locations"
+            >
+              <ArrowLeft />
+            </Link>
+          </Button>
+          <h1 className="text-lg font-semibold">{location.name}</h1>
+        </div>
+      )}
 
       <ScrollArea className="flex-1 min-h-0">
         <div className="flex flex-col gap-6 p-4">
@@ -547,19 +559,13 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
                 disabled={regenerateSheet.isPending || isSheetGenerating}
               />
               <p className="text-xs text-muted-foreground">
-                Used for this location's reference. Shot stills still follow the
-                sequence image model.
+                Used for this location's reference only.
               </p>
               <Button
                 onClick={handleRegenerateSheet}
                 disabled={regenerateSheet.isPending}
               >
                 <InButtonCost estimate={sheetCostEstimate}>
-                  {regenerateSheet.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                  )}
                   {regenerateSheet.isPending
                     ? hasPriorSheet
                       ? 'Regenerating…'
@@ -573,35 +579,15 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
               </Button>
 
               <div className="flex flex-wrap gap-2">
-                {!location.libraryLocationId && (
+                {sequenceId !== null && (
                   <Button
                     variant="outline"
-                    onClick={() =>
-                      addToLibrary.mutate(
-                        { locationId: location.id },
-                        {
-                          onSuccess: () =>
-                            toast.success('Added to location library'),
-                          onError: (error) =>
-                            toast.error('Failed to add to library', {
-                              description: errorMessage(error),
-                            }),
-                        }
-                      )
-                    }
-                    disabled={addToLibrary.isPending}
+                    onClick={() => setIsPickerOpen(true)}
+                    disabled={isSheetGenerating}
                   >
-                    <Library className="mr-2 h-4 w-4" />
-                    {addToLibrary.isPending ? 'Adding…' : 'Add to Library'}
+                    Replace
                   </Button>
                 )}
-                <Button
-                  variant="outline"
-                  onClick={() => setIsPickerOpen(true)}
-                  disabled={isSheetGenerating}
-                >
-                  Replace from library
-                </Button>
                 <UploadMediaButton
                   label="Upload Reference"
                   pendingLabel="Uploading…"
@@ -622,16 +608,21 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
                     )
                   }
                 />
-                <Button
-                  variant="outline"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => setIsRemoveConfirmOpen(true)}
-                  disabled={softDelete.isPending}
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  {softDelete.isPending ? 'Removing…' : 'Remove'}
-                </Button>
+                {sequenceId !== null && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setIsRemoveConfirmOpen(true)}
+                    disabled={softDelete.isPending}
+                  >
+                    {softDelete.isPending ? 'Removing…' : 'Remove'}
+                  </Button>
+                )}
               </div>
+
+              <LocationPhotos
+                locationId={locationId}
+                disabled={isSheetGenerating}
+              />
 
               {shotData && shotData.count > 0 && (
                 <p className="text-sm text-muted-foreground">
@@ -647,21 +638,21 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
                 sequenceId={sequenceId}
                 location={location}
               />
-              {location.firstMentionSceneId && (
+              {link?.firstMentionSceneId && (
                 <div className="flex flex-col gap-1 rounded-lg bg-muted/50 p-3">
                   <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     First Appears
                   </p>
                   <p className="text-sm">
-                    {`Scene ${location.firstMentionSceneId}${
-                      location.firstMentionLine
-                        ? `, Line ${location.firstMentionLine}`
+                    {`Scene ${link.firstMentionSceneId}${
+                      link.firstMentionLine
+                        ? `, Line ${link.firstMentionLine}`
                         : ''
                     }`}
                   </p>
-                  {location.firstMentionText && (
+                  {link.firstMentionText && (
                     <p className="border-l-2 border-muted-foreground/30 pl-3 text-xs italic text-muted-foreground">
-                      "{location.firstMentionText}"
+                      "{link.firstMentionText}"
                     </p>
                   )}
                 </div>
@@ -677,7 +668,7 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
       </ScrollArea>
 
       <AlertDialog
-        open={isRemoveConfirmOpen}
+        open={isRemoveConfirmOpen && sequenceId !== null}
         onOpenChange={setIsRemoveConfirmOpen}
       >
         <AlertDialogContent>
@@ -686,8 +677,8 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
               Remove {location.name} from this sequence?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              The location is hidden from the sequence and prompt context. You
-              can undo from the toast right after removing.
+              It leaves this sequence and its prompts, and stays in your
+              locations. Undo is on the toast.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -705,17 +696,20 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
       <LocationPickerDialog
         open={isPickerOpen}
         onOpenChange={setIsPickerOpen}
-        onSelect={handleLibraryLocationSelect}
-        excludeLocationId={locationId}
+        onSelect={(picked) => {
+          setReplacement(picked);
+          setIsConfirmOpen(true);
+        }}
+        excludeLocationIds={usedLocationIds}
       />
 
-      {selectedLibraryLocation && (
+      {replacement && (
         <LocationRecastConfirmDialog
           open={isConfirmOpen}
           onOpenChange={setIsConfirmOpen}
           onConfirm={handleRecastConfirm}
           locationName={location.name}
-          libraryLocationName={selectedLibraryLocation.name}
+          withLocationName={replacement.name}
           affectedShotCount={shotData?.count ?? 0}
           isLoading={recastLocation.isPending}
         />

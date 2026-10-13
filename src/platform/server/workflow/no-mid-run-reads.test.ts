@@ -402,7 +402,7 @@ const ALLOWED_LIVE_READS: Record<string, SanctionedRead[]> = {
       why: 'buildRecastRegenerateSnapshots runs in the recast SERVER FNs, not a workflow — these reads ARE the trigger-time snapshot. The workflow-side export from this module is pure.',
     },
     {
-      read: 'sequenceLocations.listWithReferences',
+      read: 'locations.listWithReferences',
       bucket: 'TRIGGER-SNAPSHOT',
       why: 'Same server-fn snapshot builder.',
     },
@@ -558,9 +558,9 @@ const ALLOWED_LIVE_READS: Record<string, SanctionedRead[]> = {
       why: "Polls for /library-talent-sheet's write. NOTE defaultSheet's identity: the isDefault sheet, else a newest-first (createdAt DESC) scan of non-diverged sheets (src/cast/server/db/talent.ts:234) — so the gate opens on the newest convergent sheet, not necessarily the one the user will see as default later.",
     },
     {
-      read: 'locations.getByIds',
+      read: 'locations.getCurrentByIds',
       bucket: 'WAIT-GATE',
-      why: "Polls for /library-location-sheet's referenceImageUrl.",
+      why: "Polls the team locations the writer picked for /location-sheet's referenceImageUrl (#1695). A location deleted from the team is left out of the read.",
     },
     {
       read: 'sequenceElements.listByIds',

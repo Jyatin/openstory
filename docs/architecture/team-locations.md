@@ -293,21 +293,38 @@ reference's hash. So that such a sheet does not read stale on deploy:
 - The legacy shapes and the column go after `LEGACY_HASH_UNTIL`
   (2026-12-31).
 
-**Proof** (2026-10-13, sample rows only, not a production copy): the file
-was run as one transaction on scratch SQLite, and through `wrangler d1
-migrations apply --local` on a scratch local D1 that had every earlier
-migration and hand-made rows of each kind: a location with a bible version
-and a selected sheet, one from before bible history, one removed from its
-sequence, one drawn from a library reference, a team library location with
-two uploaded images and a parked sheet, one with no image, and a public
-template with a parked sheet. Both runs: every location kept its id and got
-its sequence's team; one link each, the remove carried to `removed_at`;
-every bible version has a rendering; the library locations became locations
-with their sheet and photos; the template and its parked sheet are gone;
-`foreign_key_check` empty. Control: with a cascading foreign key planted on
-`sequence_locations` the guard fails the file and nothing changes. Not yet
-run: a copy of production, or a remote D1. The PR-preview deploy runs it on
-an empty remote D1.
+**Proof** (2026-10-13, sample rows): the file was run as one transaction on
+scratch SQLite, and through `wrangler d1 migrations apply --local` on a
+scratch local D1 that had every earlier migration and hand-made rows of
+each kind: a location with a bible version and a selected sheet, one from
+before bible history, one removed from its sequence, one drawn from a
+library reference, a team library location with two uploaded images and a
+parked sheet, one with no image, and a public template with a parked sheet.
+Both runs: every location kept its id and got its sequence's team; one link
+each, the remove carried to `removed_at`; every bible version has a
+rendering; the library locations became locations with their sheet and
+photos; the template and its parked sheet are gone; `foreign_key_check`
+empty. Control: with a cascading foreign key planted on
+`sequence_locations` the guard fails the file and nothing changes.
+
+**Proof** (2026-10-14, production copy): the same file, on a throwaway
+SQLite database loaded with the 2026-10-07 production export (schema, then
+rows). That export's last recorded migration is
+`20261004082252_backfill_team_characters_cast`, so the eight files from
+`20261006232126_loosen_character_children` through this one were applied
+after the load, each file as one transaction. Load had no foreign-key
+violations. After: 2,732 sequence locations each kept its id, took its
+sequence's team, and got one link (the old `deleted_at` on
+`removed_at`, none `attached`, the location's own `deleted_at` null, bible
+pointer `coalesce(selected, own id)`). 27 team library locations became
+locations under their own ids; the 23 that had an image became a sheet
+version; 43 uploaded images became reference photos. 3 public or template
+library rows were not carried. Bible versions went from 2,735 to 2,762,
+the 27 new ones, and every version has a rendering. All 2,763 sheet
+variants stayed, plus the 23 library images; `parent_type` is gone and
+`portrait_url` is present. `location_library` and `location_sheets` are
+gone. `foreign_key_check` empty. Not run on a remote D1. The PR-preview
+deploy runs it on an empty remote D1.
 
 ## The deploy window
 

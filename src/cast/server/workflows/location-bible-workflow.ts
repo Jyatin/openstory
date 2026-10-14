@@ -235,11 +235,11 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
 
     const settled = await Promise.allSettled(spawnAwaitPromises);
 
-    // Re-assemble the SequenceLocationMinimal[] result in input order. For any
-    // child that failed, fall back to the inserted DB row (the child workflow's
-    // `onFailure` already marked the row `failed` and emitted the realtime
-    // event, so the UI is up to date — we just need a non-throwing return so
-    // the rest of the bible succeeds).
+    // Re-assemble the SequenceLocationMinimal[] result in input order. A failed
+    // child falls back to the inserted row. The row is already `failed`: the
+    // child's `onFailure` when the child started, or `failReferenceClaim` in
+    // the catch above when the spawn never started. Either path has emitted
+    // the realtime event, so this return only lets the rest of the bible finish.
     const seqLocations: SequenceLocationMinimal[] = input.locationBible.map(
       (location, index) => {
         // Promise.allSettled returns one entry per input promise, so `outcome`

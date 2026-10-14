@@ -35,6 +35,9 @@ export const TeamLocationCard: React.FC<{
             {location.referenceStatus === 'generating' && (
               <p className="text-xs text-muted-foreground">Drawing sheet…</p>
             )}
+            {location.referenceStatus === 'failed' && (
+              <p className="text-xs text-destructive">Sheet failed</p>
+            )}
           </div>
         )}
       </div>

@@ -227,7 +227,14 @@ type LiveReference = {
 /** A location as a read from no sequence returns it. */
 export type LocationWithReference = Location & LiveReference;
 
-/** A location read through a sequence's link. */
+/**
+ * A location read through a sequence's link.
+ *
+ * `deletedAt` on this read is the link's `removedAt`, and `consistencyTag`
+ * is the script's tag when the link stored one. Neither is the team row's
+ * own field. A bible write diffs the location's own row; do not pass this
+ * read to `updateBible` (`LocationBibleUpdate` refuses `linkId`).
+ */
 export type SequenceLocation = Location & LocationLink;
 export type SequenceLocationWithReference = LocationWithReference &
   LocationLink;

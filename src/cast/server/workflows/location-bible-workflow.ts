@@ -153,36 +153,38 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
         }
         const locationDbId = row.id;
         const bibleVersionId = row.selectedBibleVersionId;
+        // Set once the claim step returns, so a spawn that never starts can
+        // clear that claim. Null means the claim step itself did not finish.
+        let claimed: { versionId: string; held: boolean } | null = null;
 
-        const unclaimedFields: SheetPayload<LocationSheetWorkflowInput> = {
-          userId: input.userId,
-          teamId,
-          sequenceId,
-          reservationId: input.reservationId,
-          locationDbId,
-          bibleVersionId,
-          locationName: row.name,
-          // The bible the row holds, which is the version the claim guards:
-          // analysis does not rewrite a location another sequence has used.
-          locationMetadata: toLocationMetadata(row),
-          imageModel: model,
-          // ponytail: photos are not snapshotted (this workflow has no
-          // trigger). A location with photos reads stale after this run;
-          // snapshot them on the payload when a trigger is added.
-          referencePhotoUrls: [],
-        };
-        // Tracked like any other sheet (#1113): hashed, and landed through a
-        // claim a bible edit revokes. The claim is taken only while the bible
-        // version the upsert returned is still live (#1863): an edit that
-        // landed since had no claim to revoke, so the child parks.
-        const unclaimed = {
-          ...unclaimedFields,
-          snapshotInputHash:
-            await computeLocationSheetHashFromDto(unclaimedFields),
-        };
-        const referenceVersionId = await step.do(
-          `claim-location-sheet-${index}`,
-          async () => {
+        try {
+          const unclaimedFields: SheetPayload<LocationSheetWorkflowInput> = {
+            userId: input.userId,
+            teamId,
+            sequenceId,
+            reservationId: input.reservationId,
+            locationDbId,
+            bibleVersionId,
+            locationName: row.name,
+            // The bible the row holds, which is the version the claim guards:
+            // analysis does not rewrite a location another sequence has used.
+            locationMetadata: toLocationMetadata(row),
+            imageModel: model,
+            // ponytail: photos are not snapshotted (this workflow has no
+            // trigger). A location with photos reads stale after this run;
+            // snapshot them on the payload when a trigger is added.
+            referencePhotoUrls: [],
+          };
+          // Tracked like any other sheet (#1113): hashed, and landed through a
+          // claim a bible edit revokes. The claim is taken only while the bible
+          // version the upsert returned is still live (#1863): an edit that
+          // landed since had no claim to revoke, so the child parks.
+          const unclaimed = {
+            ...unclaimedFields,
+            snapshotInputHash:
+              await computeLocationSheetHashFromDto(unclaimedFields),
+          };
+          claimed = await step.do(`claim-location-sheet-${index}`, async () => {
             const claim = await scopedDb.locations.claimReferenceIfUnmoved(
               locationDbId,
               { bibleVersionId }
@@ -192,27 +194,42 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
                 `[LocationBibleWorkflow:cf] Location ${locationDbId} moved before the claim; its sheet parks`
               );
             }
-            return claim.versionId;
-          }
-        );
-        const childPayload: LocationSheetWorkflowInput = {
-          ...unclaimed,
-          referenceVersionId,
-        };
+            return claim;
+          });
+          const childPayload: LocationSheetWorkflowInput = {
+            ...unclaimed,
+            referenceVersionId: claimed.versionId,
+          };
 
-        return await spawnAndAwaitChild<
-          LocationSheetWorkflowInput,
-          LocationSheetWorkflowResult
-        >(step, {
-          binding: childBinding,
-          parentBindingName: 'LOCATION_BIBLE_WORKFLOW',
-          parentInstanceId,
-          childId: `location-sheet:${locationDbId}`,
-          childPayload,
-          spawnStepName: `spawn-location-sheet-${index}`,
-          awaitStepName: `await-location-sheet-${index}`,
-          timeout: '30 minutes',
-        });
+          return await spawnAndAwaitChild<
+            LocationSheetWorkflowInput,
+            LocationSheetWorkflowResult
+          >(step, {
+            binding: childBinding,
+            parentBindingName: 'LOCATION_BIBLE_WORKFLOW',
+            parentInstanceId,
+            childId: `location-sheet:${locationDbId}`,
+            childPayload,
+            spawnStepName: `spawn-location-sheet-${index}`,
+            awaitStepName: `await-location-sheet-${index}`,
+            timeout: '30 minutes',
+          });
+        } catch (error) {
+          // The child's onFailure does not run when the spawn never starts,
+          // or the await times out while the child is still queued.
+          // createBulk already left the row `generating`, and a taken claim
+          // keeps the generation plan waiting.
+          if (claimed === null || claimed.held) {
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            await scopedDb.locations.failReferenceClaim(
+              locationDbId,
+              claimed?.versionId ?? null,
+              reason
+            );
+          }
+          throw error;
+        }
       }
     );
 

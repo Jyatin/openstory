@@ -53,6 +53,7 @@ const claimReferenceIfUnmoved = vi.fn(async () => ({
   versionId: 'guarded',
   held: true,
 }));
+const failReferenceClaim = vi.fn(async () => undefined);
 
 type BulkEntry = { locationId: string; name: string; boundTo: string | null };
 
@@ -89,7 +90,12 @@ function makeScopedDb(selectedBibleVersionId: string | null): WorkflowScopedDb {
     )
   );
   return asStub<WorkflowScopedDb>({
-    locations: { createBulk, claimReference, claimReferenceIfUnmoved },
+    locations: {
+      createBulk,
+      claimReference,
+      claimReferenceIfUnmoved,
+      failReferenceClaim,
+    },
   });
 }
 
@@ -190,6 +196,50 @@ describe('LocationBibleWorkflow sheet claim', () => {
     expect(mockSpawnAndAwaitChild.mock.calls[0]?.[1]).toMatchObject({
       childPayload: { referenceVersionId: 'missed' },
     });
+  });
+
+  it('fails the claim when the sheet child never starts', async () => {
+    mockSpawnAndAwaitChild.mockRejectedValueOnce(new Error('spawn refused'));
+    const result = await makeWorkflow().runBody(
+      event,
+      step,
+      makeScopedDb('bible-v1')
+    );
+
+    expect(failReferenceClaim).toHaveBeenCalledWith(
+      'loc-db-1',
+      'guarded',
+      'spawn refused'
+    );
+    expect(result[0]).toMatchObject({ referenceStatus: 'failed' });
+  });
+
+  it('fails the generating row when the claim step itself throws', async () => {
+    claimReferenceIfUnmoved.mockRejectedValueOnce(new Error('claim refused'));
+    const result = await makeWorkflow().runBody(
+      event,
+      step,
+      makeScopedDb('bible-v1')
+    );
+
+    expect(failReferenceClaim).toHaveBeenCalledWith(
+      'loc-db-1',
+      null,
+      'claim refused'
+    );
+    expect(mockSpawnAndAwaitChild).not.toHaveBeenCalled();
+    expect(result[0]).toMatchObject({ referenceStatus: 'failed' });
+  });
+
+  it('leaves the row alone when a missed claim’s child never starts', async () => {
+    claimReferenceIfUnmoved.mockResolvedValueOnce({
+      versionId: 'missed',
+      held: false,
+    });
+    mockSpawnAndAwaitChild.mockRejectedValueOnce(new Error('spawn refused'));
+    await makeWorkflow().runBody(event, step, makeScopedDb('bible-v1'));
+
+    expect(failReferenceClaim).not.toHaveBeenCalled();
   });
 
   it('fails a run whose upsert result names no bible version, claiming nothing', async () => {

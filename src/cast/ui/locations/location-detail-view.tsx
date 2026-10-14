@@ -157,6 +157,8 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
 
   // Track regenerating state from realtime events
   const [isRegenerating, setIsRegenerating] = useState(false);
+  // The failure from the latest realtime event, before the row is re-read.
+  const [sheetFailure, setSheetFailure] = useState<string | null>(null);
   // Set while a content-flag retry is in flight so the spinner says so
   // instead of reading as a hang; cleared with every non-retry event.
   const [retryLabel, setRetryLabel] = useState<string | null>(null);
@@ -188,6 +190,7 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
 
         if (payload.status === 'generating') {
           setIsRegenerating(true);
+          setSheetFailure(null);
           setRetryLabel(
             !('phase' in data) || data.phase !== 'retrying'
               ? null
@@ -203,6 +206,13 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
         } else {
           setIsRegenerating(false);
           setRetryLabel(null);
+          setSheetFailure(
+            payload.status === 'failed' &&
+              'error' in data &&
+              typeof data.error === 'string'
+              ? data.error
+              : null
+          );
           // The reference and its version strip are separate queries. A
           // completed run appends a version after the kickoff mutation
           // returns, and every sequence that uses the location reads it.
@@ -305,6 +315,12 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
     recastLocation.isPending ||
     regenerateSheet.isPending ||
     location?.referenceStatus === 'generating';
+  const sheetError = isSheetGenerating
+    ? null
+    : (sheetFailure ??
+      (location?.referenceStatus === 'failed'
+        ? location.referenceError
+        : null));
   const isSheetStale = sheetStaleness === 'stale';
   const hasPriorSheet = Boolean(
     location?.referenceGeneratedAt || location?.selectedReferenceVersionId
@@ -507,6 +523,13 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
                         {sheetBusyLabel}
                       </p>
                     </div>
+                  ) : sheetError ? (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-6">
+                      <MapPin className="h-16 w-16 text-muted-foreground/20" />
+                      <p className="text-sm text-destructive" role="alert">
+                        {sheetError}
+                      </p>
+                    </div>
                   ) : (
                     <div className="flex h-full w-full flex-col items-center justify-center gap-2">
                       <MapPin className="h-16 w-16 text-muted-foreground/20" />
@@ -524,6 +547,11 @@ export const LocationDetailView: React.FC<LocationDetailViewProps> = ({
                     </div>
                   ) : null}
                 </div>
+                {sheetError && location.referenceImageUrl ? (
+                  <p className="text-sm text-destructive" role="alert">
+                    {sheetError}
+                  </p>
+                ) : null}
                 <SheetVersionStrip
                   label="Versions"
                   selectingId={

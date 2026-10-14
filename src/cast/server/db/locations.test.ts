@@ -149,6 +149,21 @@ const rowOf = async (id: string) => {
 const eventKinds = async () =>
   (await db.select().from(sequenceEvents)).map((event) => event.kind);
 
+describe('a location added by hand', () => {
+  it('attaches the link so analysis cannot rewrite it', async () => {
+    const created = await locs().create(
+      {
+        sequenceId,
+        locationId: 'loc_hand',
+        name: 'Office',
+        rendering: PHOTOREAL_RENDERING,
+      },
+      { source: 'edit', createdBy: actorId }
+    );
+    expect(created.attached).toBe(true);
+  });
+});
+
 describe('a read through a sequence', () => {
   it("answers with the link's script id, first mention and remove", async () => {
     const created = await locs().create(

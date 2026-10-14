@@ -62,7 +62,6 @@ import {
   loadSceneContextBySequenceFromDb,
   resolveSceneForShot,
 } from '@/shots/server/scene-script';
-import { typedEntries } from '@/platform/typed-object';
 import { matchLocationsToScene } from '@/shots/scene-matching';
 import {
   locationBibleChanged,
@@ -121,7 +120,12 @@ const touchesSheet = (fields: readonly (keyof LocationBible)[]) =>
  * the location sheet and the prompts that project them, in every sequence
  * that uses the location — purely by hash derivation.
  */
-export type LocationBibleUpdate = Partial<LocationBible>;
+/**
+ * A bible patch. `linkId` is refused so a sequence read cannot be passed
+ * whole: that read's `consistencyTag` is the script tag, and its
+ * `deletedAt` is the link's remove.
+ */
+export type LocationBibleUpdate = Partial<LocationBible> & { linkId?: never };
 
 /** A photo to add as input for a location's sheet. */
 export type NewReferencePhoto = { url: string; path: string };
@@ -622,7 +626,10 @@ export function createLocationsMethods(db: Database, teamId: string) {
           locationId: id,
           scriptLocationId: data.locationId,
           ...firstMention,
-          attached: false,
+          // A location the writer added (`source: 'edit'`) is attached, so a
+          // later analysis that reuses the script id cannot rewrite it.
+          // Analysis-made locations stay unattached.
+          attached: opts.source === 'edit',
         }),
       ]);
       return { ...(await requireLinked(data.sequenceId, id)), held: false };
@@ -1275,7 +1282,8 @@ export function createLocationsMethods(db: Database, teamId: string) {
       else await requireLinked(sequenceId, id);
       const existing = await ownOf(id);
       const prev: Record<string, string | null> = {};
-      for (const [key, value] of typedEntries(data)) {
+      for (const key of LOCATION_BIBLE_FIELDS) {
+        const value = data[key];
         if (value === undefined) continue;
         prev[key] = existing[key] ?? null;
       }

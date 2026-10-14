@@ -33,9 +33,10 @@ There are no rooms or looks. A room is its own location.
     a team location, and when a link was re-pointed by Replace. Scenes keep
     the script's tag, so a read through the link answers with it. Null when
     the location's own tag is the script's.
-  - `attached`: the writer picked the location for this sequence, or
-    matching bound a script location to one they picked, rather than
-    analysis making it here. Analysis never rewrites an attached location.
+  - `attached`: the writer picked the location for this sequence, added
+    it by hand (`locations.create` with `source: 'edit'`), or matching
+    bound a script location to one they picked. Analysis making it here
+    leaves the flag false. Analysis never rewrites an attached location.
   - Unique on (`sequenceId`, `locationId`) and on (`sequenceId`,
     `scriptLocationId`).
   - Soft-remove from a sequence is the link's `removedAt`. The location
@@ -197,8 +198,9 @@ Photos are input to the sheet (`listPhotos`, `addPhotos`, `removePhoto`).
 - The set of photos is in the sheet hash. Order is not.
 - Adding or removing a photo clears the sheet claim, so a run in flight
   parks its result instead of landing it.
-- Adding photos from the Locations page starts a sheet run
-  (`addTeamLocationPhotos`).
+- Adding or removing a photo does not start a sheet run.
+  `finalizeLocationUploadFn` calls `addPhotos`. The sheet stays as it is
+  until Generate.
 
 ## Rendering
 

@@ -249,7 +249,7 @@ flowchart LR
 **Location Bible Workflow** (`src/cast/server/workflows/location-bible-workflow.ts`):
 
 - `create-location-records` calls `locations.createBulk`, upserting on the sequence's script ids. A location analysis makes here lands as a team location, a `location_bible_versions` row (#1600) and a `sequence_location_links` row. A script location matching bound to a team location (`boundTo`) is linked to it and nothing is made. A location the writer attached, or that another sequence has used, is never rewritten (`analysisMayNotRewrite`): its link is brought back and its first mention refreshed
-- Spawns one `LocationSheetWorkflow` child per location this run made (parallel). A matched or attached location gets none: the sequence reads the team location's sheet as it is
+- Spawns one `LocationSheetWorkflow` child per location this run made (parallel). A matched or attached location gets none, and so does one `createBulk` marks `held` (another sequence has used it): the sequence reads the team location's sheet as it is
 - Claims each reference (`claim-location-sheet-<n>`) and stamps the child with its input hash (#1113). The claim is one guarded UPDATE (`locations.claimReferenceIfUnmoved`, #1863): taken only while the bible version the upsert returned is still live. An edit that landed since leaves it untaken; the child still runs and its sheet parks
 - The child payload carries the bible the row holds (`toLocationMetadata`, `rendering` included), `bibleVersionId`, and `referencePhotoUrls: []`: this workflow has no trigger to snapshot photos at
 

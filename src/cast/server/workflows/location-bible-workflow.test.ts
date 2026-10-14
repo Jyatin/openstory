@@ -272,6 +272,39 @@ describe('LocationBibleWorkflow with a matched team location (#1695)', () => {
     });
   });
 
+  it('draws no sheet for a location another sequence holds, even when this link is not attached', async () => {
+    createBulk.mockImplementationOnce(async (rows) =>
+      rows.map((row) => ({
+        ...row,
+        id: 'shared-loc',
+        attached: false,
+        held: true,
+        selectedBibleVersionId: 'team-bible',
+        name: 'Diner',
+        description: 'as the other sequence left it',
+        consistencyTag: 'diner',
+        referenceImageUrl: '/r2/team/diner.png',
+        referenceStatus: 'completed',
+        referenceInputHash: 'team-hash',
+        selectedReferenceVersionId: 'team-sheet',
+      }))
+    );
+    const result = await makeWorkflow().runBody(
+      event,
+      step,
+      makeScopedDb('bible-v1')
+    );
+
+    expect(claimReferenceIfUnmoved).not.toHaveBeenCalled();
+    expect(mockSpawnAndAwaitChild).not.toHaveBeenCalled();
+    expect(result[0]).toMatchObject({
+      id: 'shared-loc',
+      referenceImageUrl: '/r2/team/diner.png',
+      referenceStatus: 'completed',
+      selectedReferenceVersionId: 'team-sheet',
+    });
+  });
+
   it('draws no sheet for a location the writer attached, matched or not', async () => {
     createBulk.mockImplementationOnce(async (rows) =>
       rows.map((row) => ({

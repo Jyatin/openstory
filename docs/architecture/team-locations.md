@@ -165,7 +165,9 @@ LLM call and prompt (`LocationMatchingWorkflow`). A match is now a link.
   for another location is taken over (when the sequence had no link to the
   bound location) or deleted (when it had). That other location stays the
   team's.
-- `LocationBibleWorkflow` draws no sheet for a bound or attached location.
+- `LocationBibleWorkflow` draws no sheet for a bound or attached location,
+  or for one `createBulk` marks `held` (another sequence has used it). The
+  flag is the upsert's own decision, carried on that step's result.
 - A picked location with no sheet is not matched. The matching run waits a
   bounded time for sheets still being drawn.
 
@@ -178,9 +180,10 @@ archived sequence included.
 
 `locations.create` and `createBulk` ask it on every call. For a held
 location the link is brought back, a bulk pass refreshes its first mention,
-and the bible analysis wrote for it is dropped. A location analysis made
-here, that only this sequence has ever used, is re-analysed as before: a new
-bible version when a field moved.
+and the bible analysis wrote for it is dropped. `createBulk` sets `held`
+on that row, and the sheet fan-out draws nothing for it. A location
+analysis made here, that only this sequence has ever used, is re-analysed
+as before: a new bible version when a field moved, and `held` is false.
 
 ## Reference photos
 

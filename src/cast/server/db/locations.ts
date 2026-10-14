@@ -597,7 +597,7 @@ export function createLocationsMethods(db: Database, teamId: string) {
       createdBy: string | null;
       bulk: boolean;
     }
-  ): Promise<SequenceLocationWithReference> => {
+  ): Promise<SequenceLocationWithReference & { held: boolean }> => {
     const [existing] = await selectLinked().where(
       and(
         inSequence(data.sequenceId),
@@ -625,7 +625,7 @@ export function createLocationsMethods(db: Database, teamId: string) {
           attached: false,
         }),
       ]);
-      return await requireLinked(data.sequenceId, id);
+      return { ...(await requireLinked(data.sequenceId, id)), held: false };
     }
     // A re-analysis re-extracting a removed location brings it back (#1108).
     const link = db
@@ -634,7 +634,13 @@ export function createLocationsMethods(db: Database, teamId: string) {
       .where(eq(sequenceLocationLinks.id, existing.linkId));
     if (await analysisMayNotRewrite(existing.id, data.sequenceId)) {
       await link;
-      return await requireLinked(data.sequenceId, existing.id);
+      // `held` is for the sheet fan-out: this sequence's link can stay
+      // unattached while another sequence uses the location. The bible
+      // above was dropped, so no sheet is drawn either.
+      return {
+        ...(await requireLinked(data.sequenceId, existing.id)),
+        held: true,
+      };
     }
     // A field left out keeps its value, as the column upsert did.
     const { statements } = bibleWrite(
@@ -654,7 +660,10 @@ export function createLocationsMethods(db: Database, teamId: string) {
               .where(and(eq(locations.id, existing.id), inTeam)),
           ]),
     ]);
-    return await requireLinked(data.sequenceId, existing.id);
+    return {
+      ...(await requireLinked(data.sequenceId, existing.id)),
+      held: false,
+    };
   };
 
   /**
@@ -1003,8 +1012,13 @@ export function createLocationsMethods(db: Database, teamId: string) {
     create: async (
       data: NewSequenceLocation,
       opts: { source: BibleVersionSource; createdBy: string | null }
-    ): Promise<SequenceLocationWithReference> =>
-      await upsertOne(data, { ...opts, bulk: false }),
+    ): Promise<SequenceLocationWithReference> => {
+      const { held: _held, ...row } = await upsertOne(data, {
+        ...opts,
+        bulk: false,
+      });
+      return row;
+    },
 
     /**
      * One analysis pass. Upserts on the sequence's script ids, so a
@@ -1016,23 +1030,28 @@ export function createLocationsMethods(db: Database, teamId: string) {
     createBulk: async (
       data: readonly AnalysedLocation[],
       opts: { source: BibleVersionSource; createdBy: string | null }
-    ): Promise<SequenceLocationWithReference[]> => {
-      const results: SequenceLocationWithReference[] = [];
+    ): Promise<Array<SequenceLocationWithReference & { held: boolean }>> => {
+      const results: Array<SequenceLocationWithReference & { held: boolean }> =
+        [];
       for (const { boundTo, ...location } of data) {
         results.push(
           boundTo === null
             ? await upsertOne(location, { ...opts, bulk: true })
-            : await bind(
-                location.sequenceId,
-                location.locationId,
-                boundTo,
-                location.consistencyTag ?? null,
-                {
-                  firstMentionSceneId: location.firstMentionSceneId ?? null,
-                  firstMentionText: location.firstMentionText ?? null,
-                  firstMentionLine: location.firstMentionLine ?? null,
-                }
-              )
+            : {
+                ...(await bind(
+                  location.sequenceId,
+                  location.locationId,
+                  boundTo,
+                  location.consistencyTag ?? null,
+                  {
+                    firstMentionSceneId: location.firstMentionSceneId ?? null,
+                    firstMentionText: location.firstMentionText ?? null,
+                    firstMentionLine: location.firstMentionLine ?? null,
+                  }
+                )),
+                // A bind copies nothing and draws nothing.
+                held: true,
+              }
         );
       }
       return results;

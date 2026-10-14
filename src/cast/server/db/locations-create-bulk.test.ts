@@ -181,6 +181,7 @@ describe('createBulk', () => {
       deletedAt: null,
       rendering: PHOTOREAL_RENDERING,
       referenceStatus: 'generating',
+      held: false,
       firstMentionSceneId: 'scene_001',
       firstMentionText: 'INT. DINER',
       firstMentionLine: 2,
@@ -324,6 +325,8 @@ describe('createBulk never rewrites a location that is not this sequence’s', (
       deletedAt: null,
       firstMentionText: 'a later mention',
       attached: false,
+      // The sheet fan-out reads this: the bible was left alone.
+      held: true,
     });
     expect(await versionsOf(made.id)).toHaveLength(1);
     // The other sequence reads the same, unchanged location.
@@ -370,6 +373,7 @@ describe('createBulk never rewrites a location that is not this sequence’s', (
       deletedAt: null,
       // A sheet input moved, so the run in flight lost its claim (#1113).
       pendingPromoteReferenceVersionId: null,
+      held: false,
     });
     expect(claim).not.toBeNull();
     expect(await versionsOf(made.id)).toHaveLength(2);
@@ -416,6 +420,7 @@ describe('createBulk with an entry bound to a team location', () => {
       firstMentionLine: 4,
       // Scenes carry the script's tag, so the link answers with it.
       consistencyTag: 'script_diner',
+      held: true,
     });
     expect(await db.select().from(locations)).toHaveLength(1);
     expect(await versionsOf(diner.id)).toHaveLength(1);

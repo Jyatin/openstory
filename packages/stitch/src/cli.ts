@@ -1,5 +1,5 @@
 /**
- * `stitch` plays local stills and videos in the browser, and `stitch skill`
+ * `stitch` plays local and remote stills and videos in the browser, and `stitch skill`
  * copies the /stitch command and the stitch-player contract into
  * .agents/skills and .claude/skills.
  */
@@ -14,32 +14,37 @@ import {
 } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
-import { pipeline } from 'node:stream';
+import { pipeline, Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { readImageSize } from './image-size.js';
 import type { PlaybackClip, PlaybackCue } from './playback-clip.js';
 import { placeTimelineCues } from './place-cues.js';
-import { canvasResolution } from './resolution.js';
-import type { ClipDimensions } from './resolution.js';
 import { parseSubtitles } from './subtitles.js';
 import type { TimelineCue } from './subtitles.js';
-import { readAudioDuration, readVideoDisplaySize } from './video-size.js';
+import {
+  isHttpUrl,
+  readAudioDuration,
+  readVideoDisplaySize,
+} from './video-size.js';
 
 const STILL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const DEFAULT_STILL_SECONDS = 4;
 
-export const usage = `Usage: stitch [--music file] [--music-gain db] [--subs file] [--port n] [--no-open]
+export const usage = `Usage: stitch [--frame 16:9|WxH] [--music file] [--music-gain db] [--subs file] [--port n] [--no-open]
              <file> [--poster file] [--fallback file] [--audio file] [--seconds n] [--cue start-end text]...
 
        stitch skill [--global]
 
-Play local stills and videos in the browser. A .mp4, .webm, or .mov is a
+Play stills and videos in the browser. Each file is a path or an http(s) URL;
+the page reads a URL through this server. A .mp4, .webm, or .mov is a
 video, and it plays the sound inside the file. A .png, .jpg, .jpeg, or .webp is a
 still. --poster belongs to an opening video and shows while the cut opens.
 --fallback, --audio, and --seconds belong to the still before them. --cue belongs to the clip before
 it. --subs is one .srt or .vtt for the whole cut. --seconds defaults to ${DEFAULT_STILL_SECONDS}.
+--frame is the shape of the page, as a ratio (9:16) or a size (1080x1920).
+Without it the first clip sets the shape. Every clip is fitted into that box.
 
 stitch skill copies stitch and stitch-player into .agents/skills/ and
 .claude/skills/. Agents load stitch as the /stitch command. stitch-player
@@ -71,6 +76,8 @@ type LocalClip = Still | Video;
 
 export type LocalCut = {
   clips: LocalClip[];
+  /** --frame. Null means the first clip sets the box. */
+  frame: { width: number; height: number } | null;
   music: string | null;
   musicGainDb: number;
   /** Whole-cut subtitles. Null when --subs was omitted. */
@@ -121,6 +128,7 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
   let music: string | null = null;
   let musicGainDb = 0;
   let subs: TimelineCue[] | null = null;
+  let frame: { width: number; height: number } | null = null;
   let open = true;
   let port = 0;
 
@@ -144,6 +152,12 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
       i += 1;
       continue;
     }
+    if (arg === '--frame') {
+      if (frame) throw new Error('--frame is already set');
+      frame = frameValue(take(arg, i));
+      i += 1;
+      continue;
+    }
     if (arg === '--music-gain') {
       const value = argv[i + 1];
       if (value === undefined) throw new Error(`${arg} needs a value`);
@@ -159,11 +173,11 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
     if (arg === '--subs') {
       if (subs) throw new Error('--subs is already set');
       const file = await existingFile(take(arg, i), cwd);
-      const extension = extname(file).toLowerCase();
+      const extension = extensionOf(file);
       if (!new Set(['.srt', '.vtt', '.webvtt']).has(extension)) {
         throw new Error('--subs needs an .srt or .vtt file');
       }
-      subs = parseSubtitles(await readFile(file, 'utf8'), file);
+      subs = parseSubtitles((await readBytes(file)).toString('utf8'), file);
       i += 1;
       continue;
     }
@@ -213,7 +227,7 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
   }
 
   if (clips.length === 0) throw new Error('Name at least one still or video');
-  return { clips, music, musicGainDb, subs, open, port };
+  return { clips, frame, music, musicGainDb, subs, open, port };
 }
 
 function previousClip(clips: LocalClip[], flag: string): LocalClip {
@@ -234,7 +248,7 @@ function previousStill(clips: LocalClip[], flag: string): Still {
 
 async function clipFromFile(arg: string, cwd: string): Promise<LocalClip> {
   const file = await existingFile(arg, cwd);
-  const extension = extname(file).toLowerCase();
+  const extension = extensionOf(file);
   if (VIDEO_EXTENSIONS.has(extension)) {
     return { kind: 'video', file, poster: null, cues: [] };
   }
@@ -263,7 +277,7 @@ async function stillSize(
 ): Promise<{ width: number; height: number }> {
   let size: { width: number; height: number };
   try {
-    size = readImageSize(await readFile(file));
+    size = readImageSize(await readBytes(file));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unreadable image';
     throw new Error(`${arg}: ${message}`);
@@ -277,14 +291,29 @@ async function stillSize(
 /** A poster or fallback: a png, jpeg, or webp the browser can draw. */
 async function imageFile(arg: string, cwd: string): Promise<string> {
   const file = await existingFile(arg, cwd);
-  if (!STILL_EXTENSIONS.has(extname(file).toLowerCase())) {
+  if (!STILL_EXTENSIONS.has(extensionOf(file))) {
     throw new Error(`${arg} is not a png, jpg, jpeg, or webp`);
   }
   await stillSize(file, arg);
   return file;
 }
 
+/** The bytes of a path or an http(s) URL. Stills and --subs are read whole. */
+async function readBytes(file: string): Promise<Buffer> {
+  if (!isHttpUrl(file)) return readFile(file);
+  const response = await fetch(file);
+  if (!response.ok) throw new Error(`${file}: HTTP ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/** The extension of a path, or of a URL's path. */
+function extensionOf(file: string): string {
+  const path = isHttpUrl(file) ? new URL(file).pathname : file;
+  return extname(path).toLowerCase();
+}
+
 async function existingFile(arg: string, cwd: string): Promise<string> {
+  if (isHttpUrl(arg)) return arg;
   const file = resolve(cwd, arg);
   let info: Awaited<ReturnType<typeof stat>>;
   try {
@@ -315,6 +344,19 @@ function positive(value: string, flag: string): number {
   return parsed;
 }
 
+/** 16:9 or 1080x1920. Only the ratio matters: the page is a box of this shape. */
+function frameValue(value: string): { width: number; height: number } {
+  const match = /^(\d+)[x:](\d+)$/i.exec(value);
+  const width = Number(match?.[1]);
+  const height = Number(match?.[2]);
+  if (!(width > 0 && height > 0)) {
+    throw new Error(
+      `--frame needs a ratio like 9:16 or a size like 1080x1920, got ${value}`
+    );
+  }
+  return { width, height };
+}
+
 function portValue(value: string): number {
   if (!/^\d+$/.test(value))
     throw new Error(`--port needs a port number, got ${value}`);
@@ -343,7 +385,7 @@ export async function serveCut(cut: LocalCut): Promise<ServedCut> {
   const files = new Map<string, string>();
   const urls = new Map<string, string>();
   const urlFor = async (file: string): Promise<string> => {
-    const key = await realpath(file);
+    const key = isHttpUrl(file) ? file : await realpath(file);
     const existing = urls.get(key);
     if (existing) return existing;
     const id = String(files.size);
@@ -353,23 +395,27 @@ export async function serveCut(cut: LocalCut): Promise<ServedCut> {
     return url;
   };
 
+  // Only --subs needs every clip's length, and only a first video sets the
+  // box; nothing else is read before the page opens. A remote clip that will
+  // not open fails in the player, with its message.
   const clips: PlaybackClip[] = [];
-  const videoDimensions: ClipDimensions[] = [];
-  const clipDimensions: ClipDimensions[] = [];
   const durations: number[] = [];
-  for (const clip of cut.clips) {
+  let frame = cut.frame;
+  for (const [i, clip] of cut.clips.entries()) {
     if (clip.kind === 'video') {
-      const size = await readVideoDisplaySize(clip.file);
-      videoDimensions.push(size);
-      clipDimensions.push(size);
-      durations.push(size.durationSeconds);
+      const probe =
+        (i === 0 && !frame) || cut.subs
+          ? await readVideoDisplaySize(clip.file)
+          : null;
+      if (i === 0 && !frame && probe) frame = probe;
+      durations.push(probe?.durationSeconds ?? 0);
       clips.push({
         videoUrl: await urlFor(clip.file),
         posterUrl: clip.poster ? await urlFor(clip.poster) : null,
         cues: clip.cues,
       });
     } else {
-      clipDimensions.push({ width: clip.width, height: clip.height });
+      if (i === 0 && !frame) frame = { width: clip.width, height: clip.height };
       durations.push(stillDuration(clip));
       clips.push({
         imageUrl: await urlFor(clip.file),
@@ -390,7 +436,7 @@ export async function serveCut(cut: LocalCut): Promise<ServedCut> {
       if (clip) clips[i] = { ...clip, cues: [...clip.cues, ...extra] };
     }
   }
-  const frame = canvasResolution(videoDimensions, clipDimensions);
+  if (!frame) throw new Error('Name at least one still or video');
   return {
     clips,
     frameWidth: frame.width,
@@ -513,7 +559,8 @@ async function handleRequest(
       response.end('No such media');
       return;
     }
-    await sendFile(request, response, file, mediaType(file), stderr);
+    if (isHttpUrl(file)) await proxyUrl(request, response, file, stderr);
+    else await sendFile(request, response, file, mediaType(file), stderr);
     return;
   }
   const relative =
@@ -568,6 +615,42 @@ async function sendFile(
   else pipeFile(file, response, stderr, parsed);
 }
 
+/**
+ * A remote file, fetched with the browser's Range and streamed back on this
+ * origin, so export and picture-in-picture work without CORS on the remote.
+ */
+async function proxyUrl(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: string,
+  stderr: Writer
+): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (request.headers.range !== undefined)
+    headers.Range = request.headers.range;
+  const upstream = await fetch(url, { method: request.method, headers });
+  // Our own type from the extension, never the remote's: a remote answering
+  // text/html must not become a page on this origin.
+  const forwarded: Record<string, string> = {
+    'Content-Type': mediaType(url),
+    'X-Content-Type-Options': 'nosniff',
+  };
+  for (const name of ['Accept-Ranges', 'Content-Length', 'Content-Range']) {
+    const value = upstream.headers.get(name);
+    if (value !== null) forwarded[name] = value;
+  }
+  response.writeHead(upstream.status, forwarded);
+  if (request.method === 'HEAD' || upstream.body === null) {
+    response.end();
+    return;
+  }
+  pipeline(Readable.from(upstream.body), response, (error) => {
+    if (error && error.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+      stderr.write(`${url}: ${error.message}\n`);
+    }
+  });
+}
+
 /** pipeline closes the file when the browser cancels a read (every seek). */
 function pipeFile(
   file: string,
@@ -605,7 +688,7 @@ function byteRange(
 }
 
 function mediaType(file: string): string {
-  switch (extname(file).toLowerCase()) {
+  switch (extensionOf(file)) {
     case '.html':
       return 'text/html; charset=utf-8';
     case '.js':

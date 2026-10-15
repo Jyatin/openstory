@@ -183,7 +183,8 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
   /** Existence guards, plus the anchor fallback for triggers that carry no `frameId`. */
   frames: Pick<ScopedDb['frames'], 'getAnchorByShot' | 'getById'>;
   /**
-   * `getCurrentByIds`: wait-for-sheets polling. `listWithReferences`: live
+   * `getCurrentByIds`: the team locations a matching run's writer picked.
+   * `listWithReferences`: live
    * bibles for a re-render.
    */
   locations: Pick<

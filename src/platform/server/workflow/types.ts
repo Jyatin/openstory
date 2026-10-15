@@ -1496,8 +1496,8 @@ export type LibraryLocationMatch = {
   /** The team location's id (`locations.id`). */
   libraryLocationId: string;
   libraryLocationName: string;
-  /** That location's sheet, for the progress stream. */
-  referenceImageUrl: string;
+  /** That location's sheet, for the progress stream; null while none has landed. */
+  referenceImageUrl: string | null;
 };
 
 /**

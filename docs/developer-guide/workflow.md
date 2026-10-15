@@ -214,10 +214,10 @@ Bibles already exist from Phase 1. This workflow only matches.
 
 1. Uses `input.locationBible` from scene-split (no location-extraction LLM)
 2. **Location matching** (skipped if no `suggestedLocationIds`):
-   - Reads the picked team locations by id (`liveRead.locations.getCurrentByIds`), waiting a bounded time for a sheet still being drawn. Name and description come from the trigger snapshot (`suggestedLocations`); only the sheet image can arrive late
-   - LLM matches script locations to them (requires confidence >= 0.5). A picked location with no sheet is not matched
+   - Reads the picked team locations by id (`liveRead.locations.getCurrentByIds`) once; nothing waits for a sheet. Name and description come from the trigger snapshot (`suggestedLocations`)
+   - LLM matches script locations to them (requires confidence >= 0.5). A pick is matched whether or not it has a sheet yet
    - Deduplicates matches, emits `generation.location:matched`
-3. **Returns:** `{ matches: libraryLocationMatches }`. Each match is `{ locationId (the script id), libraryLocationId (the team location's id), libraryLocationName, referenceImageUrl }`
+3. **Returns:** `{ matches: libraryLocationMatches }`. Each match is `{ locationId (the script id), libraryLocationId (the team location's id), libraryLocationName, referenceImageUrl (null while no sheet has landed) }`
 
 A match is a link, not a copy (#1695): the location bible workflow links the sequence to the matched team location and draws nothing. See `docs/architecture/team-locations.md` § Matching binds a link.
 

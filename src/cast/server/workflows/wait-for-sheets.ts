@@ -1,23 +1,16 @@
 /**
  * Durable "wait for sheet generation" helpers for the matching workflows.
  *
- * When a user adds new talent or a new location while creating a sequence
- * (`TalentSuggestionSelector` → `createTalentFn`,
- * `LocationSuggestionSelector` → `createTeamLocationFn`), the sheet /
- * reference-image generation runs in a *separate*, fire-and-forget workflow
- * (`/library-talent-sheet`, `/location-sheet`). The sequence's
- * `analyze-script-workflow` then spawns `talent-matching` / `location-matching`
- * which read those sheets:
- *
- *   - talent matching uses `talent.defaultSheet?.imageUrl` as the casting
- *     reference image, and
- *   - location matching SKIPS any team location without a
- *     `referenceImageUrl`.
+ * When a user adds new talent while creating a sequence
+ * (`TalentSuggestionSelector` → `createTalentFn`), the sheet generation runs in
+ * a *separate*, fire-and-forget workflow (`/library-talent-sheet`). The
+ * sequence's `analyze-script-workflow` then spawns `talent-matching`, which uses
+ * `talent.defaultSheet?.imageUrl` as the casting reference image.
  *
  * If the sheet workflow hasn't finished by the time matching reads the row, the
  * pre-cast talent gets an empty reference image (so the character no longer
- * looks like the chosen person) and the pre-selected location is dropped from
- * matching entirely. This helper closes that race by polling the DB in a
+ * looks like the chosen person). Location matching needs no wait: a match is a
+ * link and draws no sheet (#1695). This helper closes that race by polling the DB in a
  * durable loop until every still-pending entity has its sheet — bounded by a
  * timeout so a sheet that failed to generate can't stall the whole pipeline.
  *
@@ -26,7 +19,6 @@
  */
 
 import type {
-  LocationWithReference,
   SequenceElement,
   TalentWithSheets,
 } from '@/platform/server/db/schema';
@@ -37,13 +29,12 @@ import type { WorkflowSleepDuration, WorkflowStep } from 'cloudflare:workers';
 const logger = getLogger(['openstory', 'workflow', 'wait-for-sheets']);
 
 /**
- * The three polling reads these helpers make. Narrowed so callers hand over
+ * The polling reads these helpers make. Narrowed so callers hand over
  * `scopedDb.liveRead` — polling a sibling workflow's late writes is one of the
  * sanctioned live reads, and this type is what says so at the boundary.
  */
 export type WaitForSheetsReadDb = {
   talent: Pick<ScopedDb['talent'], 'getByIds'>;
-  locations: Pick<ScopedDb['locations'], 'getCurrentByIds'>;
   sequenceElements: Pick<ScopedDb['sequenceElements'], 'listByIds'>;
 };
 
@@ -172,32 +163,6 @@ export async function waitForTalentSheets(
   });
 }
 
-/**
- * Block until every requested team location has a sheet, or the timeout
- * expires. One that already has a sheet short-circuits; one just made on the
- * create screen gets it once its `/location-sheet` run finishes.
- */
-export async function waitForLocationReferences(
-  step: WorkflowStep,
-  scopedDb: WaitForSheetsReadDb,
-  locationIds: string[],
-  opts?: { onWaitNeeded?: OnWaitNeeded }
-): Promise<WaitForSheetsResult<LocationWithReference>> {
-  return pollUntilReady(step, {
-    ids: locationIds,
-    stepPrefix: 'wait-location-refs',
-    label: 'location references',
-    onWaitNeeded: opts?.onWaitNeeded,
-    check: async () => {
-      const rows = await scopedDb.locations.getCurrentByIds(locationIds);
-      return {
-        rows,
-        pendingIds: rows.filter((l) => !l.referenceImageUrl).map((l) => l.id),
-      };
-    },
-  });
-}
-
 /** Element vision statuses that are still in flight (not terminal). */
 const ELEMENT_VISION_IN_FLIGHT = new Set(['pending', 'analyzing']);
 
@@ -223,7 +188,7 @@ const ELEMENT_VISION_IN_FLIGHT = new Set(['pending', 'analyzing']);
  *
  * `rows` is every element the wait read — the scan's rows, overlaid with the
  * final poll's — so the caller consumes them instead of reading again (the
- * talent/location waits' shape, #1113).
+ * talent wait's shape, #1113).
  */
 export async function waitForElementVision(
   step: WorkflowStep,

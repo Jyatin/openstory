@@ -169,8 +169,8 @@ LLM call and prompt (`LocationMatchingWorkflow`). A match is now a link.
 - `LocationBibleWorkflow` draws no sheet for a bound or attached location,
   or for one `createBulk` marks `held` (another sequence has used it). The
   flag is the upsert's own decision, carried on that step's result.
-- A picked location with no sheet is not matched. The matching run waits a
-  bounded time for sheets still being drawn.
+- A picked location is matched whether or not it has a sheet yet. The
+  matching run reads the picks once and waits for no sheet.
 
 ## Analysis never rewrites an attached or shared location
 

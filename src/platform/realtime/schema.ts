@@ -337,7 +337,7 @@ export const realtimeSchema = {
           locationId: z.string(),
           libraryLocationId: z.string(),
           libraryLocationName: z.string(),
-          referenceImageUrl: z.string(),
+          referenceImageUrl: z.string().nullable(),
           description: z.string().optional(),
         })
       ),

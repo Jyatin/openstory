@@ -242,6 +242,18 @@ describe('createBulk', () => {
     ).rejects.toThrow('Sequence not found');
     expect(await db.select().from(locations)).toEqual([]);
   });
+
+  it('a re-analysis that brings back a removed link brings back a deleted location too', async () => {
+    const [made] = await bulk([entry('loc_001')]);
+    if (!made) throw new Error('test setup: createBulk returned nothing');
+    await locs().softDelete(sequenceId, made.id, { actorId });
+    expect(await locs().softDeleteForTeam(made.id)).toBe(true);
+
+    const [back] = await bulk([entry('loc_001')]);
+    expect(back).toMatchObject({ id: made.id, deletedAt: null });
+    const team = await locs().getCurrent(made.id);
+    expect(team.deletedAt).toBeNull();
+  });
 });
 
 describe('createBulk never rewrites a location that is not this sequence’s', () => {

@@ -634,13 +634,27 @@ export function createLocationsMethods(db: Database, teamId: string) {
       ]);
       return { ...(await requireLinked(data.sequenceId, id)), held: false };
     }
-    // A re-analysis re-extracting a removed location brings it back (#1108).
-    const link = db
-      .update(sequenceLocationLinks)
-      .set({ removedAt: null, ...(opts.bulk ? firstMention : {}) })
-      .where(eq(sequenceLocationLinks.id, existing.linkId));
+    // A re-analysis re-extracting a removed location brings it back (#1108),
+    // and a deleted one too, as `restore` does: a live link never points at
+    // a deleted location.
+    const link = [
+      db
+        .update(sequenceLocationLinks)
+        .set({ removedAt: null, ...(opts.bulk ? firstMention : {}) })
+        .where(eq(sequenceLocationLinks.id, existing.linkId)),
+      db
+        .update(locations)
+        .set({ deletedAt: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(locations.id, existing.id),
+            inTeam,
+            isNotNull(locations.deletedAt)
+          )
+        ),
+    ] as const;
     if (await analysisMayNotRewrite(existing.id, data.sequenceId)) {
-      await link;
+      await db.batch(link);
       // `held` is for the sheet fan-out: this sequence's link can stay
       // unattached while another sequence uses the location. The bible
       // above was dropped, so no sheet is drawn either.
@@ -656,7 +670,7 @@ export function createLocationsMethods(db: Database, teamId: string) {
       opts
     );
     await db.batch([
-      link,
+      ...link,
       ...statements,
       ...(opts.bulk || data.referenceStatus === undefined
         ? []

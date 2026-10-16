@@ -49,9 +49,40 @@ import { NonRetryableError } from 'cloudflare:workflows';
 import { flushAnalytics } from '@/platform/server/observability/flush-analytics';
 import { captureProductEvent } from '@/platform/server/observability/product-events';
 import { getLogger, serializeError } from '@/platform/logger';
+import {
+  reportRunEnded,
+  reportRunStarted,
+} from '@/platform/server/realtime/runs';
 import { isContentRejectionError } from '@/models/content-rejection';
+import { bindingNameForReportedRun } from './trigger-bindings';
 
 const logger = getLogger(['openstory', 'workflow', 'cf', 'base']);
+
+/** Tries inside one step. A failed report must not fail the generation. */
+const RUN_REPORT_ATTEMPTS = 3;
+
+/**
+ * A few tries inside one step. The step result is checkpointed, including
+ * `{ ok: false }`, so a resume does not retry. An engine abort is rethrown
+ * so the step is not stored. The alarm can only drop a row that this start
+ * actually inserted.
+ */
+async function reportRunOnce(report: () => Promise<void>): Promise<{
+  ok: boolean;
+}> {
+  let last: unknown;
+  for (let attempt = 0; attempt < RUN_REPORT_ATTEMPTS; attempt++) {
+    try {
+      await report();
+      return { ok: true };
+    } catch (error) {
+      if (isEngineAbortError(error)) throw error;
+      last = error;
+    }
+  }
+  logger.warn('workflow run report failed', { err: last });
+  return { ok: false };
+}
 
 async function zeroOwnedReservation(
   payload: UserWorkflowContext,
@@ -187,6 +218,29 @@ export abstract class OpenStoryWorkflowEntrypoint<
     // Pull the parent notify hint once — used on both success and failure
     // paths so a parent's `spawnAndAwaitChild` always sees a terminal event.
     const parentHint = extractParentHint(event.payload);
+    const sequenceId = extractSequenceId(event.payload);
+
+    // Count this run on the sequence chip (#2113). No sequence (the
+    // Characters page, the library) is out of scope. Each report is its own
+    // step so a resume replays the cached result and does not count twice.
+    if (sequenceId) {
+      const reportedSequenceId = sequenceId;
+      await step.do('report-run-started', () =>
+        reportRunOnce(() =>
+          reportRunStarted(reportedSequenceId, {
+            instanceId: event.instanceId,
+            binding: bindingNameForReportedRun(
+              this.constructor.name,
+              event.instanceId
+            ),
+            className: this.constructor.name,
+            label: this.failureLabel,
+            parentInstanceId: parentHint?.parentInstanceId ?? null,
+            startedAt: Date.now(),
+          })
+        )
+      );
+    }
 
     try {
       const result = await this.runImpl(event, step, scopedDb);
@@ -208,6 +262,14 @@ export abstract class OpenStoryWorkflowEntrypoint<
             { err: notifyError }
           );
         }
+      }
+      if (sequenceId) {
+        const reportedSequenceId = sequenceId;
+        await step.do('report-run-ended', () =>
+          reportRunOnce(() =>
+            reportRunEnded(reportedSequenceId, event.instanceId)
+          )
+        );
       }
       return result;
     } catch (error) {
@@ -347,6 +409,17 @@ export abstract class OpenStoryWorkflowEntrypoint<
             { err: logError }
           );
         }
+      }
+
+      // A real failure ends the run. An engine abort never reaches here, so
+      // a resume does not drop the chip's count for work that continues.
+      if (sequenceId) {
+        const reportedSequenceId = sequenceId;
+        await step.do('report-run-ended', () =>
+          reportRunOnce(() =>
+            reportRunEnded(reportedSequenceId, event.instanceId)
+          )
+        );
       }
 
       // `WorkflowValidationError` is a plain Error subclass, which CF treats as

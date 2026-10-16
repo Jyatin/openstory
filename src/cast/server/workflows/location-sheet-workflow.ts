@@ -222,16 +222,18 @@ export class LocationSheetWorkflow extends OpenStoryWorkflowEntrypoint<LocationS
               bibleVersionId: input.bibleVersionId ?? null,
               model: generationParams.model,
               workflowRunId,
-              activity: {
-                sequenceId,
-                actorId: input.userId,
-                targetType: 'location',
-                targetId: locationDbId,
-                summary: sheetGeneratedSummary(
-                  input.locationName,
-                  generationParams.model
-                ),
-              },
+              activity: sequenceId
+                ? {
+                    sequenceId,
+                    actorId: input.userId,
+                    targetType: 'location',
+                    targetId: locationDbId,
+                    summary: sheetGeneratedSummary(
+                      input.locationName,
+                      generationParams.model
+                    ),
+                  }
+                : null,
             }),
           logger,
           logTag: '[LocationSheetWorkflow:cf]',

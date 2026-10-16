@@ -10,6 +10,7 @@
  */
 
 import { DEFAULT_IMAGE_MODEL } from '@/models/models';
+import { sheetStartedSummary } from '@/sequences/model-label';
 import { generateId } from '@/platform/id';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { SequenceLocationMinimal } from '@/platform/server/db/schema';
@@ -33,6 +34,8 @@ import { getLogger } from '@/platform/logger';
 const logger = getLogger(['openstory', 'workflow', 'location-bible']);
 
 export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationBibleWorkflowInput> {
+  protected override readonly failureLabel = 'Location design';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<LocationBibleWorkflowInput>>,
     step: WorkflowStep,
@@ -187,7 +190,12 @@ export class LocationBibleWorkflow extends OpenStoryWorkflowEntrypoint<LocationB
           claimed = await step.do(`claim-location-sheet-${index}`, async () => {
             const claim = await scopedDb.locations.claimReferenceIfUnmoved(
               locationDbId,
-              { bibleVersionId }
+              { bibleVersionId },
+              {
+                sequenceId,
+                actorId: input.userId,
+                summary: sheetStartedSummary(row.name, model),
+              }
             );
             if (!claim.held) {
               logger.warn(

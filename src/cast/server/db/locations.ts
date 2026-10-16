@@ -69,7 +69,10 @@ import {
   pickLocationBible,
   mergeDefined,
 } from './bible-versions';
-import { buildEventInsert } from '@/sequences/server/db/sequence-events';
+import {
+  buildEventInsert,
+  buildEventInsertIfPresent,
+} from '@/sequences/server/db/sequence-events';
 import { LOCATION_SHEET_BIBLE_FIELDS } from '@/shots/input-hash';
 
 /** A new location's bible where the caller left a field out. */
@@ -1204,10 +1207,18 @@ export function createLocationsMethods(db: Database, teamId: string) {
      */
     claimReference: async (
       id: string,
-      opts: { markGenerating: boolean }
+      opts: {
+        markGenerating: boolean;
+        /** The start line. Null for a run started from no sequence. */
+        activity?: {
+          sequenceId: string;
+          actorId: string | null;
+          summary: string;
+        } | null;
+      }
     ): Promise<string> => {
       const versionId = generateId();
-      const [row] = await db
+      const claim = db
         .update(locations)
         .set({
           pendingPromoteReferenceVersionId: versionId,
@@ -1216,9 +1227,33 @@ export function createLocationsMethods(db: Database, teamId: string) {
             : {}),
           updatedAt: new Date(),
         })
-        .where(and(eq(locations.id, id), inTeam))
-        .returning({ id: locations.id });
-      if (!row) throw new NotFoundError('Location not found');
+        .where(and(eq(locations.id, id), inTeam));
+      if (!opts.activity) {
+        const [row] = await claim.returning({ id: locations.id });
+        if (!row) throw new NotFoundError('Location not found');
+        return versionId;
+      }
+      const [claimed] = await db.batch([
+        claim.returning({ id: locations.id }),
+        buildEventInsertIfPresent(
+          db,
+          {
+            id: generateId(),
+            sequenceId: opts.activity.sequenceId,
+            actorId: opts.activity.actorId,
+            kind: 'sheet.started',
+            targetType: 'location',
+            targetId: id,
+            summary: opts.activity.summary,
+          },
+          locations,
+          and(
+            eq(locations.id, id),
+            eq(locations.pendingPromoteReferenceVersionId, versionId)
+          )
+        ),
+      ]);
+      if (claimed.length === 0) throw new NotFoundError('Location not found');
       return versionId;
     },
 
@@ -1230,10 +1265,16 @@ export function createLocationsMethods(db: Database, teamId: string) {
      */
     claimReferenceIfUnmoved: async (
       id: string,
-      snapshot: { bibleVersionId: string }
+      snapshot: { bibleVersionId: string },
+      /** The start line. Null for a run started from no sequence. */
+      activity: {
+        sequenceId: string;
+        actorId: string | null;
+        summary: string;
+      } | null = null
     ): Promise<{ versionId: string; held: boolean }> => {
       const versionId = generateId();
-      const result = await db
+      const claim = db
         .update(locations)
         .set({
           pendingPromoteReferenceVersionId: versionId,
@@ -1245,9 +1286,32 @@ export function createLocationsMethods(db: Database, teamId: string) {
             inTeam,
             eq(locations.selectedBibleVersionId, snapshot.bibleVersionId)
           )
-        )
-        .returning({ id: locations.id });
-      return { versionId, held: result.length > 0 };
+        );
+      if (!activity) {
+        const result = await claim.returning({ id: locations.id });
+        return { versionId, held: result.length > 0 };
+      }
+      const [claimed] = await db.batch([
+        claim.returning({ id: locations.id }),
+        buildEventInsertIfPresent(
+          db,
+          {
+            id: generateId(),
+            sequenceId: activity.sequenceId,
+            actorId: activity.actorId,
+            kind: 'sheet.started',
+            targetType: 'location',
+            targetId: id,
+            summary: activity.summary,
+          },
+          locations,
+          and(
+            eq(locations.id, id),
+            eq(locations.pendingPromoteReferenceVersionId, versionId)
+          )
+        ),
+      ]);
+      return { versionId, held: claimed.length > 0 };
     },
 
     /** The twin of `characterLooks.failSheetClaim`. */

@@ -251,8 +251,10 @@ describe('createBulk', () => {
 
     const [back] = await bulk([entry('loc_001')]);
     expect(back).toMatchObject({ id: made.id, deletedAt: null });
-    const team = await locs().getCurrent(made.id);
-    expect(team.deletedAt).toBeNull();
+    expect(await locs().getCurrent(made.id)).toMatchObject({
+      id: made.id,
+      deletedAt: null,
+    });
   });
 });
 

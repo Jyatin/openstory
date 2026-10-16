@@ -30,6 +30,7 @@ import {
 
 const STILL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
+const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.ogg']);
 const DEFAULT_STILL_SECONDS = 4;
 
 export const usage = `Usage: stitch [--frame 16:9|WxH] [--music file] [--music-gain db] [--subs file] [--port n] [--no-open]
@@ -40,7 +41,7 @@ export const usage = `Usage: stitch [--frame 16:9|WxH] [--music file] [--music-g
 Play stills and videos in the browser. Each file is a path or an http(s) URL;
 the page reads a URL through this server. A .mp4, .webm, or .mov is a
 video, and it plays the sound inside the file. A .png, .jpg, .jpeg, or .webp is a
-still. --poster belongs to an opening video and shows while the cut opens.
+still. A .wav, .mp3, .m4a, or .ogg is a line or the music. --poster belongs to an opening video and shows while the cut opens.
 --fallback, --audio, and --seconds belong to the still before them. --cue belongs to the clip before
 it. --subs is one .srt or .vtt for the whole cut. --seconds defaults to ${DEFAULT_STILL_SECONDS}.
 --frame is the shape of the page, as a ratio (9:16) or a size (1080x1920).
@@ -147,8 +148,7 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
     }
     if (arg === '--music') {
       if (music) throw new Error('--music is already set');
-      music = await existingFile(take(arg, i), cwd);
-      await readAudioDuration(music);
+      music = (await audioFile(take(arg, i), cwd)).file;
       i += 1;
       continue;
     }
@@ -206,9 +206,9 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
     if (arg === '--audio' || arg === '--seconds') {
       const clip = previousStill(clips, arg);
       if (arg === '--audio') {
-        const file = await existingFile(take(arg, i), cwd);
-        clip.audioSeconds += await readAudioDuration(file);
-        clip.audio.push(file);
+        const audio = await audioFile(take(arg, i), cwd);
+        clip.audioSeconds += audio.seconds;
+        clip.audio.push(audio.file);
       } else clip.seconds = positive(take(arg, i), arg);
       i += 1;
       continue;
@@ -227,7 +227,15 @@ async function parseCut(argv: string[], cwd: string): Promise<LocalCut> {
   }
 
   if (clips.length === 0) throw new Error('Name at least one still or video');
-  return { clips, frame, music, musicGainDb, subs, open, port };
+  return {
+    clips,
+    frame,
+    music,
+    musicGainDb,
+    subs,
+    open,
+    port,
+  };
 }
 
 function previousClip(clips: LocalClip[], flag: string): LocalClip {
@@ -296,6 +304,23 @@ async function imageFile(arg: string, cwd: string): Promise<string> {
   }
   await stillSize(file, arg);
   return file;
+}
+
+/**
+ * A line or the music: a wav, mp3, m4a, or ogg that reads as audio. The
+ * ending is checked as well as the bytes, so a line is served with an audio
+ * type (the proxy types a remote by its ending; anything else is opaque
+ * bytes).
+ */
+async function audioFile(
+  arg: string,
+  cwd: string
+): Promise<{ file: string; seconds: number }> {
+  const file = await existingFile(arg, cwd);
+  if (!AUDIO_EXTENSIONS.has(extensionOf(file))) {
+    throw new Error(`${arg} is not a wav, mp3, m4a, or ogg`);
+  }
+  return { file, seconds: await readAudioDuration(file) };
 }
 
 /** The bytes of a path or an http(s) URL. Stills and --subs are read whole. */
@@ -483,10 +508,13 @@ export async function startPreview(options: {
 }): Promise<{ url: string; close: () => Promise<void> }> {
   const pageDir = resolve(options.pageDir);
   const stderr = options.stderr ?? process.stderr;
+  // Set once listening; no request arrives before that.
+  let host = '';
   const server = createServer((request, response) => {
     void handleRequest(
       request,
       response,
+      host,
       options.served,
       pageDir,
       stderr
@@ -517,6 +545,7 @@ export async function startPreview(options: {
   if (address === null || typeof address === 'string') {
     throw new Error('The preview server has no port');
   }
+  host = `127.0.0.1:${address.port}`;
   return {
     url: `http://127.0.0.1:${address.port}/`,
     close: () =>
@@ -530,10 +559,27 @@ export async function startPreview(options: {
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
+  host: string,
   served: ServedCut,
   pageDir: string,
   stderr: Writer
 ): Promise<void> {
+  // Only the page this server opened talks to it. Another site's page can
+  // send a request here, and with DNS rebinding could read the answer,
+  // so a Host that is not this server's is refused (the printed 127.0.0.1
+  // URL exactly; localhost is refused too) and only GET and HEAD are
+  // answered: nothing here is a form, and the proxy never forwards a
+  // method a site chose.
+  if (request.headers.host !== host) {
+    response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    response.end(`Open http://${host}/ (this host is refused)`);
+    return;
+  }
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    response.writeHead(405, { Allow: 'GET, HEAD' });
+    response.end();
+    return;
+  }
   const url = new URL(request.url ?? '/', 'http://127.0.0.1');
   if (url.pathname === '/cut.json') {
     const body = JSON.stringify({
@@ -628,11 +674,12 @@ async function proxyUrl(
   const headers: Record<string, string> = {};
   if (request.headers.range !== undefined)
     headers.Range = request.headers.range;
-  const upstream = await fetch(url, { method: request.method, headers });
-  // Our own type from the extension, never the remote's: a remote answering
-  // text/html must not become a page on this origin.
+  // Always a GET upstream, whatever the page sent; a HEAD ends without a body.
+  const upstream = await fetch(url, { headers });
+  // Our own type from the extension, never the remote's, and only a media
+  // type: a remote must not become a page or a script on this origin.
   const forwarded: Record<string, string> = {
-    'Content-Type': mediaType(url),
+    'Content-Type': proxiedMediaType(url),
     'X-Content-Type-Options': 'nosniff',
   };
   for (const name of ['Accept-Ranges', 'Content-Length', 'Content-Range']) {
@@ -641,6 +688,8 @@ async function proxyUrl(
   }
   response.writeHead(upstream.status, forwarded);
   if (request.method === 'HEAD' || upstream.body === null) {
+    // A HEAD took a GET upstream: let go of the body it never wanted.
+    void upstream.body?.cancel();
     response.end();
     return;
   }
@@ -685,6 +734,14 @@ function byteRange(
   if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
   if (start < 0 || start >= size || end < start) return null;
   return { start, end: Math.min(end, size - 1) };
+}
+
+/** A video, audio, or raster image type; anything else is opaque bytes. */
+function proxiedMediaType(url: string): string {
+  const type = mediaType(url);
+  return /^(video|audio|image)\//.test(type) && type !== 'image/svg+xml'
+    ? type
+    : 'application/octet-stream';
 }
 
 function mediaType(file: string): string {

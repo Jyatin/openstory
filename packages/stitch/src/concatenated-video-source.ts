@@ -15,14 +15,18 @@
 import {
   ALL_FORMATS,
   CanvasSink,
-  EncodedPacketSink,
+  CustomSource,
   Input,
   type InputAudioTrack,
   type InputVideoTrack,
   UrlSource,
   type WrappedCanvas,
 } from 'mediabunny';
-import { createRangedSource } from './ranged-source.js';
+import {
+  createRangedReader,
+  createRangedSource,
+  type RangedReader,
+} from './ranged-source.js';
 import {
   canvasResolution,
   describeResolutions,
@@ -34,9 +38,6 @@ import type { StitchLogger } from './logger.js';
 import { assertPlaybackClips, type PlaybackClip } from './playback-clip.js';
 
 type CanvasFit = 'fill' | 'contain' | 'cover';
-
-/** How much of the next clip `prefetch` reads ahead of the cut. */
-const PREFETCH_SECONDS = 1;
 
 export type ClipSlice = {
   /** Index into the clips array. */
@@ -106,6 +107,8 @@ type StillFrame = HTMLImageElement | ImageBitmap;
 type OpenedClip = {
   inputs: Input[];
   videoTrack: InputVideoTrack | null;
+  /** The video file's reader; null for a still. */
+  reader: RangedReader | null;
   image: StillFrame | null;
   /** A rendered clip whose sound could not be decoded. */
   silent: boolean;
@@ -122,6 +125,7 @@ export class ConcatenatedVideoSource {
   #clips: readonly PlaybackClip[];
   private inputs: Input[] = [];
   private videoTracks: Array<InputVideoTrack | null> = [];
+  private readers: Array<RangedReader | null> = [];
   private images: Array<StillFrame | null> = [];
   private readonly abort = new AbortController();
   private audioTracks: OpenedClip['audioTracks'][] = [];
@@ -218,6 +222,7 @@ export class ConcatenatedVideoSource {
     this.inputs = inputs;
     this.images = opened.map((o) => o.image);
     this.videoTracks = videoTracks;
+    this.readers = opened.map((o) => o.reader);
     this.audioTracks = audioTracks;
     this.meta = {
       totalDurationSeconds: acc,
@@ -241,12 +246,13 @@ export class ConcatenatedVideoSource {
 
   private async openClip(clip: PlaybackClip, i: number): Promise<OpenedClip> {
     if (!('videoUrl' in clip)) return this.openStill(clip, i);
+    const reader = createRangedReader(clip.videoUrl);
     const input = new Input({
       formats: ALL_FORMATS,
-      source: createRangedSource(clip.videoUrl),
+      source: new CustomSource(reader),
     });
     try {
-      return await this.probeClip(input, i);
+      return await this.probeClip(input, reader, i);
     } catch (err) {
       input.dispose();
       throw err;
@@ -303,6 +309,7 @@ export class ConcatenatedVideoSource {
         inputs,
         image,
         videoTrack: null,
+        reader: null,
         silent: false,
         audioTracks,
         // A short recording must not rush the shot. A longer one still
@@ -340,7 +347,11 @@ export class ConcatenatedVideoSource {
     });
   }
 
-  private async probeClip(input: Input, i: number): Promise<OpenedClip> {
+  private async probeClip(
+    input: Input,
+    reader: RangedReader,
+    i: number
+  ): Promise<OpenedClip> {
     const videoTrack = await input.getPrimaryVideoTrack();
     if (!videoTrack) {
       throw new Error(`Clip ${i} has no video track`);
@@ -394,6 +405,7 @@ export class ConcatenatedVideoSource {
       inputs: [input],
       image: null,
       videoTrack,
+      reader,
       silent,
       audioTracks: usableAudio ? [{ track: usableAudio, offset: 0 }] : [],
       duration,
@@ -428,18 +440,35 @@ export class ConcatenatedVideoSource {
   }
 
   /**
-   * Read the opening second of clip `clipIndex`'s video so its bytes are in
-   * the range reader's cache before the playhead crosses into it — the first
-   * frame of a clip is otherwise a cold fetch at the cut. Stills have
-   * nothing to read.
+   * Fetch the whole of clip `clipIndex`'s video and hold it in memory
+   * (#2124). Resolves when it is all here. A still has nothing to fetch.
    */
-  async prefetch(clipIndex: number): Promise<void> {
-    const track = this.videoTracks[clipIndex];
-    if (!track) return;
-    const sink = new EncodedPacketSink(track);
-    for await (const packet of sink.packets()) {
-      if (this.disposed || packet.timestamp >= PREFETCH_SECONDS) return;
+  async download(clipIndex: number): Promise<void> {
+    await this.reader(clipIndex)?.fetchAll();
+  }
+
+  /** True while clip `clipIndex`'s video is streaming in. */
+  isDownloading(clipIndex: number): boolean {
+    return this.reader(clipIndex)?.isDownloading() ?? false;
+  }
+
+  /** The clip's video reader, null for a still; throws for no such clip. */
+  private reader(clipIndex: number): RangedReader | null {
+    const reader = this.readers[clipIndex];
+    if (reader === undefined) {
+      throw new Error(`ConcatenatedVideoSource: no clip ${clipIndex}`);
     }
+    return reader;
+  }
+
+  /** True once clip `clipIndex`'s video is all in memory; always for a still. */
+  isDownloaded(clipIndex: number): boolean {
+    return this.reader(clipIndex)?.isComplete() ?? true;
+  }
+
+  /** Let go of clip `clipIndex`'s bytes; a read fetches them again. */
+  drop(clipIndex: number): void {
+    this.reader(clipIndex)?.drop();
   }
 
   /**
@@ -580,6 +609,7 @@ export class ConcatenatedVideoSource {
     for (const input of this.inputs) input.dispose();
     this.inputs = [];
     this.videoTracks = [];
+    this.readers = [];
     this.audioTracks = [];
     this.meta = null;
   }

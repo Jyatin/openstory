@@ -27,7 +27,6 @@ import {
   createSystemAdminScopedDb,
   getSequenceByIdUnscoped,
   getUserTeamMembership,
-  resolveUserTeam,
   type ScopedDb,
 } from '@/platform/server/db/scoped';
 import {
@@ -35,6 +34,7 @@ import {
   restrictionNotice,
 } from '@/platform/server/compliance/enforcement';
 import { loadComplianceState } from '@/platform/server/compliance/generation-gate';
+import { resolveTeamAndCompliance } from '@/platform/server/auth/team-memo';
 import {
   AccountRestrictedError,
   AuthenticationError,
@@ -252,9 +252,12 @@ export const authWithTeamRequestMiddleware = createMiddleware().server(
         }
       }
 
+      const resolved = oauth?.teamId
+        ? null
+        : await resolveTeamAndCompliance(principal.user.id, request.method);
       const team = oauth?.teamId
         ? await getUserTeamMembership(principal.user.id, oauth.teamId)
-        : await resolveUserTeam(principal.user.id);
+        : resolved?.team;
 
       if (!team) {
         throw authErrorResponse(
@@ -266,10 +269,9 @@ export const authWithTeamRequestMiddleware = createMiddleware().server(
         );
       }
 
-      const compliance = await loadComplianceState(
-        principal.user.id,
-        team.teamId
-      );
+      const compliance =
+        resolved?.compliance ??
+        (await loadComplianceState(principal.user.id, team.teamId));
       if (!compliance.enforcement.canAccess) {
         throw authErrorResponse(
           403,
@@ -350,13 +352,16 @@ const analyticsFlushMiddleware = createMiddleware({ type: 'function' })
 export const authWithTeamMiddleware = createMiddleware({ type: 'function' })
   .middleware([analyticsFlushMiddleware])
   .server(async ({ next, context }) => {
-    const team = await resolveUserTeam(context.user.id);
+    const request = getRequest();
+    const { team, compliance } = await resolveTeamAndCompliance(
+      context.user.id,
+      request.method
+    );
 
-    if (!team) {
+    if (!team || !compliance) {
       throw new Error('No team found for user');
     }
 
-    const compliance = await loadComplianceState(context.user.id, team.teamId);
     if (!compliance.enforcement.canAccess) {
       throw new AccountRestrictedError(
         restrictionNotice(compliance.enforcement) ??
@@ -372,7 +377,6 @@ export const authWithTeamMiddleware = createMiddleware({ type: 'function' })
     // Server fns: GET stays readable under account_suspended; POST/PUT/etc.
     // are writes. `getComplianceStatusFn` uses authMiddleware only so a
     // terminated account can still see the restriction banner.
-    const request = getRequest();
     if (request.method !== 'GET') {
       assertCanWrite(compliance.enforcement);
     }

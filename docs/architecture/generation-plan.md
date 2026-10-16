@@ -10,6 +10,14 @@ columns are gone (#1819).
 - Pure half (units, requires graph, cascade, Update all's filter, footer
   copy): `src/sequences/generation-plan.ts`.
 - Loader (rows + verdicts, one read per table): `src/sequences/server/generation-plan.ts`.
+  Every read is per sequence, never per shot, look or location (#2082): the
+  sheet verdicts take their rows (cast talent, live sheet versions, location
+  photos, style) from one batch and call the detail page's compare
+  (`lookSheetStaleness`, `locationSheetStaleness`) in memory. The one
+  exception is a character whose default look has no row yet, which the
+  compare backfills (a read and a write per such character).
+  `generation-plan-queries.test.ts` pins the count against a sequence of 2
+  and of 8 shots, characters and locations.
 - Wire: `getGenerationPlanFn` (`src/sequences/generation-plan.fn.ts`).
 
 ## Stops: how far a run goes
@@ -69,8 +77,9 @@ holds a recording keeps its `dialogue` unit either way.
 
 - `missing` — no artifact. New: today's `untracked` collapses this into "do
   nothing".
-- `stale` — the existing verdicts, verbatim: `computeShotStaleness`,
-  `readReferenceStaleness`, `readMusicPromptStaleness`, the media verdicts
+- `stale` — the existing verdicts, verbatim: `computeShotStaleness`, the
+  sheet compares behind `readReferenceStaleness` (`lookSheetStaleness`,
+  `locationSheetStaleness`), `readMusicPromptStaleness`, the media verdicts
   (`loadShotMediaStates`). Element refs have no verdict: an image is done.
 - `running` — a claim or status column: pending prompt/image claims,
   `shot_dialogue_claims` (live, not demoted), `sheetStatus` /

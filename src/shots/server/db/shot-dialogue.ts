@@ -51,6 +51,7 @@ import {
   desc,
   eq,
   exists,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -441,6 +442,26 @@ export function createShotDialogueMethods(db: Database) {
         .where(
           and(
             eq(shotDialogueClaims.shotId, shotId),
+            eq(shotDialogueClaims.status, 'generating')
+          )
+        )
+        .orderBy(desc(shotDialogueClaims.createdAt)),
+
+    /**
+     * `listLiveClaims` for every shot of a sequence in one read (#2082),
+     * newest first. Joined, not `inArray`: a sequence can have more shots
+     * than D1 allows bound parameters (#1019).
+     */
+    listLiveClaimsBySequence: async (
+      sequenceId: string
+    ): Promise<ShotDialogueClaim[]> =>
+      await db
+        .select(getTableColumns(shotDialogueClaims))
+        .from(shotDialogueClaims)
+        .innerJoin(shots, eq(shots.id, shotDialogueClaims.shotId))
+        .where(
+          and(
+            eq(shots.sequenceId, sequenceId),
             eq(shotDialogueClaims.status, 'generating')
           )
         )

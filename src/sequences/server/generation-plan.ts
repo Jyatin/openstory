@@ -6,14 +6,19 @@ import type { FreshPlanSequenceOverrides } from '@/shots/server/update-stale-pla
  * the pure half in `@/sequences/generation-plan`.
  */
 
-import { wearLook } from '@/cast/character-looks';
 import { matchSpeaker, usesVoice } from '@/cast/voice';
 import {
-  readLookSheetStaleness,
-  readReferenceStaleness,
+  locationSheetStaleness,
+  lookSheetStaleness,
 } from '@/cast/server/production-staleness';
-import { resolveSceneShotImageReferences } from '@/cast/server/workflows/sheet-snapshots';
+import { castTalentFields } from '@/cast/server/sheets/character-sheet-trigger';
+import { sequenceStyleFromRow } from '@/cast/server/sheets/sequence-style';
+import {
+  computeStyleConfigHash,
+  resolveSceneShotImageReferences,
+} from '@/cast/server/workflows/sheet-snapshots';
 import { readMusicPromptStaleness } from '@/audio/server/music-staleness';
+import type { StyleConfig } from '@/look/style-config';
 import { NotFoundError } from '@/platform/errors';
 import { getLogger } from '@/platform/logger';
 import type { ScopedDb } from '@/platform/server/db/scoped';
@@ -40,7 +45,7 @@ import { usesStartFrame } from '@/shots/use-start-frame';
 
 const logger = getLogger(['openstory', 'sequences', 'generation-plan']);
 
-/** A sheet's verdict: `readReferenceStaleness` only runs on a sheet that exists. */
+/** A sheet's verdict: the compare (`lookSheetStaleness`, `locationSheetStaleness`) only runs on a sheet that exists. */
 async function sheetVerdict(
   exists: boolean,
   inFlight: boolean,
@@ -108,32 +113,25 @@ async function loadPlanInput(
   const frameIds = [...anchorsByShot.values()].map((frame) => frame.id);
   const shotIds = shots.map((shot) => shot.id);
 
-  const [
-    characters,
-    locations,
-    reads,
-    media,
-    liveDialogue,
-    music,
-    primaryImageByFrame,
-  ] = await Promise.all([
-    scopedDb.characters.list(sequence.id),
-    scopedDb.locations.list(sequence.id),
-    loadShotStalenessReads(
-      scopedDb,
-      sequence.id,
-      shots,
-      shotIds,
-      frameIds,
-      sceneContext
-    ),
-    loadShotMediaStates(scopedDb, sequence, shots),
-    scopedDb.shotDialogue.listShotIdsWithLiveClaim(shotIds),
-    sequence.includeMusic
-      ? readMusicPromptStaleness(scopedDb, sequence)
-      : Promise.resolve(null),
-    scopedDb.frameVariants.getPrimaryByFrameIds(frameIds),
-  ]);
+  // The cast and locations are the batch's `refs`: the same read, once (#2082).
+  const { characters, locations } = refs;
+  const [reads, media, liveDialogue, music, primaryImageByFrame] =
+    await Promise.all([
+      loadShotStalenessReads(
+        scopedDb,
+        sequence.id,
+        shots,
+        shotIds,
+        frameIds,
+        sceneContext
+      ),
+      loadShotMediaStates(scopedDb, sequence, shots),
+      scopedDb.shotDialogue.listShotIdsWithLiveClaim(shotIds),
+      sequence.includeMusic
+        ? readMusicPromptStaleness(scopedDb, sequence)
+        : Promise.resolve(null),
+      scopedDb.frameVariants.getPrimaryByFrameIds(frameIds),
+    ]);
 
   // In parallel, as `getShotStalenessBatchFn` does: the reads are shared,
   // the hashing is per shot. Null = an uncomputable compare.
@@ -282,8 +280,12 @@ async function loadPlanInput(
     });
   }
 
-  // ponytail: one staleness read per existing sheet (the detail-page verdict,
-  // verbatim); a batched sheet-hash read if casts grow past a handful.
+  // Every sheet's verdict from rows read once per sequence (#2082): the
+  // cast talent, the live sheet versions, the location photos and the style.
+  // The compare is the detail page's (`lookSheetStaleness`,
+  // `locationSheetStaleness`), which reads nothing — except a character
+  // with no default look row yet, where `requireCharacterLook` backfills
+  // it (one read and one write per such character).
   // One sheet per look some scene uses (#2015): a character's default look
   // always, any other only once a live scene picks it. A look nobody wears
   // gets a sheet when someone asks for one, not from the plan.
@@ -292,30 +294,84 @@ async function loadPlanInput(
       Object.values(ctx.scene.continuity?.characterLooks ?? {})
     )
   );
+  // Each entry's `look` is its row; null is a default look a character an
+  // older worker wrote has no row for yet. The character itself wears that
+  // look, so its fields stand in, and the row is made only when the sheet
+  // exists to compare.
+  const wornLooks = characters
+    .filter((c) => !c.voiceOnly)
+    .flatMap((owner) => [
+      { owner, look: owner.looks.find((look) => look.isDefault) ?? null },
+      ...owner.looks
+        // A removed look a scene still picks is still worn, so it still
+        // owes its sheet: the shots that wear it wait on this unit.
+        .filter((look) => !look.isDefault && pickedLookIds.has(look.id))
+        .map((look) => ({ owner, look })),
+    ]);
+  const unique = (ids: (string | null)[]) => [
+    ...new Set(ids.filter((id): id is string => id !== null)),
+  ];
+  const [talents, sheetVersions, locationVersions, photos] = await Promise.all([
+    scopedDb.talent.getWithSheetsByIds(
+      unique(wornLooks.map(({ owner }) => owner.talentId))
+    ),
+    scopedDb.characterSheetVariants.getByIds(
+      unique(
+        wornLooks.map(
+          ({ owner, look }) => (look ?? owner).selectedSheetVersionId
+        )
+      )
+    ),
+    scopedDb.locationSheetVariants.getByIds(
+      unique(locations.map((l) => l.selectedReferenceVersionId))
+    ),
+    scopedDb.locations.listPhotosByLocationIds(locations.map((l) => l.id)),
+  ]);
+  const talentById = new Map(talents.map((t) => [t.id, t]));
+  const sheetVersionById = new Map(sheetVersions.map((v) => [v.id, v]));
+  const locationVersionById = new Map(locationVersions.map((v) => [v.id, v]));
+  // Parsed once, inside the first verdict's read: a snapshot that fails to
+  // parse makes every sheet `unknown` through `sheetVerdict`'s catch, as a
+  // per-row read did, instead of failing the plan.
+  let style: Promise<{ config: StyleConfig | null; hash: string }> | undefined;
+  const sequenceStyle = () =>
+    (style ??= (async () => {
+      const config = sequenceStyleFromRow(sequence, refs.style) ?? null;
+      return { config, hash: await computeStyleConfigHash(config) };
+    })());
   const [characterSheets, locationSheets] = await Promise.all([
     Promise.all(
-      characters
-        .filter((c) => !c.voiceOnly)
-        .flatMap((c) => [
-          c,
-          ...c.looks
-            // A removed look a scene still picks is still worn, so it still
-            // owes its sheet: the shots that wear it wait on this unit.
-            .filter((look) => !look.isDefault && pickedLookIds.has(look.id))
-            .map((look) => wearLook(c, look)),
-        ])
-        .map(async (c) => ({
-          id: c.lookId,
+      wornLooks.map(async ({ owner, look }) => {
+        const worn = look ?? owner;
+        return {
+          id: look ? look.id : owner.lookId,
           // A look other than the default is drawn from this character's
           // default sheet (the look whose id is the character's).
-          characterId: c.id,
+          characterId: owner.id,
           sheet: await sheetVerdict(
-            !!c.sheetImageUrl,
-            c.sheetStatus === 'generating' ||
-              c.pendingPromoteSheetVersionId != null,
-            () => readLookSheetStaleness(scopedDb, sequence.id, c.id, c.lookId)
+            !!worn.sheetImageUrl,
+            worn.sheetStatus === 'generating' ||
+              worn.pendingPromoteSheetVersionId != null,
+            async () =>
+              lookSheetStaleness({
+                scopedDb,
+                sequence,
+                owner,
+                lookId: look ? look.id : owner.lookId,
+                styleConfigHash: (await sequenceStyle()).hash,
+                rows: {
+                  cast: castTalentFields(
+                    owner.talentId ? talentById.get(owner.talentId) : undefined
+                  ),
+                  liveVersion: worn.selectedSheetVersionId
+                    ? (sheetVersionById.get(worn.selectedSheetVersionId) ??
+                      null)
+                    : null,
+                },
+              })
           ),
-        }))
+        };
+      })
     ),
     Promise.all(
       locations.map(async (l) => ({
@@ -324,7 +380,20 @@ async function loadPlanInput(
           !!l.referenceImageUrl,
           l.referenceStatus === 'generating' ||
             l.pendingPromoteReferenceVersionId != null,
-          () => readReferenceStaleness(scopedDb, sequence.id, 'location', l.id)
+          async () =>
+            locationSheetStaleness({
+              scopedDb,
+              sequence,
+              location: l,
+              styleConfig: (await sequenceStyle()).config,
+              rows: {
+                liveVersion: l.selectedReferenceVersionId
+                  ? (locationVersionById.get(l.selectedReferenceVersionId) ??
+                    null)
+                  : null,
+                photos: photos.filter((p) => p.locationId === l.id),
+              },
+            })
         ),
       }))
     ),

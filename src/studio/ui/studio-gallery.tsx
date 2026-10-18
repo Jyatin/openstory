@@ -1,3 +1,4 @@
+import { playHoverPreview } from '@/ui/play-hover-preview';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -166,7 +167,7 @@ function StudioCard({
             onMouseEnter={(event) => {
               if (window.matchMedia('(prefers-reduced-motion: reduce)').matches)
                 return;
-              void event.currentTarget.play();
+              playHoverPreview(event.currentTarget);
             }}
             onMouseLeave={(event) => {
               event.currentTarget.pause();

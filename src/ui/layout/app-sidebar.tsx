@@ -11,6 +11,7 @@ import {
   SidebarGroupContent,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarSeparator,
@@ -33,6 +34,7 @@ import {
   Mail,
   MapPin,
   Palette,
+  Plug,
   Plus,
   Search,
   Users,
@@ -255,6 +257,17 @@ export function AppSidebar() {
                 <span>Docs</span>
               </Link>
             </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton asChild tooltip="Skills & MCP">
+              <Link to="/connect" activeProps={{ 'data-active': 'true' }}>
+                <Plug />
+                <span>Skills &amp; MCP</span>
+              </Link>
+            </SidebarMenuButton>
+            <SidebarMenuBadge className="bg-primary/15 text-primary">
+              New
+            </SidebarMenuBadge>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton asChild tooltip="Pricing">

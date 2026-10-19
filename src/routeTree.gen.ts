@@ -19,6 +19,7 @@ import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as DotwellKnownSplatRouteImport } from './routes/[.]well-known/$'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAdminRouteRouteImport } from './routes/_app/admin/route'
+import { Route as AppConnectRouteImport } from './routes/_app/connect'
 import { Route as AppCreditsRouteImport } from './routes/_app/credits'
 import { Route as AppDeviceRouteImport } from './routes/_app/device'
 import { Route as AppPricingRouteImport } from './routes/_app/pricing'
@@ -155,6 +156,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
 const AppAdminRouteRoute = AppAdminRouteRouteImport.update({
   id: '/admin',
   path: '/admin',
+  getParentRoute: () => AppRouteRoute,
+} as any)
+const AppConnectRoute = AppConnectRouteImport.update({
+  id: '/connect',
+  path: '/connect',
   getParentRoute: () => AppRouteRoute,
 } as any)
 const AppCreditsRoute = AppCreditsRouteImport.update({
@@ -621,6 +627,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRouteRouteWithChildren
   '/api/test': typeof ApiTestRouteRouteWithChildren
   '/.well-known/$': typeof DotwellKnownSplatRoute
+  '/connect': typeof AppConnectRoute
   '/credits': typeof AppCreditsRoute
   '/device': typeof AppDeviceRoute
   '/pricing': typeof AppPricingRoute
@@ -717,6 +724,7 @@ export interface FileRoutesByTo {
   '/admin': typeof AppAdminRouteRouteWithChildren
   '/api/test': typeof ApiTestRouteRouteWithChildren
   '/.well-known/$': typeof DotwellKnownSplatRoute
+  '/connect': typeof AppConnectRoute
   '/credits': typeof AppCreditsRoute
   '/device': typeof AppDeviceRoute
   '/pricing': typeof AppPricingRoute
@@ -817,6 +825,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRouteRouteWithChildren
   '/api/test': typeof ApiTestRouteRouteWithChildren
   '/.well-known/$': typeof DotwellKnownSplatRoute
+  '/_app/connect': typeof AppConnectRoute
   '/_app/credits': typeof AppCreditsRoute
   '/_app/device': typeof AppDeviceRoute
   '/_app/pricing': typeof AppPricingRoute
@@ -919,6 +928,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/api/test'
     | '/.well-known/$'
+    | '/connect'
     | '/credits'
     | '/device'
     | '/pricing'
@@ -1015,6 +1025,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/api/test'
     | '/.well-known/$'
+    | '/connect'
     | '/credits'
     | '/device'
     | '/pricing'
@@ -1114,6 +1125,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/api/test'
     | '/.well-known/$'
+    | '/_app/connect'
     | '/_app/credits'
     | '/_app/device'
     | '/_app/pricing'
@@ -1309,6 +1321,13 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AppAdminRouteRouteImport
+      parentRoute: typeof AppRouteRoute
+    }
+    '/_app/connect': {
+      id: '/_app/connect'
+      path: '/connect'
+      fullPath: '/connect'
+      preLoaderRoute: typeof AppConnectRouteImport
       parentRoute: typeof AppRouteRoute
     }
     '/_app/credits': {
@@ -2020,6 +2039,7 @@ const AppSequencesIdRouteRouteWithChildren =
 interface AppRouteRouteChildren {
   AppAdminRouteRoute: typeof AppAdminRouteRouteWithChildren
   AppSettingsRouteRoute: typeof AppSettingsRouteRouteWithChildren
+  AppConnectRoute: typeof AppConnectRoute
   AppCreditsRoute: typeof AppCreditsRoute
   AppDeviceRoute: typeof AppDeviceRoute
   AppPricingRoute: typeof AppPricingRoute
@@ -2052,6 +2072,7 @@ interface AppRouteRouteChildren {
 const AppRouteRouteChildren: AppRouteRouteChildren = {
   AppAdminRouteRoute: AppAdminRouteRouteWithChildren,
   AppSettingsRouteRoute: AppSettingsRouteRouteWithChildren,
+  AppConnectRoute: AppConnectRoute,
   AppCreditsRoute: AppCreditsRoute,
   AppDeviceRoute: AppDeviceRoute,
   AppPricingRoute: AppPricingRoute,

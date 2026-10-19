@@ -117,6 +117,10 @@ npx @openstory/stitch \
 - `--subs lines.srt`（或 `.vtt`）是整条成片的一个字幕文件。跨过切点的一条字幕会拆到两边的 clip 上。
 - `--music` 是铺在整条成片下的音乐床。`--music-gain` 只改变这条床，单位是 dB，默认 0。页面可以关掉音乐床。对白保持自己的音量。
 
+## 分享剪辑
+
+`npx @openstory/stitch bundle <dir> …` 把播放页、`cut.json` 和所有文件（URL 会被下载）写进一个文件夹，放到任何静态主机即可播放。`npx @openstory/stitch share …` 把同样的内容上传到 OpenStory 并打印一个任何人都能打开的链接；首次分享会用设备码登录，密钥保存在 `~/.openstory/stitch.json`。`--origin` 指向另一台 OpenStory 服务器。每张静态图都会检查是否为真人；若是，需要 `--portrait-rights <依据>`，即使用其肖像的依据。两者都接受播放命令的全部剪辑选项，且都不会在浏览器中打开剪辑。没有 shell 的 agent 可以通过 OpenStory MCP 服务器的 `create_stitch` 工具分享同样的剪辑：每个媒体是服务器可下载的 URL，或一个 base64 的小文件。
+
 ## Skill
 
 用 npx 运行上面的命令。`/stitch` 做同一件事，并让页面保持运行。

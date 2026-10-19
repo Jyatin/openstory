@@ -31,9 +31,13 @@ try {
 async function fetchCut(): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch('/cut.json');
+    response = await fetch('cut.json');
   } catch {
-    throw new Error('The stitch server is not running. Run stitch again.');
+    throw new Error(
+      location.hostname === '127.0.0.1' || location.hostname === 'localhost'
+        ? 'The stitch server is not running. Run stitch again.'
+        : 'Could not load cut.json next to this page.'
+    );
   }
   if (!response.ok) throw new Error(`cut.json returned ${response.status}`);
   return response.json();

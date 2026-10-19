@@ -42,6 +42,7 @@ import { Route as MetaOgLinkedinRouteImport } from './routes/meta/og-linkedin'
 import { Route as OauthConsentStartRouteImport } from './routes/oauth/consent-start'
 import { Route as OauthLoginRouteImport } from './routes/oauth/login'
 import { Route as R2SplatRouteImport } from './routes/r2.$'
+import { Route as StitchIdRouteImport } from './routes/stitch/$id'
 import { Route as AppAdminModerationRouteImport } from './routes/_app/admin/moderation'
 import { Route as AppAdminUsageRouteImport } from './routes/_app/admin/usage'
 import { Route as AppCharactersIndexRouteImport } from './routes/_app/characters/index'
@@ -82,6 +83,7 @@ import { Route as ApiTestVerifyRouteImport } from './routes/api/test/verify'
 import { Route as ApiV1IndexRouteImport } from './routes/api/v1/index'
 import { Route as ApiV1OpenapiDotjsonRouteImport } from './routes/api/v1/openapi[.]json'
 import { Route as ApiV1SequencesRouteImport } from './routes/api/v1/sequences'
+import { Route as ApiV1StitchesRouteImport } from './routes/api/v1/stitches'
 import { Route as ApiV1StylesRouteImport } from './routes/api/v1/styles'
 import { Route as AppModelsFamilySplatRouteImport } from './routes/_app/models/family/$'
 import { Route as AppSequencesIdWorkspaceRouteRouteImport } from './routes/_app/sequences/$id/_workspace/route'
@@ -101,6 +103,7 @@ import { Route as AppSequencesIdCastIndexRouteImport } from './routes/_app/seque
 import { Route as AppSequencesIdElementsIndexRouteImport } from './routes/_app/sequences/$id/elements/index'
 import { Route as AppSequencesIdLocationsIndexRouteImport } from './routes/_app/sequences/$id/locations/index'
 import { Route as ApiV1SequencesIdExportsRouteImport } from './routes/api/v1/sequences.$id.exports'
+import { Route as ApiV1StitchesIdPublishRouteImport } from './routes/api/v1/stitches.$id.publish'
 import { Route as AppSequencesIdWorkspaceCastCharacterIdRouteImport } from './routes/_app/sequences/$id/_workspace/cast/$characterId'
 import { Route as AppSequencesIdWorkspaceElementsElementIdRouteImport } from './routes/_app/sequences/$id/_workspace/elements/$elementId'
 import { Route as AppSequencesIdWorkspaceLocationsLocationIdRouteImport } from './routes/_app/sequences/$id/_workspace/locations/$locationId'
@@ -267,6 +270,11 @@ const OauthLoginRoute = OauthLoginRouteImport.update({
 const R2SplatRoute = R2SplatRouteImport.update({
   id: '/r2/$',
   path: '/r2/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StitchIdRoute = StitchIdRouteImport.update({
+  id: '/stitch/$id',
+  path: '/stitch/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppAdminModerationRoute = AppAdminModerationRouteImport.update({
@@ -469,6 +477,11 @@ const ApiV1SequencesRoute = ApiV1SequencesRouteImport.update({
   path: '/api/v1/sequences',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiV1StitchesRoute = ApiV1StitchesRouteImport.update({
+  id: '/api/v1/stitches',
+  path: '/api/v1/stitches',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1StylesRoute = ApiV1StylesRouteImport.update({
   id: '/api/v1/styles',
   path: '/api/v1/styles',
@@ -567,6 +580,11 @@ const ApiV1SequencesIdExportsRoute = ApiV1SequencesIdExportsRouteImport.update({
   path: '/exports',
   getParentRoute: () => ApiV1SequencesIdRoute,
 } as any)
+const ApiV1StitchesIdPublishRoute = ApiV1StitchesIdPublishRouteImport.update({
+  id: '/$id/publish',
+  path: '/$id/publish',
+  getParentRoute: () => ApiV1StitchesRoute,
+} as any)
 const AppSequencesIdWorkspaceCastCharacterIdRoute =
   AppSequencesIdWorkspaceCastCharacterIdRouteImport.update({
     id: '/cast/$characterId',
@@ -623,6 +641,7 @@ export interface FileRoutesByFullPath {
   '/oauth/consent-start': typeof OauthConsentStartRoute
   '/oauth/login': typeof OauthLoginRoute
   '/r2/$': typeof R2SplatRoute
+  '/stitch/$id': typeof StitchIdRoute
   '/docs/': typeof DocsIndexRoute
   '/sequences/$id': typeof AppSequencesIdRouteRouteWithChildren
   '/admin/moderation': typeof AppAdminModerationRoute
@@ -651,6 +670,7 @@ export interface FileRoutesByFullPath {
   '/api/test/verify': typeof ApiTestVerifyRoute
   '/api/v1/openapi.json': typeof ApiV1OpenapiDotjsonRoute
   '/api/v1/sequences': typeof ApiV1SequencesRouteWithChildren
+  '/api/v1/stitches': typeof ApiV1StitchesRouteWithChildren
   '/api/v1/styles': typeof ApiV1StylesRouteWithChildren
   '/characters/': typeof AppCharactersIndexRoute
   '/clips/': typeof AppClipsIndexRoute
@@ -679,6 +699,7 @@ export interface FileRoutesByFullPath {
   '/sequences/new/': typeof AppSequencesNewIndexRoute
   '/sequences/$id/scenes': typeof AppSequencesIdWorkspaceScenesRoute
   '/api/v1/sequences/$id/exports': typeof ApiV1SequencesIdExportsRoute
+  '/api/v1/stitches/$id/publish': typeof ApiV1StitchesIdPublishRoute
   '/sequences/$id/cast/': typeof AppSequencesIdCastIndexRoute
   '/sequences/$id/elements/': typeof AppSequencesIdElementsIndexRoute
   '/sequences/$id/locations/': typeof AppSequencesIdLocationsIndexRoute
@@ -716,6 +737,7 @@ export interface FileRoutesByTo {
   '/oauth/consent-start': typeof OauthConsentStartRoute
   '/oauth/login': typeof OauthLoginRoute
   '/r2/$': typeof R2SplatRoute
+  '/stitch/$id': typeof StitchIdRoute
   '/docs': typeof DocsIndexRoute
   '/sequences/$id': typeof AppSequencesIdRouteRouteWithChildren
   '/admin/moderation': typeof AppAdminModerationRoute
@@ -744,6 +766,7 @@ export interface FileRoutesByTo {
   '/api/test/verify': typeof ApiTestVerifyRoute
   '/api/v1/openapi.json': typeof ApiV1OpenapiDotjsonRoute
   '/api/v1/sequences': typeof ApiV1SequencesRouteWithChildren
+  '/api/v1/stitches': typeof ApiV1StitchesRouteWithChildren
   '/api/v1/styles': typeof ApiV1StylesRouteWithChildren
   '/characters': typeof AppCharactersIndexRoute
   '/clips': typeof AppClipsIndexRoute
@@ -772,6 +795,7 @@ export interface FileRoutesByTo {
   '/sequences/new': typeof AppSequencesNewIndexRoute
   '/sequences/$id/scenes': typeof AppSequencesIdWorkspaceScenesRoute
   '/api/v1/sequences/$id/exports': typeof ApiV1SequencesIdExportsRoute
+  '/api/v1/stitches/$id/publish': typeof ApiV1StitchesIdPublishRoute
   '/sequences/$id/cast': typeof AppSequencesIdCastIndexRoute
   '/sequences/$id/elements': typeof AppSequencesIdElementsIndexRoute
   '/sequences/$id/locations': typeof AppSequencesIdLocationsIndexRoute
@@ -813,6 +837,7 @@ export interface FileRoutesById {
   '/oauth/consent-start': typeof OauthConsentStartRoute
   '/oauth/login': typeof OauthLoginRoute
   '/r2/$': typeof R2SplatRoute
+  '/stitch/$id': typeof StitchIdRoute
   '/_app/': typeof AppIndexRoute
   '/docs/': typeof DocsIndexRoute
   '/_app/sequences/$id': typeof AppSequencesIdRouteRouteWithChildren
@@ -842,6 +867,7 @@ export interface FileRoutesById {
   '/api/test/verify': typeof ApiTestVerifyRoute
   '/api/v1/openapi.json': typeof ApiV1OpenapiDotjsonRoute
   '/api/v1/sequences': typeof ApiV1SequencesRouteWithChildren
+  '/api/v1/stitches': typeof ApiV1StitchesRouteWithChildren
   '/api/v1/styles': typeof ApiV1StylesRouteWithChildren
   '/_app/characters/': typeof AppCharactersIndexRoute
   '/_app/clips/': typeof AppClipsIndexRoute
@@ -871,6 +897,7 @@ export interface FileRoutesById {
   '/_app/sequences/new/': typeof AppSequencesNewIndexRoute
   '/_app/sequences/$id/_workspace/scenes': typeof AppSequencesIdWorkspaceScenesRoute
   '/api/v1/sequences/$id/exports': typeof ApiV1SequencesIdExportsRoute
+  '/api/v1/stitches/$id/publish': typeof ApiV1StitchesIdPublishRoute
   '/_app/sequences/$id/cast/': typeof AppSequencesIdCastIndexRoute
   '/_app/sequences/$id/elements/': typeof AppSequencesIdElementsIndexRoute
   '/_app/sequences/$id/locations/': typeof AppSequencesIdLocationsIndexRoute
@@ -912,6 +939,7 @@ export interface FileRouteTypes {
     | '/oauth/consent-start'
     | '/oauth/login'
     | '/r2/$'
+    | '/stitch/$id'
     | '/docs/'
     | '/sequences/$id'
     | '/admin/moderation'
@@ -940,6 +968,7 @@ export interface FileRouteTypes {
     | '/api/test/verify'
     | '/api/v1/openapi.json'
     | '/api/v1/sequences'
+    | '/api/v1/stitches'
     | '/api/v1/styles'
     | '/characters/'
     | '/clips/'
@@ -968,6 +997,7 @@ export interface FileRouteTypes {
     | '/sequences/new/'
     | '/sequences/$id/scenes'
     | '/api/v1/sequences/$id/exports'
+    | '/api/v1/stitches/$id/publish'
     | '/sequences/$id/cast/'
     | '/sequences/$id/elements/'
     | '/sequences/$id/locations/'
@@ -1005,6 +1035,7 @@ export interface FileRouteTypes {
     | '/oauth/consent-start'
     | '/oauth/login'
     | '/r2/$'
+    | '/stitch/$id'
     | '/docs'
     | '/sequences/$id'
     | '/admin/moderation'
@@ -1033,6 +1064,7 @@ export interface FileRouteTypes {
     | '/api/test/verify'
     | '/api/v1/openapi.json'
     | '/api/v1/sequences'
+    | '/api/v1/stitches'
     | '/api/v1/styles'
     | '/characters'
     | '/clips'
@@ -1061,6 +1093,7 @@ export interface FileRouteTypes {
     | '/sequences/new'
     | '/sequences/$id/scenes'
     | '/api/v1/sequences/$id/exports'
+    | '/api/v1/stitches/$id/publish'
     | '/sequences/$id/cast'
     | '/sequences/$id/elements'
     | '/sequences/$id/locations'
@@ -1101,6 +1134,7 @@ export interface FileRouteTypes {
     | '/oauth/consent-start'
     | '/oauth/login'
     | '/r2/$'
+    | '/stitch/$id'
     | '/_app/'
     | '/docs/'
     | '/_app/sequences/$id'
@@ -1130,6 +1164,7 @@ export interface FileRouteTypes {
     | '/api/test/verify'
     | '/api/v1/openapi.json'
     | '/api/v1/sequences'
+    | '/api/v1/stitches'
     | '/api/v1/styles'
     | '/_app/characters/'
     | '/_app/clips/'
@@ -1159,6 +1194,7 @@ export interface FileRouteTypes {
     | '/_app/sequences/new/'
     | '/_app/sequences/$id/_workspace/scenes'
     | '/api/v1/sequences/$id/exports'
+    | '/api/v1/stitches/$id/publish'
     | '/_app/sequences/$id/cast/'
     | '/_app/sequences/$id/elements/'
     | '/_app/sequences/$id/locations/'
@@ -1186,6 +1222,7 @@ export interface RootRouteChildren {
   OauthConsentStartRoute: typeof OauthConsentStartRoute
   OauthLoginRoute: typeof OauthLoginRoute
   R2SplatRoute: typeof R2SplatRoute
+  StitchIdRoute: typeof StitchIdRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
   ApiOpenrouterCallbackRoute: typeof ApiOpenrouterCallbackRoute
@@ -1193,6 +1230,7 @@ export interface RootRouteChildren {
   ApiStorageUploadRoute: typeof ApiStorageUploadRoute
   ApiV1OpenapiDotjsonRoute: typeof ApiV1OpenapiDotjsonRoute
   ApiV1SequencesRoute: typeof ApiV1SequencesRouteWithChildren
+  ApiV1StitchesRoute: typeof ApiV1StitchesRouteWithChildren
   ApiV1StylesRoute: typeof ApiV1StylesRouteWithChildren
   ApiV1IndexRoute: typeof ApiV1IndexRoute
   ApiV1DeviceCodeRoute: typeof ApiV1DeviceCodeRoute
@@ -1432,6 +1470,13 @@ declare module '@tanstack/react-router' {
       path: '/r2/$'
       fullPath: '/r2/$'
       preLoaderRoute: typeof R2SplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/stitch/$id': {
+      id: '/stitch/$id'
+      path: '/stitch/$id'
+      fullPath: '/stitch/$id'
+      preLoaderRoute: typeof StitchIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_app/admin/moderation': {
@@ -1714,6 +1759,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiV1SequencesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/v1/stitches': {
+      id: '/api/v1/stitches'
+      path: '/api/v1/stitches'
+      fullPath: '/api/v1/stitches'
+      preLoaderRoute: typeof ApiV1StitchesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/styles': {
       id: '/api/v1/styles'
       path: '/api/v1/styles'
@@ -1846,6 +1898,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/v1/sequences/$id/exports'
       preLoaderRoute: typeof ApiV1SequencesIdExportsRouteImport
       parentRoute: typeof ApiV1SequencesIdRoute
+    }
+    '/api/v1/stitches/$id/publish': {
+      id: '/api/v1/stitches/$id/publish'
+      path: '/$id/publish'
+      fullPath: '/api/v1/stitches/$id/publish'
+      preLoaderRoute: typeof ApiV1StitchesIdPublishRouteImport
+      parentRoute: typeof ApiV1StitchesRoute
     }
     '/_app/sequences/$id/_workspace/cast/$characterId': {
       id: '/_app/sequences/$id/_workspace/cast/$characterId'
@@ -2109,6 +2168,18 @@ const ApiV1SequencesRouteWithChildren = ApiV1SequencesRoute._addFileChildren(
   ApiV1SequencesRouteChildren,
 )
 
+interface ApiV1StitchesRouteChildren {
+  ApiV1StitchesIdPublishRoute: typeof ApiV1StitchesIdPublishRoute
+}
+
+const ApiV1StitchesRouteChildren: ApiV1StitchesRouteChildren = {
+  ApiV1StitchesIdPublishRoute: ApiV1StitchesIdPublishRoute,
+}
+
+const ApiV1StitchesRouteWithChildren = ApiV1StitchesRoute._addFileChildren(
+  ApiV1StitchesRouteChildren,
+)
+
 interface ApiV1StylesRouteChildren {
   ApiV1StylesIdRoute: typeof ApiV1StylesIdRoute
 }
@@ -2139,6 +2210,7 @@ const rootRouteChildren: RootRouteChildren = {
   OauthConsentStartRoute: OauthConsentStartRoute,
   OauthLoginRoute: OauthLoginRoute,
   R2SplatRoute: R2SplatRoute,
+  StitchIdRoute: StitchIdRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiBillingWebhookRoute: ApiBillingWebhookRoute,
   ApiOpenrouterCallbackRoute: ApiOpenrouterCallbackRoute,
@@ -2146,6 +2218,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiStorageUploadRoute: ApiStorageUploadRoute,
   ApiV1OpenapiDotjsonRoute: ApiV1OpenapiDotjsonRoute,
   ApiV1SequencesRoute: ApiV1SequencesRouteWithChildren,
+  ApiV1StitchesRoute: ApiV1StitchesRouteWithChildren,
   ApiV1StylesRoute: ApiV1StylesRouteWithChildren,
   ApiV1IndexRoute: ApiV1IndexRoute,
   ApiV1DeviceCodeRoute: ApiV1DeviceCodeRoute,

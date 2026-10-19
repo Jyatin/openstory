@@ -762,7 +762,13 @@ export const UPLOAD_USES = [
   'element',
   'studio',
 ] as const;
-export type UploadUse = (typeof UPLOAD_USES)[number];
+type UploadUse = (typeof UPLOAD_USES)[number];
+/** `stitch` is `create_stitch`'s store only (#2127): a shared cut's file, outside any sequence. */
+type StoreUse = UploadUse | 'stitch';
+/** What is stored: a sequence or Studio use, or a file of one stitch. */
+export type StoreTarget =
+  | { use: UploadUse }
+  | { use: 'stitch'; stitchId: string };
 
 /** Media type → stored extension, for every type any use accepts. */
 const UPLOAD_MEDIA_TYPES: Record<string, string> = {
@@ -796,7 +802,7 @@ const ELEMENT_EXTENSIONS = [
   'mp4',
   'mov',
 ];
-const USE_EXTENSIONS: Record<UploadUse, readonly string[]> = {
+const USE_EXTENSIONS: Record<StoreUse, readonly string[]> = {
   shot_image: UPLOAD_EXTENSIONS.image,
   character_sheet: UPLOAD_EXTENSIONS.image,
   location_sheet: UPLOAD_EXTENSIONS.image,
@@ -805,6 +811,12 @@ const USE_EXTENSIONS: Record<UploadUse, readonly string[]> = {
   element: ELEMENT_EXTENSIONS,
   // A Studio reference, start/end frame or clip; the same types as elements.
   studio: ELEMENT_EXTENSIONS,
+  // Anything the stitch player plays.
+  stitch: [
+    ...UPLOAD_EXTENSIONS.image,
+    ...UPLOAD_EXTENSIONS.video,
+    ...UPLOAD_EXTENSIONS.audio,
+  ],
 };
 
 const IMAGE_EXTENSIONS = new Set<string>(UPLOAD_EXTENSIONS.image);
@@ -816,12 +828,20 @@ const MAX_URL_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_URL_MEDIA_BYTES = 500 * 1024 * 1024;
 
 function uploadTarget(
-  use: UploadUse,
+  target: StoreTarget,
   teamId: string,
   sequenceId: string | null,
   ext: string
 ): { bucket: StorageBucket; path: string } {
   const id = generateId();
+  if (target.use === 'stitch') {
+    // Beside the stitch CLI's uploads: `stitches/<team>/<stitch>/<file>`.
+    return {
+      bucket: STORAGE_BUCKETS.STITCHES,
+      path: `${teamId}/${target.stitchId}/${id}.${ext}`,
+    };
+  }
+  const { use } = target;
   if (use === 'studio') {
     // The composer's key (`presignTalentUploadFn`), which list_studio_uploads reads.
     return {
@@ -875,7 +895,7 @@ function uploadTarget(
   }
 }
 
-function extensionFor(use: UploadUse, mediaType: string): string {
+function extensionFor(use: StoreUse, mediaType: string): string {
   const ext = UPLOAD_MEDIA_TYPES[mediaType];
   if (!ext || !USE_EXTENSIONS[use].includes(ext)) {
     throw new ValidationError(
@@ -894,20 +914,21 @@ export type UploadSource = { url: string } | { data: string; mimeType: string };
  * needs the portrait sign-off, which is recorded here. Returns the stored
  * `/r2/` URL the attach functions take.
  */
-export async function storeUpload(args: {
-  scopedDb: ScopedDb;
-  userId: string;
-  /**
-   * Null for a Studio upload, which belongs to the team, and for the sheet
-   * of a location worked on from no sequence.
-   */
-  sequenceId: string | null;
-  use: UploadUse;
-  source: UploadSource;
-  filename?: string;
-  portraitAttestation?: Omit<PortraitAttestation, 'url'>;
-  request: LikenessRequestContext;
-}): Promise<{
+export async function storeUpload(
+  args: StoreTarget & {
+    scopedDb: ScopedDb;
+    userId: string;
+    /**
+     * Null for a Studio upload, which belongs to the team, and for the sheet
+     * of a location worked on from no sequence.
+     */
+    sequenceId: string | null;
+    source: UploadSource;
+    filename?: string;
+    portraitAttestation?: Omit<PortraitAttestation, 'url'>;
+    request: LikenessRequestContext;
+  }
+): Promise<{
   url: string;
   mediaType: string;
   bytes: number | null;
@@ -934,7 +955,7 @@ export async function storeUpload(args: {
         'Inline data is over 8 MB; host the file and send its url instead.'
       );
     }
-    const { bucket, path } = uploadTarget(use, teamId, args.sequenceId, ext);
+    const { bucket, path } = uploadTarget(args, teamId, args.sequenceId, ext);
     const result = await uploadFile(bucket, path, bytes, {
       contentType: mediaType,
     });
@@ -967,7 +988,7 @@ export async function storeUpload(args: {
         `The file is over ${cap / 1024 / 1024} MB, the limit for this upload.`
       );
     }
-    const { bucket, path } = uploadTarget(use, teamId, args.sequenceId, ext);
+    const { bucket, path } = uploadTarget(args, teamId, args.sequenceId, ext);
     if (isImage) {
       const bytes = new Uint8Array(await res.arrayBuffer());
       if (bytes.byteLength > cap) {

@@ -60,6 +60,8 @@ import {
 import { sumShotSeconds } from './scene-group';
 import {
   EDITOR_FALLBACK_POLL_MS,
+  sequenceVideoVariantsDiscoverUntilKey,
+  sequenceVideoVariantsRefetchInterval,
   shotKeys,
   useDiscardVariant,
   useDivergentVariants,
@@ -639,13 +641,29 @@ export const ScenesView: React.FC<ScenesViewProps> = ({
 
   // Video variants (#545) — per-model coverage and the inspector's
   // per-model state. The player always shows each shot's current version.
-  // Poll while motion is in flight so completed variants update and clear
-  // generating badges even if realtime events were dropped (#1381).
+  // Poll while a primary render or a variant row is in flight, and for a
+  // short window after adding a model, so coverage can leave `generating`
+  // when a realtime completion event is dropped (#1381). Shot generating
+  // badges follow `videoStatus`, which this query does not write.
+  const { data: discoverUntilMs } = useQuery({
+    queryKey: sequenceVideoVariantsDiscoverUntilKey(sequenceId),
+    queryFn: () => null as number | null,
+    enabled: false,
+  });
+  const cachedVideoVariants = queryClient.getQueryData<ShotVariant[]>([
+    'sequence-video-variants',
+    sequenceId,
+  ]);
+  const videoVariantsInterval = sequenceVideoVariantsRefetchInterval({
+    shotsGenerating: anyVideoGenerating,
+    variants: cachedVideoVariants,
+    discoverUntilMs,
+  });
   const { data: videoVariants } = useSequenceVideoVariants(
     sequenceId,
-    anyVideoGenerating
-      ? { refetchInterval: EDITOR_FALLBACK_POLL_MS }
-      : undefined
+    videoVariantsInterval === false
+      ? undefined
+      : { refetchInterval: videoVariantsInterval }
   );
 
   const videoVariantsByShot = useMemo(() => {

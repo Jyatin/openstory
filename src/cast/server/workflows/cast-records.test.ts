@@ -1,7 +1,11 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { ElementBibleEntry } from '@/shots/scene-analysis.schema';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
-import { createCastRecords, findMissingElementEntries } from './cast-records';
+import {
+  buildLocationInsert,
+  createCastRecords,
+  findMissingElementEntries,
+} from './cast-records';
 import { asStub } from '@/test/as-stub';
 
 const entry = (token: string): ElementBibleEntry => ({
@@ -55,6 +59,22 @@ describe('findMissingElementEntries', () => {
   });
 });
 
+// Each analysed look lands on a `character_looks` row (#2015); the stub
+// answers with the id the look was given.
+const syncFromAnalysis = vi.fn(
+  async (
+    _sequenceId: string,
+    characterId: string,
+    looks: { lookId: string }[]
+  ) =>
+    Object.fromEntries(
+      looks.map((look, i) => [
+        look.lookId,
+        i === 0 ? characterId : `db-${look.lookId}`,
+      ])
+    )
+);
+
 describe('createCastRecords', () => {
   test('creates cast and locations pending, and image-less element rows', async () => {
     const characterCreate = vi.fn(async (row: { id: string }) => row);
@@ -64,13 +84,15 @@ describe('createCastRecords', () => {
     // minimal stub
     const scopedDb = asStub<WorkflowScopedDb>({
       characters: { create: characterCreate },
-      sequenceLocations: { createBulk: locationCreateBulk },
+      characterLooks: { syncFromAnalysis },
+      locations: { createBulk: locationCreateBulk },
       sequenceElements: { create: elementCreate },
       liveRead: { sequenceElements: { getByToken } },
     });
 
     const result = await createCastRecords(scopedDb, {
       sequenceId: 'seq_1',
+      cast: [],
       characterBible: [
         {
           characterId: 'char_1',
@@ -80,16 +102,16 @@ describe('createCastRecords', () => {
           ethnicity: '',
           physicalDescription: 'tall',
           standardClothing: 'coat',
-          distinguishingFeatures: '',
+          looks: [],
           personality: '',
           movement: '',
           voiceDescription: '',
           voiceOnly: false,
           isPerson: true,
+          rendering: 'Photoreal live action',
           consistencyTag: 'sarah',
         },
       ],
-      talentMatches: [],
       locationMatches: [],
       locationBible: [
         {
@@ -100,6 +122,7 @@ describe('createCastRecords', () => {
           architecturalStyle: '',
           keyFeatures: '',
           ambiance: '',
+          rendering: 'Photoreal live action',
           consistencyTag: 'cafe',
           firstMention: {
             sceneId: 'scene_1',
@@ -125,6 +148,9 @@ describe('createCastRecords', () => {
       expect.objectContaining({
         locationId: 'loc_1',
         referenceStatus: 'pending',
+        rendering: 'Photoreal live action',
+        // Not matched to a team location: analysis makes it here.
+        boundTo: null,
       }),
     ]);
     // LOGO already has an image; only BOTTLE gets a placeholder row.
@@ -151,7 +177,7 @@ describe('createCastRecords', () => {
     // minimal stub
     const scopedDb = asStub<WorkflowScopedDb>({
       characters: { create: vi.fn() },
-      sequenceLocations: { createBulk: vi.fn(async () => []) },
+      locations: { createBulk: vi.fn(async () => []) },
       sequenceElements: { create: elementCreate },
       liveRead: {
         sequenceElements: { getByToken: vi.fn(async () => existing) },
@@ -160,8 +186,8 @@ describe('createCastRecords', () => {
 
     const result = await createCastRecords(scopedDb, {
       sequenceId: 'seq_1',
+      cast: [],
       characterBible: [],
-      talentMatches: [],
       locationBible: [],
       locationMatches: [],
       elementBible: [entry('BOTTLE')],
@@ -173,106 +199,97 @@ describe('createCastRecords', () => {
   });
 });
 
-describe('createCastRecords (talent match, #1561)', () => {
+describe('createCastRecords (attached cast, #2050)', () => {
+  // A persisted look id, as the snapshot carries them.
+  const LOOK_ROW = '01HF5Z8XKQYC5N8Z3KQXR6TBQM';
   const sarah = {
-    characterId: 'char_1',
+    characterId: 'char_sarah',
     name: 'Sarah',
     age: '30s',
     gender: 'female',
     ethnicity: '',
     physicalDescription: 'tall',
     standardClothing: 'coat',
+    looks: [
+      { lookId: LOOK_ROW, name: 'Default', clothing: 'coat', styling: '' },
+      {
+        lookId: 'char_sarah:gala',
+        name: 'Gala',
+        clothing: 'gown',
+        styling: '',
+      },
+    ],
     distinguishingFeatures: '',
-    personality: 'anxious',
-    movement: 'restless hands',
+    personality: '',
+    movement: '',
     voiceDescription: '',
     voiceOnly: false,
     isPerson: true,
+    rendering: 'Photoreal live action',
     consistencyTag: 'sarah',
   };
-  const match = {
-    voiceId: null,
-    voiceDescription: null,
-    characterId: 'char_1',
-    talentId: 'tal_1',
-    talentName: 'Ada',
-    sheetImageUrl: '/r2/ada.png',
-  };
 
-  const run = async (personality: string, movement: string) => {
+  const run = async (shared: boolean) => {
     const characterCreate = vi.fn(async (row: { id: string }) => row);
+    const linkFromAnalysis = vi.fn(
+      async (_s: string, _c: string, looks: { lookId: string }[]) =>
+        Object.fromEntries(looks.map((l) => [l.lookId, `linked-${l.lookId}`]))
+    );
     // minimal stub
     const scopedDb = asStub<WorkflowScopedDb>({
       characters: { create: characterCreate },
-      sequenceLocations: { createBulk: vi.fn(async () => []) },
+      characterLooks: { syncFromAnalysis, linkFromAnalysis },
+      locations: { createBulk: vi.fn(async () => []) },
       sequenceElements: { create: vi.fn() },
       liveRead: { sequenceElements: { getByToken: vi.fn(async () => null) } },
     });
-    await createCastRecords(scopedDb, {
+    const result = await createCastRecords(scopedDb, {
       sequenceId: 'seq_1',
+      cast: [{ id: 'row-sarah', shared, entry: sarah }],
       characterBible: [sarah],
-      talentMatches: [{ ...match, personality, movement }],
       locationBible: [],
       locationMatches: [],
       elementBible: [],
       existingElements: [],
     });
-    return characterCreate.mock.calls[0]?.[0];
+    return { result, characterCreate, linkFromAnalysis };
   };
 
-  test("the talent's own performance wins", async () => {
-    expect(await run('swaggering', 'hip swivel')).toMatchObject({
-      talentId: 'tal_1',
-      personality: 'swaggering',
-      movement: 'hip swivel',
+  test('a shared character is linked, never written: no create, looks linked by id and name', async () => {
+    const { result, characterCreate, linkFromAnalysis } = await run(true);
+    expect(characterCreate).not.toHaveBeenCalled();
+    expect(linkFromAnalysis).toHaveBeenCalledWith(
+      'seq_1',
+      'row-sarah',
+      sarah.looks
+    );
+    expect(result.lookIds).toEqual({
+      [LOOK_ROW]: `linked-${LOOK_ROW}`,
+      'char_sarah:gala': 'linked-char_sarah:gala',
     });
   });
 
-  test("a talent with none keeps the script's", async () => {
-    expect(await run('', '')).toMatchObject({
-      personality: 'anxious',
-      movement: 'restless hands',
-    });
-  });
-
-  test('a signed talent portrait stamps likeness real (#1682)', async () => {
-    const characterCreate = vi.fn(async (row: { id: string }) => row);
-    // minimal stub
-    const scopedDb = asStub<WorkflowScopedDb>({
-      characters: { create: characterCreate },
-      sequenceLocations: { createBulk: vi.fn(async () => []) },
-      sequenceElements: { create: vi.fn() },
-      liveRead: { sequenceElements: { getByToken: vi.fn(async () => null) } },
-    });
-    await createCastRecords(scopedDb, {
-      sequenceId: 'seq_1',
-      characterBible: [sarah],
-      talentMatches: [
-        { ...match, personality: '', movement: '', hasSignedRelease: true },
-      ],
-      locationBible: [],
-      locationMatches: [],
-      elementBible: [],
-      existingElements: [],
-    });
-    expect(characterCreate.mock.calls[0]?.[0]).toMatchObject({
-      isPerson: true,
-    });
+  test('a character only this sequence holds takes the re-analysis as before', async () => {
+    const { characterCreate, linkFromAnalysis } = await run(false);
+    expect(characterCreate).toHaveBeenCalledTimes(1);
+    expect(linkFromAnalysis).not.toHaveBeenCalled();
   });
 });
 
 describe('createCastRecords (voice only, #1585)', () => {
-  test('a narrator persists with voiceOnly true and no talent', async () => {
+  test('a narrator persists with voiceOnly true', async () => {
     const characterCreate = vi.fn(async (row: { id: string }) => row);
     // minimal stub
     const scopedDb = asStub<WorkflowScopedDb>({
       characters: { create: characterCreate },
-      sequenceLocations: { createBulk: vi.fn(async () => []) },
+      characterLooks: { syncFromAnalysis },
+      locations: { createBulk: vi.fn(async () => []) },
       sequenceElements: { create: vi.fn() },
       liveRead: { sequenceElements: { getByToken: vi.fn(async () => null) } },
     });
     await createCastRecords(scopedDb, {
       sequenceId: 'seq_1',
+      cast: [],
       characterBible: [
         {
           characterId: 'narrator',
@@ -282,16 +299,16 @@ describe('createCastRecords (voice only, #1585)', () => {
           ethnicity: '',
           physicalDescription: '',
           standardClothing: '',
-          distinguishingFeatures: '',
+          looks: [],
           personality: 'dry, unhurried, faintly amused',
           movement: '',
           voiceDescription: '',
           voiceOnly: true,
           isPerson: true,
+          rendering: '',
           consistencyTag: 'narrator',
         },
       ],
-      talentMatches: [],
       locationBible: [],
       locationMatches: [],
       elementBible: [],
@@ -302,8 +319,8 @@ describe('createCastRecords (voice only, #1585)', () => {
       voiceDescription: null,
       voiceOnly: true,
       isPerson: true,
+      rendering: null,
       sheetStatus: 'pending',
-      talentId: null,
     });
   });
 
@@ -312,12 +329,14 @@ describe('createCastRecords (voice only, #1585)', () => {
     // minimal stub
     const scopedDb = asStub<WorkflowScopedDb>({
       characters: { create: characterCreate },
-      sequenceLocations: { createBulk: vi.fn(async () => []) },
+      characterLooks: { syncFromAnalysis },
+      locations: { createBulk: vi.fn(async () => []) },
       sequenceElements: { create: vi.fn() },
       liveRead: { sequenceElements: { getByToken: vi.fn(async () => null) } },
     });
     await createCastRecords(scopedDb, {
       sequenceId: 'seq_1',
+      cast: [],
       characterBible: [
         {
           characterId: 'narrator',
@@ -327,17 +346,17 @@ describe('createCastRecords (voice only, #1585)', () => {
           ethnicity: '',
           physicalDescription: '',
           standardClothing: '',
-          distinguishingFeatures: '',
+          looks: [],
           personality: 'dry, unhurried, faintly amused',
           movement: '',
           voiceDescription:
             'Native English. Male, 50s. Excellent quality. Persona: dry narrator. Emotion: unhurried, amused. Warm low timbre, conversational pace.',
           voiceOnly: true,
           isPerson: true,
+          rendering: 'Photoreal live action',
           consistencyTag: 'narrator',
         },
       ],
-      talentMatches: [],
       locationBible: [],
       locationMatches: [],
       elementBible: [],
@@ -346,6 +365,59 @@ describe('createCastRecords (voice only, #1585)', () => {
     expect(characterCreate.mock.calls[0]?.[0]).toMatchObject({
       voiceDescription:
         'Native English. Male, 50s. Excellent quality. Persona: dry narrator. Emotion: unhurried, amused. Warm low timbre, conversational pace.',
+    });
+  });
+});
+
+describe('buildLocationInsert (#1695)', () => {
+  const location = {
+    locationId: 'loc_1',
+    name: 'INT. CAFE - DAY',
+    type: 'interior' as const,
+    description: 'a cafe',
+    architecturalStyle: '',
+    keyFeatures: '',
+    ambiance: '',
+    rendering: '3D animated, Pixar-like',
+    consistencyTag: 'cafe',
+    firstMention: { sceneId: 'scene_1', text: 'INT. CAFE', lineNumber: 4 },
+  };
+
+  test('a script location matching bound to a team location is linked to it', () => {
+    expect(
+      buildLocationInsert({
+        sequenceId: 'seq_1',
+        location,
+        libraryMatch: {
+          locationId: 'loc_1',
+          libraryLocationId: 'team-loc-9',
+          libraryLocationName: 'Team Cafe',
+          referenceImageUrl: '/r2/team/cafe.png',
+        },
+        referenceStatus: 'pending',
+      })
+    ).toMatchObject({
+      sequenceId: 'seq_1',
+      locationId: 'loc_1',
+      boundTo: 'team-loc-9',
+      firstMentionSceneId: 'scene_1',
+      firstMentionLine: 4,
+    });
+  });
+
+  test('an unmatched one carries its bible, rendering included, and binds nothing', () => {
+    expect(
+      buildLocationInsert({
+        sequenceId: 'seq_1',
+        location,
+        libraryMatch: undefined,
+        referenceStatus: 'generating',
+      })
+    ).toMatchObject({
+      name: 'INT. CAFE - DAY',
+      rendering: '3D animated, Pixar-like',
+      referenceStatus: 'generating',
+      boundTo: null,
     });
   });
 });

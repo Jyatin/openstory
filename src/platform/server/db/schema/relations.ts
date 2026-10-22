@@ -57,8 +57,8 @@ export const relations = defineRelations(schema, (r) => ({
     renderSegments: r.many.renderSegments(),
     videoVariants: r.many.videoVariants(),
     events: r.many.sequenceEvents(),
-    characters: r.many.characters(),
-    locations: r.many.sequenceLocations(),
+    cast: r.many.sequenceCast(),
+    locationLinks: r.many.sequenceLocationLinks(),
     elements: r.many.sequenceElements(),
     musicPromptVariants: r.many.sequenceMusicPromptVersions(),
     dialogueSpeeches: r.many.dialogueSpeeches(),
@@ -246,16 +246,37 @@ export const relations = defineRelations(schema, (r) => ({
 
   // ---- Characters ----
   characters: {
+    voiceVersions: r.many.characterVoiceVersions(),
+    sheetVariants: r.many.characterSheetVariants(),
+    looks: r.many.characterLooks(),
+    cast: r.many.sequenceCast(),
+  },
+
+  // ---- Sequence cast (#2017) ----
+  sequenceCast: {
     sequence: r.one.sequences({
-      from: r.characters.sequenceId,
+      from: r.sequenceCast.sequenceId,
       to: r.sequences.id,
     }),
-    voiceVersions: r.many.characterVoiceVersions(),
-    talent: r.one.talent({
-      from: r.characters.talentId,
-      to: r.talent.id,
+    character: r.one.characters({
+      from: r.sequenceCast.characterId,
+      to: r.characters.id,
     }),
-    sheetVariants: r.many.characterSheetVariants(),
+  },
+
+  characterLooks: {
+    character: r.one.characters({
+      from: r.characterLooks.characterId,
+      to: r.characters.id,
+    }),
+    versions: r.many.characterLookVersions(),
+  },
+
+  characterLookVersions: {
+    look: r.one.characterLooks({
+      from: r.characterLookVersions.lookId,
+      to: r.characterLooks.id,
+    }),
   },
 
   characterVoiceVersions: {
@@ -277,35 +298,29 @@ export const relations = defineRelations(schema, (r) => ({
     }),
   },
 
-  // ---- Location Library ----
-  locationLibrary: {
+  // ---- Locations ----
+  locations: {
     team: r.one.teams({
-      from: r.locationLibrary.teamId,
+      from: r.locations.teamId,
       to: r.teams.id,
     }),
-    createdByUser: r.one.user({
-      from: r.locationLibrary.createdBy,
-      to: r.user.id,
-    }),
   },
 
-  // ---- Sequence Locations ----
-  sequenceLocations: {
+  sequenceLocationLinks: {
     sequence: r.one.sequences({
-      from: r.sequenceLocations.sequenceId,
+      from: r.sequenceLocationLinks.sequenceId,
       to: r.sequences.id,
     }),
-    libraryLocation: r.one.locationLibrary({
-      from: r.sequenceLocations.libraryLocationId,
-      to: r.locationLibrary.id,
+    location: r.one.locations({
+      from: r.sequenceLocationLinks.locationId,
+      to: r.locations.id,
     }),
   },
 
-  // ---- Location Sheets ----
-  locationSheets: {
-    location: r.one.locationLibrary({
-      from: r.locationSheets.locationId,
-      to: r.locationLibrary.id,
+  locationReferencePhotos: {
+    location: r.one.locations({
+      from: r.locationReferencePhotos.locationId,
+      to: r.locations.id,
     }),
   },
 
@@ -314,36 +329,6 @@ export const relations = defineRelations(schema, (r) => ({
     sequence: r.one.sequences({
       from: r.sequenceElements.sequenceId,
       to: r.sequences.id,
-    }),
-  },
-
-  // ---- Talent ----
-  talent: {
-    team: r.one.teams({ from: r.talent.teamId, to: r.teams.id }),
-    createdByUser: r.one.user({
-      from: r.talent.createdBy,
-      to: r.user.id,
-    }),
-    sheets: r.many.talentSheets(),
-    media: r.many.talentMedia(),
-  },
-  talentSheets: {
-    talent: r.one.talent({
-      from: r.talentSheets.talentId,
-      to: r.talent.id,
-    }),
-    variants: r.many.talentSheetVariants(),
-  },
-  talentSheetVariants: {
-    talentSheet: r.one.talentSheets({
-      from: r.talentSheetVariants.talentSheetId,
-      to: r.talentSheets.id,
-    }),
-  },
-  talentMedia: {
-    talent: r.one.talent({
-      from: r.talentMedia.talentId,
-      to: r.talent.id,
     }),
   },
 

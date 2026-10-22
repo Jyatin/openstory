@@ -87,6 +87,37 @@ preview is what fills the scene rail while the clip renders — without it the
 rail has nothing to show until the video lands, and the anchor frame is where
 that preview variant hangs.
 
+**The preview follows the motion prompt.** It is the only picture of a
+reference-only shot, so an edit that changes the shot's motion prompt redraws
+it from that prompt (`redrawShotPreview`, `src/shots/server/shot-preview.ts`):
+a saved spec or Rebuild, a hand edit, a restored version, and Rewrite shot.
+The reference-only motion prompt is the spec's framing, action and camera,
+the same text the scene-split sketch is drawn from. Each redraw is a new
+`kind: 'preview'` row and the rail shows the newest: older sketches are not
+versions, since none of them reaches the clip. A shot with a start frame never
+redraws, because its still takes over.
+
+**A sketch newer than the clip replaces it in the rail and the theatre
+(#2111).** `sketchIsNewerThanClip` (`src/shots/shot-view.ts`) compares the
+preview row's `createdAt` (`ShotView.previewCreatedAt`) with the selected
+clip's `generatedAt`. A sketch is redrawn only when the prompt changes, so a
+newer sketch means the clip shows a shot that is no longer written. The rail
+thumbnails pass no clip (`shownClipUrl`), and the theatre plays the sketch for
+the shot's length with its dialogue (`withoutOutdatedClips` in
+`playback-clips.ts`). A packed clip with one newer member plays as sketches
+throughout, since no part of it plays alone and it re-renders as one. A new
+render finishes after the sketch, so the clip comes back.
+
+- **Times, not ids.** Clips copied in by the #990 and #1067 backfills reuse
+  their shot's id, which sorts before the shot's first sketch. A clip with no
+  `generatedAt` keeps showing.
+- **Not staleness.** A clip also goes stale for changes a sketch cannot show
+  (a voice, a sheet). Swapping a good clip for an older sketch would be wrong.
+- **The shot player keeps the clip.** It is the one place to watch the
+  selected clip, so it plays it with the stale badge.
+- **Ceiling:** a prompt edited while its clip was rendering lets that clip win
+  when it lands.
+
 **The motion/music prompts run as part of phase 3, next to the sheets.** Phase
 3 produces sheets — images — and the prompt child reads bible TEXT: the bibles
 come from scene-split, casting resolves at the end of phase 2, and there are no
@@ -124,10 +155,7 @@ two things. A credits-short run now fails in seconds instead of after a full
 set of sheets is paid for. And the counts stop being guesses: pre-flight only
 has a script, so it uses the `estimate*SheetCount(sceneCount)` heuristics
 (capped at 3), while the in-run gate knows the bibles and the casting result —
-one sheet per bible entry, minus the characters whose matched talent sheet is
-reused. That reuse test is `reusesTalentSheet`, shared with
-`character-bible-workflow` so the gate cannot count a sheet the run does not
-generate; a reused sheet is a storage copy with no provider cost. Every
+one sheet per bible entry, as `character-bible-workflow` fans out. Every
 location is billed either way — a library match supplies a reference image, but
 the styled sheet is still generated.
 
@@ -259,7 +287,7 @@ serve a reference-only shot, and the via is claimed per team at submit time
 know which way a given team will resolve months later, so it stays conservative.
 
 Where the via IS known, ask the honest question instead:
-`canRenderReferenceOnly(model, scopedDb)` in `motion-generation.ts` returns true
+`canRenderReferenceOnly(model, credentials)` in `motion-generation.ts` returns true
 for Grok whenever an xAI key resolves. `MotionWorkflow`'s entry guard and the
 content-flag rescue both use it, which is what lets Grok rescue a flagged
 reference-only shot rather than committing itself onto the row and then dying.
@@ -310,6 +338,11 @@ speaks the same language as the shot override. The resolution lives in one place
 `reference-only-is-per-shot.test.ts` fails any per-shot path that reads
 `sequence.generateStartFrames` raw. Nine call sites have to agree; they drifted
 once already.
+
+The public API and MCP default to off as the app does (#2084): `startFrames`
+on `POST /api/v1/sequences` / `create_sequence`, and on `plan_generation`
+(`mode: "missing"`), where omitting it keeps the sequence's setting. Nothing
+on those paths turns start frames on for the caller.
 
 The switch is **not** render-only. It picks the motion-prompt template and
 folds into the motion-prompt hash, so flipping it re-stales that shot's motion

@@ -58,56 +58,6 @@ Neutral, even, high-key studio lighting. Diffused illumination from large softbo
 [MATERIALITY]:
 Hyper-accurate rendering of all fabrics, skin textures, hardware, and micro-details. Consistent texture rendering across all four angles without beautification or alteration.`,
 
-  'character/headshot': `Professional headshot portrait of {{name}}, photorealistic, studio lighting.
-
-{{referenceSection}}
-
-Requirements:
-- Head and shoulders portrait, centered composition
-- Neutral to friendly expression
-- Direct eye contact with camera
-- Soft, even professional studio lighting
-- Clean, solid neutral background
-- Sharp focus on face and eyes
-- High detail on facial features
-{{descSection}}
-
-Style: Professional portrait photography, headshot for actor/model portfolio.
-Aspect ratio: Square 1:1 format.
-{{consistencyNote}}`,
-
-  'character/talent-sheet': `A professional four-panel photographic character reference grid, maintaining absolute anatomical and stylistic consistency.
-
-[LAYOUT]:
-The grid comprises four distinct, technical views arranged horizontally:
-- Panel 1 (Left): Full body frontal view, standing in a neutral pose
-- Panel 2 (Center-Left): Close-up portrait frontal view (chest up)
-- Panel 3 (Center-Right): Full body side profile view facing left
-- Panel 4 (Right): Full body rear view
-
-All attire, accessories, hair, and features must be perfectly consistent across all four panels.
-
-[PERSON IDENTITY]:
-Name: {{name}}
-{{description}}
-
-Physical Appearance, Attire, and Distinguishing Features:
-{{appearanceSection}}
-{{consistencyNote}}
-
-{{referenceInstruction}}
-[ENVIRONMENT]:
-Seamless, minimalist commercial photo studio cyclorama with flat neutral white background. Clean, sterile, analytical atmosphere designed for clarity.
-
-[OPTICAL & CAMERA SPECS]:
-Commercial reference photography style. High-resolution medium format digital, tack-sharp focus across all panels, deep depth of field. Flat perspective, no lens distortion.
-
-[LIGHTING]:
-Neutral, even, high-key studio lighting. Diffused illumination from large softboxes to eliminate harsh shadows and highlight shape and form evenly. 5500K daylight balance.
-
-[MATERIALITY]:
-Hyper-accurate rendering of all fabrics, skin textures, hardware, and micro-details. Consistent texture rendering across all four angles without beautification or alteration.`,
-
   'phase/character-extraction': `You are a Character Bible Generator. Output pure JSON only - no markdown, no explanation.
 
 ## Core Rules
@@ -124,9 +74,8 @@ For each character determine:
 - Name (from script or inferred)
 - Age (exact or range)
 - Gender, ethnicity (if relevant)
-- Physical: height, build, hair color/style, eye color, skin tone, age markers
+- Physical: height, build, hair color/style, eye color, skin tone, age markers, and any PERMANENT mark (a scar, a birthmark, a tattoo): it is part of the body in every outfit
 - Clothing: complete outfit that defines the character
-- Distinguishing features: scars, tattoos, jewelry, accessories
 - Personality: temperament, how they react under pressure (not appearance)
 - Movement: gait, posture, habitual gestures, a limp (not appearance)
 - Consistency tag: short unique reference (e.g., "Jack-denim-weathered")
@@ -148,43 +97,14 @@ For each character determine:
     "age": 35,
     "gender": "male/female",
     "ethnicity": "if relevant",
-    "physicalDescription": "Complete details: 6'0, athletic build, short dark brown hair, weathered tan skin, hazel eyes with crow's feet",
+    "physicalDescription": "Complete details: 6'0, athletic build, short dark brown hair, weathered tan skin, hazel eyes with crow's feet, small scar above left eyebrow",
     "standardClothing": "Worn denim jacket over faded black t-shirt, dark jeans, brown leather boots",
-    "distinguishingFeatures": "Small scar above left eyebrow, silver watch",
     "personality": "Guarded, dry humour, slow to anger and slower to forgive",
     "movement": "Heavy deliberate stride, favours his left knee, hands stay in jacket pockets",
     "voiceDescription": "Native English. Male, mid-30s. Excellent quality. Persona: weary cowboy. Emotion: dry, unhurried. Low gravel timbre, conversational pace.",
     "consistencyTag": "Jack-denim-weathered"
   }]
 }`,
-
-  'phase/talent-matching': `You are a casting director AI. Your job is to match available talent (actors) to character roles.
-
-## CONTEXT
-The user has EXPLICITLY SELECTED these talent members because they want them cast in this production.
-Your job is to find the BEST character match for each talent member.
-
-## MATCHING PRIORITY (in order of importance)
-1. Gender compatibility (prefer matching, but can be flexible for unspecified characters)
-2. Age compatibility (within reasonable range)
-3. Physical appearance similarity
-4. Role prominence (prefer giving main roles to talent)
-
-## RULES
-- You MUST match every talent to a character (the user selected them for a reason)
-- Each talent can only be matched to ONE character
-- Each character can only have ONE talent assigned
-- If there are more talent than characters, match as many as possible (up to character count)
-- Be creative - talent can play characters of different ages/types with makeup and costume
-
-## OUTPUT FORMAT
-For each match provide:
-- characterId: The character's ID
-- talentId: The talent's ID
-- confidence: Match quality (0.0 to 1.0) - provide a value even for imperfect matches
-- reason: Brief explanation of why this talent fits this character
-
-Respond with JSON: { "matches": [...] }`,
 
   'script/enhance': `You are a creative director and screenwriter for OpenStory, an image-to-video platform. From a short brief you write a vivid, original short film — and because you know the pipeline intimately, everything you write is something a text-to-image + image-to-video model can actually render.
 
@@ -397,9 +317,8 @@ For each character determine:
 - Name (from script or inferred)
 - Age (exact or range)
 - Gender, ethnicity (if relevant)
-- Physical: height, build, hair color/style, eye color, skin tone, age markers
+- Physical: height, build, hair color/style, eye color, skin tone, age markers, and any PERMANENT mark (a scar, a birthmark, a tattoo): it is part of the body in every outfit
 - Clothing: complete outfit that defines the character
-- Distinguishing features: scars, tattoos, jewelry, accessories
 - Consistency tag: short unique reference (e.g., "Jack-denim-weathered")
 - Voice: hearable Voice Design brief (Native language, gender, age, Excellent quality, persona, emotion, timbre) — not appearance
 
@@ -679,11 +598,13 @@ You NEVER re-emit or rewrite the script. You NEVER emit per-scene metadata, dial
 The script is provided with a numbered line gutter ("12: some text"). The gutter is for reference only — it is NOT part of the script text.
 
 Return:
-1. **projectMetadata.title** — the project title as written in the script (the first line when it is a title, not an INT./EXT. heading) or a short inferred title. Scene 1 still starts at the very top of the script — do not skip a title line.
+1. **projectMetadata.title** — the project title as written in the script (the first line when it is a title, not an INT./EXT. heading) or a short inferred title. The title is not itself a scene.
 2. **boundaries** — one entry per scene, in script order:
    - \`quote\`: the VERBATIM first 40-80 characters of the scene, copied character-for-character from the script (never include the "N: " gutter). This is the ground truth used to locate the boundary, so exact copying matters: same punctuation, same quotes, same casing. A scene may start mid-paragraph — quote from that exact point.
    - \`hintLine\`: the gutter line number the scene starts on.
-   - Scene 1 always starts at the very top of the script. Every scene runs until the next boundary, so all of the script belongs to exactly one scene.
+   - Front matter is not a scene: a title, an episode line, a format note, a CHARACTERS list, anything before the first filmable scene. The first boundary's quote is that first scene, including its heading. Text before it is not filmed, but it is still in the script for the cast.
+   - If the script opens on the action, scene 1 starts at the first character. Never skip story text. A script with no scene headings is all story — start at the top.
+   - Every scene runs until the next boundary.
 
 ## Core Rules
 
@@ -758,7 +679,7 @@ In framing.subjectStartState and framing.composition, name every character actua
 ## Rules
 
 1. Each scene's \`shots:\` line is its budget. "exactly N" means the scene's length only fits N shots on this model's clip grid — emit exactly N. "up to N" means 1..N; prefer fewer, and a short scene with one action is usually one shot. "N to M" means at least N: the scene is longer than N-1 clips can hold, so cover it in N or more setups — never fewer.
-2. Each shot has: one primary action, a camera move with its pacing, framing and subject start-state, an optional direction note and sound cue (empty string when none), and durationSeconds as a relative pacing hint (longer take = larger number). A scene's running time is its \`duration:\` line; the system divides it across the scene's shots — do not try to make the seconds add up.
+2. Each shot has: one primary action, a camera move with its pacing, framing and subject start-state, an optional direction note and sound cue (empty string when none), and durationSeconds. A scene WITH a \`duration:\` line plays for that many seconds; the system divides it across the scene's shots — do not try to make the seconds add up. On that scene, durationSeconds is a relative pacing hint (longer take = larger number). A scene with NO \`duration:\` line has no timing label. You time what plays, and durationSeconds are real seconds: dialogue at {{dialogueWordsPerSecond}} words a second, action about a third as long as saying it, and sluglines and speaker names take no time. Do not stretch the scene to its word count. A scene with two short spoken lines and a paragraph of action is short.
 3. Match camera move and framing to the style (handheld vs locked, wide vs insert, slow push vs static).
 4. sceneNumber MUST match the "## Scene N" heading you were given. Shot 1 is the opening take; later shots follow in story order.
 5. Do not invent vendor syntax (no Seedance/Kling tokens). Do not invent scenes that were not in the input.
@@ -788,7 +709,7 @@ The schema is terse; this is what each field holds.
 - direction — a short director's note on intent or performance for this take (e.g. "hold on her silence before she answers"). Empty string when none.
 - soundCue — the on-screen SFX / ambience hook for audio-capable models (e.g. "door creak, distant traffic"). Empty string when none.
 - dialogue — the lines spoken during this shot, in order, as described above. Empty array when none.
-- durationSeconds — a relative pacing hint in seconds. Longer take = larger number; the system divides the scene's duration across its shots on the video model's clip grid.`,
+- durationSeconds — seconds. On a scene that has a \`duration:\` line, a relative pacing hint (longer take = larger number); the system divides that line across the shots. On a scene with no \`duration:\` line, the shot's real length, timed from what plays.`,
     },
     {
       role: 'user',
@@ -827,16 +748,18 @@ Build a complete character bible. For each character:
 - Name (from script or inferred)
 - Age (exact or range like "30s")
 - Gender, ethnicity (if relevant)
-- Physical: height, build, hair color/style, eye color, skin tone, age markers
-- Clothing: complete outfit that defines the character
-- Distinguishing features: scars, tattoos, jewelry, accessories
+- Physical: height, build, hair color/style, eye color, skin tone, age markers, and any PERMANENT mark (a scar, a birthmark, a tattoo): it is part of the body in every outfit
+- standardClothing: the complete outfit the character wears by default — the one they first appear in
+- looks — every distinct outfit the script gives this character, the default first. Most characters have exactly one. Add another ONLY when the script itself changes what they wear (leaves the office and arrives at the gala in a gown; wakes up in pyjamas; comes back bloodied). Never invent a change the script does not make. Each look: name (short label, unique for this character: "Office", "Gala gown"), clothing (the complete outfit; for the first look, the same text as standardClothing), styling (hair styling, makeup, jewelry and accessories, and injuries or dirt worn with this outfit; never a permanent mark, which is Physical; "" when there is nothing to say), lines (one gutter line number inside EACH scene where they wear it; [] for the first look — a scene no other look claims has them in it).
 - personality — who they are, NOT what they look like: temperament, archetype, how they react under pressure, comic register. Drives expressions, reactions, pacing and delivery.
 - movement — how the body moves: gait, posture, energy, habitual gestures, a limp, a tremor. Drives blocking and action.
   Extract both from the script, and infer where the script only implies them ("fidgets with his tie" → personality: anxious, eager to please; movement: restless hands, shoulders tight). Never repeat appearance in either field.
 - voiceDescription — what can be HEARD. ElevenLabs Voice Design brief, 40–90 words, this shape: Native <language and supported regional variant>. <gender>, <age>. Excellent quality. Persona: <2–5 words>. Emotion: <2–3 adjectives>. Then 1–2 sentences on timbre, pacing, delivery. Infer from the character's background, dialogue, personality and movement using the context rules above. No appearance, clothing, or FX words (reverb/echo/phone). Always fill this — it is the Voice field and the brief Generate casts from.
 - consistencyTag — HARD FORMAT CONTRACT: the snake_case slug of the character's name AS WRITTEN IN THE SCRIPT ("GIRL ONE" → "girl_one"). Optional descriptive context may follow the name slug ("jack_denim_weathered"), but the tag MUST start with the name slug. An independent system joins scene tags against these.
-- voiceOnly — true only for a voice that is heard but NEVER seen: a narrator, a voiceover, a radio or phone voice with no face on screen. Each distinct such voice is its own entry, named as the script names it, or "Narrator" for unnamed narration. Its personality describes the VOICE — register, warmth, pace, attitude. Age may be a guess if the voice implies one, otherwise empty; gender, ethnicity, physicalDescription, standardClothing, distinguishingFeatures and movement are empty strings. Create none when nobody speaks off screen. A character who is off screen for a moment, or seen in another scene, has a face: voiceOnly false, full appearance.
+- voiceOnly — true only for a voice that is heard but NEVER seen: a narrator, a voiceover, a radio or phone voice with no face on screen. Each distinct such voice is its own entry, named as the script names it, or "Narrator" for unnamed narration. Its personality describes the VOICE — register, warmth, pace, attitude. Age may be a guess if the voice implies one, otherwise empty; gender, ethnicity, physicalDescription, standardClothing and movement are empty strings. Create none when nobody speaks off screen. A character who is off screen for a moment, or seen in another scene, has a face: voiceOnly false, full appearance.
 - isPerson — true when this character is a person (including a stylised or cartoon person, and a real person in a non-fiction script). False for animals, robots, creatures, vehicles-as-characters, and non-human cartoons. A narrator is usually a human voice: isPerson true.
+
+Characters already cast (the <CAST> block, when present). These characters exist, with their appearance and their looks. For each one the script uses, return an entry with that EXACT characterId and name; copy its appearance rather than rewriting it. For each outfit it wears, reuse one of its listed look names exactly when it fits, and add a new look only when none fits. A script character with a cast character's name IS that character: return its characterId, never a new one. Any name you cannot place in <CAST> is a new character. Never give a cast characterId to anyone else, and never invent one that collides with <CAST>.
 
 Track first mentions:
 - "a man walks in" → the character first appears as "a man"
@@ -896,7 +819,7 @@ If a script references an UPPERCASE token that is NOT in <ELEMENTS> and does not
 The following user-uploaded elements are available. Produce an elementBible entry for each one used in the script:
 {{elements}}
 </ELEMENTS>
-
+{{cast}}
 <USER_SCRIPT>
 {{script}}
 </USER_SCRIPT>
@@ -916,64 +839,6 @@ For each unique location:
 5. Create a consistencyTag starting with the core location name
 
 Respond with ONLY valid JSON matching the schema.`,
-    },
-  ],
-
-  'phase/talent-matching-chat': [
-    {
-      role: 'system',
-      content: `You are a casting director AI. Your job is to match available talent (actors) to character roles.
-
-## CONTEXT
-The user has EXPLICITLY SELECTED these talent members because they want them cast in this production.
-Your job is to find the BEST character match for each talent member.
-
-## MATCHING PRIORITY (in order of importance)
-1. Gender compatibility (prefer matching, but can be flexible for unspecified characters)
-2. Age compatibility (within reasonable range)
-3. Physical appearance similarity
-4. Role prominence (prefer giving main roles to talent)
-
-## RULES
-- You MUST match every talent to a character (the user selected them for a reason)
-- Each talent can only be matched to ONE character
-- Each character can only have ONE talent assigned
-- If there are more talent than characters, match as many as possible (up to character count)
-- Be creative - talent can play characters of different ages/types with makeup and costume
-
-## OUTPUT FORMAT
-
-Return matches as JSON with this structure:
-{
-  "matches": [
-    {
-      "characterId": "character ID",
-      "talentId": "talent ID",
-      "confidence": 0.0-1.0,
-      "reason": "Brief explanation of why this talent fits this character"
-    }
-  ]
-}
-
-Respond with ONLY valid JSON matching the schema. No markdown, no code blocks, no YAML.`,
-    },
-    {
-      role: 'user',
-      content: `Cast the following talent into character roles. The user specifically selected these {{numTalent}} talent members.
-
-CHARACTERS ({{numCharacters}} available):
-{{charactersDescription}}
-
-TALENT TO CAST ({{numTalent}} selected by user):
-{{talentDescription}}
-
-REQUIREMENTS:
-- Match ALL {{numTalent}} talent to characters ({{numTalent}} talent, {{numCharacters}} characters available)
-- Each talent gets exactly one character
-- Each character can only have one talent
-{{additionalRequirements}}
-
-Respond with exactly {{numTalent}} matches.`,
     },
   ],
 

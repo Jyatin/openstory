@@ -139,6 +139,12 @@ export const SceneLocationTab: React.FC<SceneLocationTabProps> = ({
   // to the SEQUENCE, and this list is filtered by what the selected shots
   // reference, so a newly added one would not show up here.
   const canAdd = shotIds === null;
+  const addLocation = (
+    <AddLocationDialog
+      sequenceId={sequenceId}
+      usedLocationIds={new Set((locations ?? []).map((l) => l.id))}
+    />
+  );
 
   const picker =
     scene && locations && locations.length > 0 ? (
@@ -162,7 +168,7 @@ export const SceneLocationTab: React.FC<SceneLocationTabProps> = ({
               ? 'No locations yet'
               : 'No locations in this selection — clear the selection to add one'}
           </p>
-          {canAdd && <AddLocationDialog sequenceId={sequenceId} />}
+          {canAdd && addLocation}
         </div>
       </div>
     );
@@ -177,7 +183,7 @@ export const SceneLocationTab: React.FC<SceneLocationTabProps> = ({
           <span className="text-muted-foreground/50">·</span>
           <span>{scopedLocations.length}</span>
         </div>
-        {canAdd && <AddLocationDialog sequenceId={sequenceId} />}
+        {canAdd && addLocation}
       </div>
 
       {scopedLocations.map((shotLocation) => (
@@ -202,6 +208,7 @@ export const SceneLocationTab: React.FC<SceneLocationTabProps> = ({
               <Link
                 to="/sequences/$id/locations/$locationId"
                 params={{ id: sequenceId, locationId: shotLocation.id }}
+                search
                 className="flex items-center gap-1 text-xs text-primary hover:underline"
               >
                 View Details
@@ -223,7 +230,11 @@ export const SceneLocationTab: React.FC<SceneLocationTabProps> = ({
           <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
             {shotLocation.referenceImageUrl ? (
               <AppImage
-                src={shotLocation.referenceImageUrl}
+                // The one image drawn from the sheet, when it has one.
+                src={
+                  shotLocation.referencePortraitUrl ??
+                  shotLocation.referenceImageUrl
+                }
                 alt={shotLocation.name}
                 width={160}
                 height={160}

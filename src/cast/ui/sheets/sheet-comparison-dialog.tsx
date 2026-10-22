@@ -33,7 +33,7 @@ type SheetComparisonDialogProps = {
   isDiscarding?: boolean;
   /**
    * Visual aspect for the side-by-side previews. Defaults are derived from
-   * `entityType`: characters/talent → square, locations → 16:9 video.
+   * `entityType`: characters → square, locations → 16:9 video.
    */
   aspectRatio?: SheetAspectRatio;
   /**
@@ -47,8 +47,6 @@ type SheetComparisonDialogProps = {
 const ENTITY_LABEL: Record<SheetEntityType, string> = {
   character: 'character sheet',
   location: 'location reference',
-  'library-location': 'location reference',
-  talent: 'talent sheet',
 };
 
 const ASPECT_CLASS: Record<SheetAspectRatio, string> = {
@@ -60,11 +58,9 @@ const ASPECT_CLASS: Record<SheetAspectRatio, string> = {
 function defaultAspectFor(entityType: SheetEntityType): SheetAspectRatio {
   switch (entityType) {
     case 'character':
-    case 'talent':
       // Sheets surface as portrait/square headshots in the existing UI.
       return 'square';
     case 'location':
-    case 'library-location':
       return 'video';
   }
 }

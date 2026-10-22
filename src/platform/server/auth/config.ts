@@ -40,6 +40,7 @@ import {
 } from '@/platform/auth/cookie-prefix';
 import { DEV_OTP_CODE } from '@/platform/auth/dev-otp';
 import { isGoogleAuthConfigured } from './google-auth';
+import { isReviewLogin, reviewLoginCode } from './review-login';
 import { isLocalRequestHost } from '@/platform/server/env/environment';
 import { DEVICE_VERIFICATION_PATH } from '@/platform/server/api-v1/device-auth';
 import { createOAuthProviderPlugins } from './oauth-provider';
@@ -178,6 +179,13 @@ export function createAuth(db: ReturnType<typeof getDb> = getDb()) {
     session: {
       expiresIn: 60 * 60 * 24 * 90, // 90 days
       updateAge: 60 * 60 * 24, // Update session daily
+      // The session rides a signed cookie for five minutes (#2082): a
+      // sequence page fires ~40 server fns, and each read `session` then
+      // `user` from the primary before doing anything. A revoked session or
+      // a changed `user.status` is seen within `maxAge`. Compliance
+      // enforcement is read fresh on every write and at most
+      // `TEAM_MEMO_TTL_MS` stale on a GET (`team-memo.ts`).
+      cookieCache: { enabled: true, maxAge: 5 * 60 },
     },
 
     // Account linking configuration
@@ -211,11 +219,16 @@ export function createAuth(db: ReturnType<typeof getDb> = getDb()) {
       emailOTP({
         otpLength: 6,
         expiresIn: 300, // 5 minutes
-        // Dev-only fixed code (see devFixedOtp above). Returning undefined
+        // The review account's fixed code (review-login.ts), else the
+        // dev-only fixed code (see devFixedOtp above). Returning undefined
         // falls back to better-auth's default random generator.
-        generateOTP: (_data, ctx) => devFixedOtp(ctx?.request),
+        generateOTP: ({ email, type }, ctx) =>
+          type === 'sign-in' && isReviewLogin(email)
+            ? reviewLoginCode()
+            : devFixedOtp(ctx?.request),
         async sendVerificationOTP({ email, otp, type }) {
-          if (type === 'sign-in') {
+          // Reviewers already hold the code; the inbox may not exist.
+          if (type === 'sign-in' && !isReviewLogin(email)) {
             logger.info('Sending sign-in OTP', { email });
             const result = await sendOtpEmail(email, otp);
             if (!result.success) {
@@ -384,6 +397,18 @@ export function createAuth(db: ReturnType<typeof getDb> = getDb()) {
  */
 export function getAuth() {
   return (_authInstance ??= createAuth());
+}
+
+/**
+ * The per-isolate Better Auth init promise. `betterAuth()` starts it as
+ * soon as the instance exists; the OAuth provider plugin's `init` reads
+ * `oauth_resource` there, and every `auth.api` / `handler` call awaits the
+ * same promise. The Worker `fetch` handler must `holdInstanceStartup` this
+ * before awaiting it (#2073). Creating it is the start, so call it from the
+ * shared handler, not from one route.
+ */
+export function authStartupPromise(): Promise<unknown> {
+  return getAuth().$context;
 }
 // Type inference for the auth instance with custom fields
 export type Auth = ReturnType<typeof getAuth>;

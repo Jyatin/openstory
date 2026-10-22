@@ -25,10 +25,15 @@ import {
 } from '@/sequences/server/notify-sequence-ready';
 import { getGenerationChannel } from '@/platform/realtime';
 import { includesStage } from '@/sequences/pipeline';
+import { generateId } from '@/platform/id';
 import { validateSequenceAuth } from '@/platform/server/workflow/auth';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
-import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import {
+  isEngineAbortError,
+  WorkflowLoggedError,
+  WorkflowValidationError,
+} from '@/platform/server/workflow/errors';
 import type {
   AnalyzeScriptWorkflowInput,
   UpdateStaleShotsWorkflowInput,
@@ -42,6 +47,8 @@ import { getLogger } from '@/platform/logger';
 const logger = getLogger(['openstory', 'workflow', 'storyboard']);
 
 export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWorkflowInput> {
+  protected override readonly failureLabel = 'Storyboard';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<StoryboardWorkflowInput>>,
     step: WorkflowStep,
@@ -119,7 +126,7 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
                 prompt,
                 imageSize: aspectRatioToImageSize(aspectRatio),
               },
-              { scopedDb: scopedDb.credentials }
+              { credentials: scopedDb.credentials }
             );
             const generatedPosterUrl = result.imageUrls[0];
             if (!generatedPosterUrl) return null;
@@ -202,6 +209,7 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
           pendingAutoStyleId: input.pendingAutoStyleId,
           analysisModelId,
           elementIds,
+          cast: input.cast,
           musicPromptSource: input.musicPromptSource,
           imageModel,
           imageModels: input.imageModels ?? [imageModel],
@@ -212,9 +220,7 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
           stopAt: input.stopAt,
           musicModel: input.musicModel,
           audioModels: input.audioModels,
-          suggestedTalentIds: input.suggestedTalentIds,
           suggestedLocationIds: input.suggestedLocationIds,
-          suggestedTalent: input.suggestedTalent,
           suggestedLocations: input.suggestedLocations,
           referenceOnly: input.referenceOnly,
           generateVoices: input.generateVoices ?? false,
@@ -223,7 +229,7 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
         },
         spawnStepName: 'spawn-analyze-script',
         awaitStepName: 'await-analyze-script',
-        // Scene splitting and parallel cast/location matching each allow 45m.
+        // Scene splitting and location matching each allow 45m.
         timeout: '2 hours',
       });
 
@@ -267,7 +273,10 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
             }
           );
         });
-        throw new NonRetryableError(message);
+        throw new WorkflowLoggedError(message, {
+          kind: 'run.failed',
+          summary: message,
+        });
       }
       if (!frozen.plan) throw new NonRetryableError('Fresh plan missing');
       // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- exact checkpoint above
@@ -276,7 +285,7 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
       >;
     }
     // Fresh and continue share the same durable execution path.
-    let continueFailure: string | null = null;
+    let unitsFailed = false;
     if (input.plan || plan.targets.length || plan.references || plan.music) {
       const result = await spawnAndAwaitChild<
         UpdateStaleShotsWorkflowInput,
@@ -302,16 +311,11 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
         // in parallel), plus notify lag under a burst.
         timeout: '4 hours',
       });
-      // The executor records a unit's failure and carries on; the run as a
-      // whole did not finish what was asked, so it ends failed, not
-      // completed, and sends no "ready" email.
-      const [first] = result.failures;
-      if (first) {
-        continueFailure =
-          result.failures.length === 1
-            ? first.error
-            : `${result.failures.length} steps failed. First: ${first.error}`;
-      }
+      // The executor records a unit's failure on the unit and carries on. The
+      // failure stays there (#2104): copied onto the sequence it outlives the
+      // shot it came from and asks for a whole regenerate. The run still
+      // sends no "ready" email.
+      unitsFailed = result.failures.length > 0;
     }
 
     const reservationId = input.reservationId;
@@ -321,21 +325,20 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
       });
     }
 
-    if (continueFailure) {
-      const message = continueFailure;
-      await step.do('mark-failed', async () => {
-        await seq.updateStatus('failed', message);
-      });
-      await step.do('emit-failed', async () => {
-        await getGenerationChannel(sequenceId).emit('generation.failed', {
-          message,
-        });
-      });
-      return;
-    }
-
+    const completedEventId = await step.do(
+      'storyboard-completed-event-id',
+      async () => generateId()
+    );
     await step.do('mark-completed', async () => {
-      await seq.updateStatus('completed');
+      await seq.updateStatus('completed', null, {
+        id: completedEventId,
+        sequenceId,
+        actorId: userId,
+        kind: 'storyboard.completed',
+        targetType: 'sequence',
+        targetId: sequenceId,
+        summary: 'Finished the storyboard',
+      });
     });
 
     await step.do('emit-complete', async () => {
@@ -347,20 +350,27 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
     // "Your video is ready" is a one-shot claim per sequence: sending it for
     // a run that stopped before motion would spend it on a board with no video
     // and silence the real completion (#1408).
-    if (!includesStage(input.stopAt, 'motion')) return;
+    if (unitsFailed || !includesStage(input.stopAt, 'motion')) return;
 
     // After emit-complete: a send retry must not strand the player on processing.
-    await step.do('email-ready', async () => {
-      await notifySequenceReady({
-        scopedDb,
-        sequenceId,
-        ownerEmail: input.ownerEmail,
-        sequenceUrl: input.sequenceUrl || sequenceScenesUrl(sequenceId),
-        posterUrl,
-        notify: input.notify,
-        userId,
+    // The step's own retries run first. A send that still fails must not
+    // un-complete the sequence or append "Storyboard failed".
+    try {
+      await step.do('email-ready', async () => {
+        await notifySequenceReady({
+          scopedDb,
+          sequenceId,
+          ownerEmail: input.ownerEmail,
+          sequenceUrl: input.sequenceUrl || sequenceScenesUrl(sequenceId),
+          posterUrl,
+          notify: input.notify,
+          userId,
+        });
       });
-    });
+    } catch (error) {
+      if (isEngineAbortError(error)) throw error;
+      logger.error('Storyboard ready email was not sent', { err: error });
+    }
   }
 
   protected override async onFailure({
@@ -383,8 +393,8 @@ export class StoryboardWorkflow extends OpenStoryWorkflowEntrypoint<StoryboardWo
     //
     // Skip the write when the analyze-script child already marked the
     // sequence failed — its message ("Your OpenRouter API key is invalid…")
-    // is more specific than the parent's wrapper ("Child workflow
-    // analyze-script… failed: …").
+    // is the one written for the user; the parent only has what came back
+    // through the await.
     const { sequenceId, reservationId } = event.payload;
     if (reservationId) {
       try {

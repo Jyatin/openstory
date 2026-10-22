@@ -1,4 +1,3 @@
-import { reusesTalentSheet } from '@/cast/server/talent/reuse-talent-sheet';
 /**
  * The references wave of a plan run (#1818): the sheets, element references
  * and voices a continue owes, each as the payload its per-entity workflow
@@ -7,9 +6,14 @@ import { reusesTalentSheet } from '@/cast/server/talent/reuse-talent-sheet';
  * the rows these came from.
  */
 
-import { buildRegenerateCharacterSheetPayload } from '@/cast/server/sheets/character-sheet-trigger';
+import {
+  buildCharacterSheetDraft,
+  buildRegenerateCharacterSheetPayload,
+} from '@/cast/server/sheets/character-sheet-trigger';
+import type { CharacterSheetDraft } from '@/cast/server/workflows/sheet-snapshots';
 import { buildRegenerateLocationSheetPayload } from '@/cast/server/sheets/location-sheet-trigger';
 import { characterToBible } from '@/cast/server/bibles-from-scoped';
+import { wearLook } from '@/cast/character-looks';
 import { resolveSequenceStyleConfig } from '@/look/style-config';
 import { SEED_VOICE_DEFAULT_TAKES } from '@/cast/seed-voice';
 import { newVoiceProvider } from '@/models/server/seed-speech-config';
@@ -34,6 +38,13 @@ import { multiplyMicros, type Microdollars } from '@/billing/money';
 
 export type PlanReferences = {
   characterSheets: Omit<CharacterSheetWorkflowInput, 'sheetVersionId'>[];
+  /**
+   * Looks other than the default whose default sheet this run also makes
+   * (#2015): the second references wave. Each is a draft with no face; the
+   * run finishes it with the default sheet it lands, so one run makes every
+   * look a script uses.
+   */
+  lookSheetsAfterDefault: CharacterSheetDraft[];
   locationSheets: Omit<LocationSheetWorkflowInput, 'referenceVersionId'>[];
   /** Null when no element reference is owed. */
   elementSheets: ElementSheetWorkflowInput | null;
@@ -71,7 +82,7 @@ export async function buildPlanReferences(args: {
       ? scopedDb.characters.list(sequence.id)
       : Promise.resolve([]),
     locationIds.size > 0
-      ? scopedDb.sequenceLocations.list(sequence.id)
+      ? scopedDb.locations.list(sequence.id)
       : Promise.resolve([]),
     elementIds.size > 0
       ? scopedDb.sequenceElements.list(sequence.id)
@@ -84,25 +95,44 @@ export async function buildPlanReferences(args: {
     sequence,
   };
 
+  // A `sheet:character` unit names a LOOK (#2015): one sheet per look some
+  // scene uses. A character an older worker wrote has no look row yet; its
+  // default look answers to the character's own id (`lookId`).
+  const owedLooks = characters
+    .filter((c) => !c.voiceOnly)
+    .flatMap((character) =>
+      (character.looks.length > 0
+        ? character.looks.map((look) => wearLook(character, look))
+        : [character]
+      )
+        .filter((dressed) => sheetIds.has(dressed.lookId))
+        .map((dressed) => ({ character, dressed }))
+    );
+  // A look other than the default is drawn from the default look's sheet.
+  // When this run makes that sheet too, the look waits for it: drafted here,
+  // finished with the sheet the run lands (`lookSheetsAfterDefault`).
+  const afterDefault = ({ character, dressed }: (typeof owedLooks)[number]) =>
+    dressed.lookId !== character.id && sheetIds.has(character.id);
   const characterSheets = await Promise.all(
-    characters
-      .filter((c) => sheetIds.has(c.id) && !c.voiceOnly)
-      .map(async (character) => {
-        const payload = await buildRegenerateCharacterSheetPayload({
+    owedLooks
+      .filter((owed) => !afterDefault(owed))
+      .map(async ({ character, dressed }) => {
+        return buildRegenerateCharacterSheetPayload({
           ...context,
           character,
+          lookId: dressed.lookId,
         });
-        // A first sheet can copy the matched talent. An existing sheet's
-        // regeneration must apply the edited bible instead.
-        if (!character.selectedSheetVersionId) {
-          payload.reuseTalentSheet = reusesTalentSheet(character, {
-            sheetImageUrl: payload.referenceImageUrl,
-            sheetMetadata: payload.talentMetadata,
-            talentDescription: payload.castTalentDescription,
-          });
-        }
-        return payload;
       })
+  );
+  const lookSheetsAfterDefault = await Promise.all(
+    owedLooks.filter(afterDefault).map(async ({ character, dressed }) => {
+      const { draft } = await buildCharacterSheetDraft({
+        ...context,
+        character,
+        lookId: dressed.lookId,
+      });
+      return draft;
+    })
   );
   const locationSheets = await Promise.all(
     locations
@@ -170,9 +200,7 @@ export async function buildPlanReferences(args: {
         sequence.imageModel,
         DEFAULT_IMAGE_MODEL
       ),
-      characterSheets: characterSheets.filter(
-        (sheet) => !sheet.reuseTalentSheet
-      ).length,
+      characterSheets: characterSheets.length + lookSheetsAfterDefault.length,
       locationSheets: locationSheets.length,
       elementSheets: owedElements.length,
       pricing: await getEffectiveFalPricing(),
@@ -180,5 +208,12 @@ export async function buildPlanReferences(args: {
     voices: multiplyMicros(VOICE_ESTIMATE_COST, voices.length),
   };
 
-  return { characterSheets, locationSheets, elementSheets, voices, cost };
+  return {
+    characterSheets,
+    lookSheetsAfterDefault,
+    locationSheets,
+    elementSheets,
+    voices,
+    cost,
+  };
 }

@@ -21,6 +21,7 @@ import type {
   regenerateShotSchema,
 } from '@/shots/server/shot.schemas';
 import { dbSceneId } from '@/shots/scene-id';
+import { recordTriggerFailure } from '@/sequences/server/db/sequence-events';
 import { rescanContinuityFromPrompt } from '@/shots/server/rescan-continuity-from-prompt';
 import {
   getSceneLocationReferenceImages,
@@ -127,6 +128,7 @@ export async function generateShotImage(
       model: workflowInput.model ?? DEFAULT_IMAGE_MODEL,
       pendingInputHash: workflowInput.snapshotInputHash,
       isPrimary: true,
+      actorId: context.user.id,
     });
   } catch (error) {
     const raced = (
@@ -159,6 +161,14 @@ export async function generateShotImage(
       'failed',
       error instanceof Error ? error.message : String(error)
     );
+    await recordTriggerFailure(context.scopedDb.sequenceEvents, {
+      sequenceId: sequence.id,
+      actorId: user.id,
+      kind: 'run.failed',
+      targetType: 'sequence',
+      targetId: sequence.id,
+      summary: 'Image generation failed',
+    });
     throw error;
   }
   await context.scopedDb.frameVariants.update(claim.id, { workflowRunId });
@@ -207,13 +217,14 @@ export async function generateShotImageVariants(
   const [allCharacters, allLocations, allElements, selectedPrompt] =
     await Promise.all([
       context.scopedDb.characters.listWithSheets(sequence.id),
-      context.scopedDb.sequenceLocations.listWithReferences(sequence.id),
+      context.scopedDb.locations.listWithReferences(sequence.id),
       context.scopedDb.sequenceElements.list(sequence.id),
       context.scopedDb.framePromptVersions.getSelected(frame.id),
     ]);
   const characterReferences = buildCharacterReferenceImages(
     matchCharactersToShotImage(allCharacters, {
       characterTags: scene?.continuity?.characterTags,
+      characterLooks: scene?.continuity?.characterLooks,
       visualPrompt: selectedPrompt?.text,
     })
   );
@@ -333,12 +344,14 @@ export async function selectShotImageVariant(
   const characterReferences = buildCharacterReferenceImages(
     matchCharactersToShotImage(allCharacters, {
       characterTags: scene?.continuity?.characterTags,
+      characterLooks: scene?.continuity?.characterLooks,
       visualPrompt: selectedPrompt?.text,
     })
   );
 
-  const allLocations =
-    await context.scopedDb.sequenceLocations.listWithReferences(sequence.id);
+  const allLocations = await context.scopedDb.locations.listWithReferences(
+    sequence.id
+  );
   const locationReferences = getSceneLocationReferenceImages(
     allLocations,
     scene?.continuity?.environmentTag ?? '',

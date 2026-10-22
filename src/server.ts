@@ -30,9 +30,10 @@ import {
 } from '@/models/server/reconcile-byteplus-assets';
 import { ensureLocalModelPricingSeeded } from '@/billing/server/seed-model-pricing';
 import { ensureSystemTemplatesSeeded } from '@/platform/server/db/seed-system-templates';
+import { authStartupPromise } from '@/platform/server/auth/config';
+import { holdInstanceStartup } from '@/platform/server/instance-startup';
 
 import { getLogger, toErrorPayload } from '@/platform/logger';
-import { logIsolateStamp } from '@/platform/server/isolate-stamp';
 import {
   isStaleServerFnPath,
   rewriteStaleServerFnResponse,
@@ -48,6 +49,9 @@ const logger = getLogger(['openstory', 'server']);
 // response: a failure logs, arms a cooldown, and a later request retries —
 // the cooldown keeps a permanently broken state (e.g. missing table) from
 // re-running the lock dance and partial sync at request rate.
+// The promise is cached on the isolate. Hold it with `ctx.waitUntil` before
+// awaiting (#2073): a client disconnect otherwise drops the in-flight D1
+// read and leaves the promise pending for every later request.
 const SEED_RETRY_COOLDOWN_MS = 60_000;
 let seedPromise: Promise<void> | null = null;
 let seedRetryAt = 0;
@@ -88,6 +92,7 @@ function ensureSeededOnce(db: D1Database, e2eTest?: string): Promise<void> {
 // `workflows[]`.
 export { ImageWorkflow } from '@/stills/server/workflows/image-workflow';
 export { ElementVisionWorkflow } from '@/cast/server/workflows/element-vision-workflow';
+export { SheetPortraitWorkflow } from '@/cast/server/workflows/sheet-portrait-workflow';
 export { ElementSheetWorkflow } from '@/cast/server/workflows/element-sheet-workflow';
 export { MusicWorkflow } from '@/audio/server/workflows/music-workflow';
 export { MotionWorkflow } from '@/motion/server/workflows/motion-workflow';
@@ -97,16 +102,12 @@ export { CharacterVoiceWorkflow } from '@/cast/server/workflows/character-voice-
 export { DialogueAudioWorkflow } from '@/motion/server/workflows/dialogue-audio-workflow';
 export { DialogueTakeWorkflow } from '@/motion/server/workflows/dialogue-take-workflow';
 export { LocationSheetWorkflow } from '@/cast/server/workflows/location-sheet-workflow';
-export { LibraryTalentSheetWorkflow } from '@/cast/server/workflows/library-talent-sheet-workflow';
-export { LibraryLocationSheetWorkflow } from '@/cast/server/workflows/library-location-sheet-workflow';
 export { ShotVariantWorkflow } from '@/stills/server/workflows/shot-variant-workflow';
 export { UpscaleShotVariantWorkflow } from '@/stills/server/workflows/upscale-shot-variant-workflow';
 export { ShotSpecRewriteWorkflow } from '@/shots/server/workflows/shot-spec-rewrite-workflow';
 export { MusicPromptWorkflow } from '@/audio/server/workflows/music-prompt-workflow';
-export { RecastCharacterWorkflow } from '@/cast/server/workflows/recast-character-workflow';
 export { LocationMatchingWorkflow } from '@/cast/server/workflows/location-matching-workflow';
 export { ShotImagesWorkflow } from '@/stills/server/workflows/shot-images-workflow';
-export { TalentMatchingWorkflow } from '@/cast/server/workflows/talent-matching-workflow';
 export { CharacterBibleWorkflow } from '@/cast/server/workflows/character-bible-workflow';
 export { LocationBibleWorkflow } from '@/cast/server/workflows/location-bible-workflow';
 export { MotionMusicPromptsWorkflow } from '@/motion/server/workflows/motion-music-prompts-workflow';
@@ -142,24 +143,40 @@ interface WorkerEnv {
 }
 
 const exportedHandler: ExportedHandler<WorkerEnv> = {
-  async fetch(request, env) {
-    // Before any await, so the line is on this request when the isolate dies.
-    logIsolateStamp();
+  async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
+    // Media serving (/r2/<key>) never needs templates or sign-in — don't
+    // put either D1 round trip in front of it on cold starts.
+    const servesMedia = pathname.startsWith('/r2/');
 
-    // Media serving (/r2/<key>) never needs templates — don't put the
-    // seed check's D1 round trip in front of it on cold starts.
-    if (!pathname.startsWith('/r2/')) {
-      await ensureSeededOnce(env.DB, env.E2E_TEST);
+    // OAuth discovery and registration read no templates. A hosted MCP
+    // client (Gemini) gives up on a slow registration (#2138), so they start
+    // the seed without waiting for it.
+    const readsNoTemplates =
+      pathname.startsWith('/.well-known/') ||
+      pathname.startsWith('/api/auth/oauth2/');
+
+    if (!servesMedia) {
+      const seeded = ensureSeededOnce(env.DB, env.E2E_TEST);
+      // Before the await: a disconnect during this read must not stick the
+      // isolate (#2073). Same hold for sign-in, below, once we know this
+      // request will reach a route that can be the first `getAuth()` caller.
+      holdInstanceStartup(ctx, seeded);
+      if (!readsNoTemplates) await seeded;
     }
 
     // Markdown content negotiation for agents (#819): serve a real markdown
     // rendition where one exists; otherwise fall back to HTML rather than
-    // letting the router 500 on a non-HTML Accept header.
+    // letting the router 500 on a non-HTML Accept header. Markdown waits on
+    // the seed only — it never calls `getAuth()`.
     const wantsMarkdown = acceptsMarkdown(request);
     if (wantsMarkdown) {
       const markdown = getMarkdownForPath(pathname);
       if (markdown !== null) return markdownResponse(markdown, request.method);
+    }
+
+    if (!servesMedia) {
+      holdInstanceStartup(ctx, authStartupPromise());
     }
 
     let response = await handler.fetch(
@@ -174,7 +191,6 @@ const exportedHandler: ExportedHandler<WorkerEnv> = {
     return withDiscoveryLinkHeader(response, pathname);
   },
   scheduled(controller, _env, ctx) {
-    logIsolateStamp('cron');
     // Daily fal pricing refresh into the model_pricing table (#1069).
     if (controller.cron === FAL_PRICING_CRON) {
       ctx.waitUntil(

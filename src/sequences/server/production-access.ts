@@ -1,3 +1,4 @@
+import { requireCharacterLook } from '@/cast/server/character-look';
 import { NotFoundError } from '@/platform/errors';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { dbSceneId } from '@/shots/scene-id';
@@ -74,15 +75,30 @@ export function productionAccess(scopedDb: ScopedDb) {
     async character(sequenceId: string, id: string) {
       await sequence(sequenceId);
       return owned(
-        await scopedDb.characters.getById(id),
+        await scopedDb.characters.getById(sequenceId, id),
         sequenceId,
         'Character'
       );
     },
+    /**
+     * One look of a character of this sequence (#2015). A default look's id
+     * is its character's, so a character id names its default look — which
+     * is also how a character with no look row yet is reached.
+     */
+    async look(sequenceId: string, id: string) {
+      const found = await scopedDb.characterLooks.getById(id);
+      const character = owned(
+        await scopedDb.characters.getById(sequenceId, found?.characterId ?? id),
+        sequenceId,
+        'Character'
+      );
+      await sequence(sequenceId);
+      return found ?? (await requireCharacterLook(scopedDb, character, id));
+    },
     async location(sequenceId: string, id: string) {
       await sequence(sequenceId);
       return owned(
-        await scopedDb.sequenceLocations.getById(id),
+        await scopedDb.locations.getById(sequenceId, id),
         sequenceId,
         'Location'
       );

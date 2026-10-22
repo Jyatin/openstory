@@ -21,8 +21,10 @@ import { DEFAULT_ANALYSIS_MODEL } from '@/models/models.config';
 import { DEFAULT_RESOLUTION, resolutionSchema } from '@/models/resolutions';
 import {
   GENERATION_STAGES,
+  NEW_SEQUENCE_STOP_AT,
   generationStageSchema,
   stopAtFromFlags,
+  type GenerationStage,
 } from '@/sequences/pipeline';
 import { MUSIC_REQUIRES_MOTION_ERROR } from '@/sequences/server/sequence.schemas';
 import { z } from 'zod';
@@ -63,47 +65,55 @@ const portraitAttestation = portraitAttestationSchema.optional().meta({
     'Required when an image shows a real, identifiable person (checked server-side): portrait-rights statement version and authorization basis.',
 });
 
-/** Inline request to create a new library cast member (talent). */
+/**
+ * Inline request to create a team character and cast it into the sequence.
+ * Strict: a character has no reference images (#2135), so a client still
+ * sending `referenceImageUrls` gets a 400, not a silent drop.
+ */
 const createCharacterSchema = z
-  .object({
+  .strictObject({
     name: entityName,
     description: entityDescription,
     isHuman: z.boolean().optional().meta({
       description: 'Whether the character is a human (vs creature/object).',
     }),
-    referenceImageUrls,
-    portraitAttestation,
   })
   .meta({ id: 'CreateCharacter' });
 
-/** Inline request to create a new library location. */
+/** Inline request to create a new team location (#1695). */
 const createLocationSchema = z
   .object({
     name: entityName,
     description: entityDescription,
+    rendering: z.string().trim().min(1).max(2000).optional().meta({
+      description:
+        'What the place is rendered as, e.g. "Photoreal live action" or "3D animated, Pixar-like". Left out, it takes the sequence style’s.',
+    }),
     referenceImageUrls,
     portraitAttestation,
   })
   .meta({ id: 'CreateLocation' });
 
 /**
- * One cast member / location: a **reference** to an existing library entry
- * (string = id or name), or an inline **create** request (object). A single
- * list per kind keeps the "some exist, some are new" mental model.
+ * One cast member / location: a **reference** to an existing team character
+ * or team location (string = id or name), or an inline **create** request
+ * (object). A single list per kind keeps the "some exist, some are new"
+ * mental model. An inline character takes no images; the sequence draws its
+ * sheet.
  */
 const characterRefSchema = z
   .union([z.string().min(1), createCharacterSchema])
   .meta({
     id: 'CharacterRef',
     description:
-      'Existing talent by id or name (string), or an inline create object.',
+      'Existing team character by id or name (string), or an inline create object. The character is cast into the sequence. A name two team characters share is a conflict that asks for the id. An inline create whose name a team character already has is a conflict too. The sequence draws the sheet.',
   });
 const locationRefSchema = z
   .union([z.string().min(1), createLocationSchema])
   .meta({
     id: 'LocationRef',
     description:
-      'Existing location by id or name (string), or an inline create object.',
+      'One of the team’s locations by id or name (string), or an inline create object, which makes a new team location (or reuses the team location of that name). A name two team locations share is a conflict that asks for the id.',
   });
 
 export const apiCreateSequenceSchema = z
@@ -179,23 +189,30 @@ export const apiCreateSequenceSchema = z
       .min(1)
       .optional()
       .meta({
-        description: `Video (image-to-video) model key(s); first is primary. Defaults to ${DEFAULT_VIDEO_MODEL}.`,
+        description: `Video (image-to-video) model key(s); first is primary. Defaults to seedance_v2_5 where the team can reach it, otherwise ${DEFAULT_VIDEO_MODEL}.`,
       }),
 
-    motion: z.boolean().default(false).meta({
-      description: 'Generate motion (video) for each shot. Default false.',
-    }),
+    motion: z
+      .boolean()
+      .default(false)
+      .meta({
+        description: `Generate motion (video) for each shot. Default false: the run stops at ${NEW_SEQUENCE_STOP_AT}.`,
+      }),
     music: z
       .boolean()
       .default(false)
       .meta({ description: 'Generate sequence music. Default false.' }),
     stopAt: generationStageSchema.optional().meta({
-      description: `How far the run goes, in order: ${GENERATION_STAGES.join(', ')}. Overrides motion and music when set. Omitted, the run stops at ${stopAtFromFlags({})} unless motion or music is true.`,
+      description: `How far the run goes, in order: ${GENERATION_STAGES.join(', ')}. Overrides motion and music when set. Omitted, the run stops at ${NEW_SEQUENCE_STOP_AT} unless motion or music is true.`,
       examples: ['dialogue'],
     }),
-    voices: z.boolean().default(false).meta({
+    startFrames: z.boolean().default(false).meta({
       description:
-        'Design a voice per speaking character. Needed for dialogue audio; each saved voice uses an account-wide slot. Default false.',
+        'Render a still per shot and animate it. Default false: shots render straight to video from the reference sheets, no stills are made, and every video model must support that.',
+    }),
+    draftMotion: z.boolean().default(true).meta({
+      description:
+        'Render motion as low-resolution drafts first, to be rendered at quality once approved. Only Seedance 2.5 honours it; other video models render finished clips. Default true.',
     }),
     audioModels: z
       .array(z.string())
@@ -211,7 +228,7 @@ export const apiCreateSequenceSchema = z
     }),
     locations: z.array(locationRefSchema).optional().meta({
       description:
-        'Locations: each item is an existing ref (id/name) or an inline create object.',
+        'Locations the script may be set in: each item is one of the team’s locations (id/name) or an inline create object. Script analysis links the sequence to the ones the script uses.',
     }),
 
     elements: z
@@ -260,3 +277,15 @@ export const apiCreateSequenceSchema = z
   });
 
 export type ApiCreateSequenceInput = z.infer<typeof apiCreateSequenceSchema>;
+
+/** How far a create runs: the named stop, else motion/music, else the app's default. */
+export function apiStopAt(
+  input: Pick<ApiCreateSequenceInput, 'stopAt' | 'motion' | 'music'>
+): GenerationStage {
+  if (input.stopAt) return input.stopAt;
+  if (!input.motion) return NEW_SEQUENCE_STOP_AT;
+  return stopAtFromFlags({
+    autoGenerateMotion: true,
+    autoGenerateMusic: input.music,
+  });
+}

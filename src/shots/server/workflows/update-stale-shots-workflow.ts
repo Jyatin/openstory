@@ -47,8 +47,16 @@
  * are skipped, not rendered from stale inputs.
  */
 
-import { generateId } from '@/platform/id';
+import { withLookSheet } from '@/cast/character-looks';
 import {
+  assertQueuedWithLooks,
+  finishCharacterSheetPayload,
+} from '@/cast/server/workflows/sheet-snapshots';
+import { generateId } from '@/platform/id';
+import { sheetStartedSummary } from '@/sequences/model-label';
+import { sanitizeFailResponse } from '@/platform/server/workflow/sanitize-fail-response';
+import {
+  DEFAULT_IMAGE_MODEL,
   DEFAULT_MUSIC_MODEL,
   supportsDraftMode,
   type AudioModel,
@@ -59,6 +67,8 @@ import { resolveVideoModel } from '@/models/resolve-asset-models';
 import type { Scene } from '@/shots/scene-analysis.schema';
 import { getEffectiveFalPricing } from '@/billing/server/fal-pricing-live';
 import { estimateVideoCost, gateEstimate } from '@/billing/cost-estimation';
+import { seedanceEditSeconds } from '@/motion/seedance-edit';
+import { seedanceRunsOnArk } from '@/motion/server/motion-generation';
 import { estimateTtsCost } from '@/billing/elevenlabs-pricing';
 import { addMicros } from '@/billing/money';
 import {
@@ -194,6 +204,8 @@ type PromptScenes = {
 };
 
 export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<UpdateStaleShotsWorkflowInput> {
+  protected override readonly failureLabel = 'Update';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<UpdateStaleShotsWorkflowInput>>,
     step: WorkflowStep,
@@ -243,6 +255,21 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
         'Update-all plan predates frozen motion sources; re-trigger the update'
       );
     }
+    if (
+      plan.references &&
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- plans frozen before looks were drawn from the default look
+      !plan.references.lookSheetsAfterDefault
+    ) {
+      throw new WorkflowValidationError(
+        'Update-all plan predates looks drawn from the default look; re-trigger the update'
+      );
+    }
+    // Before any claim is taken, so nothing is left to clear.
+    assertQueuedWithLooks(
+      ...(plan.references?.characterSheets ?? []),
+      ...(plan.references?.lookSheetsAfterDefault ?? []),
+      ...plan.renderRefs.characters
+    );
 
     const counters = {
       visualPrompts: 0,
@@ -316,6 +343,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               targets: plan.targets,
               sequenceId,
               parentInstanceId,
+              actorId: userId,
             })
           )
         : { claimsByShot: {}, skipped: [] };
@@ -394,53 +422,113 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
         failedReferenceIds.add(id);
         failures.push(toFailure(id, stage, error));
       };
+      // Conditional (#1863): the payload was built at the click, and an edit
+      // since then found no claim to revoke. The claim is taken only while
+      // the look and the bible it was built from still hold;
+      // otherwise the run parks its sheet. Null when the claim step failed.
+      const claimCharacterSheet = async (
+        payload: Pick<
+          CharacterSheetWorkflowInput,
+          | 'lookId'
+          | 'lookVersionId'
+          | 'bibleVersionId'
+          | 'characterName'
+          | 'imageModel'
+        >
+      ): Promise<string | null> => {
+        // One sheet per look (#2015).
+        const id = payload.lookId;
+        try {
+          return await step.do(
+            `claim-character-sheet-${id}`,
+            async () =>
+              (
+                await scopedDb.characterLooks.claimSheet(
+                  id,
+                  {
+                    lookVersionId: payload.lookVersionId,
+                    // Passed as frozen: a plan from before #1600 has
+                    // none, and `claimSheet` skips what is absent.
+                    bibleVersionId: payload.bibleVersionId,
+                  },
+                  {
+                    markGenerating: true,
+                    activity: {
+                      sequenceId,
+                      actorId: userId,
+                      summary: sheetStartedSummary(
+                        payload.characterName,
+                        payload.imageModel ?? DEFAULT_IMAGE_MODEL
+                      ),
+                    },
+                  }
+                )
+              ).versionId
+          );
+        } catch (error) {
+          failReference(id, 'reference', error);
+          return null;
+        }
+      };
+      const spawnCharacterSheet = async (
+        payload: Omit<CharacterSheetWorkflowInput, 'sheetVersionId'>,
+        sheetVersionId: string
+      ) => {
+        const id = payload.lookId;
+        try {
+          const generated = await spawnAndAwaitChild<
+            CharacterSheetWorkflowInput,
+            CharacterSheetWorkflowResult
+          >(step, {
+            binding: this.env.CHARACTER_SHEET_WORKFLOW,
+            parentBindingName: PARENT_BINDING_NAME,
+            parentInstanceId,
+            childId: `character-sheet:${id}`,
+            childPayload: {
+              ...payload,
+              sheetVersionId,
+              reservationId: input.reservationId,
+            },
+            spawnStepName: `spawn-character-sheet-${id}`,
+            awaitStepName: `await-character-sheet-${id}`,
+            timeout: '30 minutes',
+          });
+          generatedCharacters.set(id, {
+            ...generated,
+            sheetVersionId: generated.sheetVersionId ?? sheetVersionId,
+          });
+        } catch (error) {
+          failReference(id, 'reference', error);
+          // A child that never started has no onFailure to clear the
+          // claim; the guarded clear is a no-op when one did.
+          await step.do(`fail-character-sheet-claim-${id}`, () =>
+            scopedDb.characterLooks.failSheetClaim(
+              id,
+              sheetVersionId,
+              sanitizeFailResponse(error)
+            )
+          );
+        }
+      };
+      const drawCharacterSheet = async (
+        payload: Omit<CharacterSheetWorkflowInput, 'sheetVersionId'>
+      ) => {
+        const sheetVersionId = await claimCharacterSheet(payload);
+        if (sheetVersionId) await spawnCharacterSheet(payload, sheetVersionId);
+      };
+      // The second wave's claims are taken now, with the first wave's: the
+      // click is when the run kicks these looks off. A regenerate between
+      // the waves then takes a newer claim, and this run's older sheet
+      // parks (last kickoff wins).
+      const afterDefaultClaims = new Map<string, string>();
+      await Promise.allSettled(
+        references.lookSheetsAfterDefault.map(async (draft) => {
+          const claimed = await claimCharacterSheet(draft);
+          if (claimed) afterDefaultClaims.set(draft.lookId, claimed);
+        })
+      );
       await Promise.allSettled([
-        ...references.characterSheets.map(async (payload) => {
-          const id = payload.characterDbId;
-          let sheetVersionId: string;
-          try {
-            sheetVersionId = await step.do(`claim-character-sheet-${id}`, () =>
-              scopedDb.characters.claimSheet(id, { markGenerating: true })
-            );
-          } catch (error) {
-            failReference(id, 'reference', error);
-            return;
-          }
-          try {
-            const generated = await spawnAndAwaitChild<
-              CharacterSheetWorkflowInput,
-              CharacterSheetWorkflowResult
-            >(step, {
-              binding: this.env.CHARACTER_SHEET_WORKFLOW,
-              parentBindingName: PARENT_BINDING_NAME,
-              parentInstanceId,
-              childId: `character-sheet:${id}`,
-              childPayload: {
-                ...payload,
-                sheetVersionId,
-                reservationId: input.reservationId,
-              },
-              spawnStepName: `spawn-character-sheet-${id}`,
-              awaitStepName: `await-character-sheet-${id}`,
-              timeout: '30 minutes',
-            });
-            generatedCharacters.set(id, {
-              ...generated,
-              sheetVersionId: generated.sheetVersionId ?? sheetVersionId,
-            });
-          } catch (error) {
-            failReference(id, 'reference', error);
-            // A child that never started has no onFailure to clear the
-            // claim; the guarded clear is a no-op when one did.
-            await step.do(`fail-character-sheet-claim-${id}`, () =>
-              scopedDb.characters.failSheetClaim(
-                id,
-                sheetVersionId,
-                error instanceof Error ? error.message : String(error)
-              )
-            );
-          }
-        }),
+        ...references.characterSheets.map(drawCharacterSheet),
         ...references.locationSheets.map(async (payload) => {
           const id = payload.locationDbId;
           let referenceVersionId: string;
@@ -448,8 +536,16 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             referenceVersionId = await step.do(
               `claim-location-sheet-${id}`,
               () =>
-                scopedDb.sequenceLocations.claimReference(id, {
+                scopedDb.locations.claimReference(id, {
                   markGenerating: true,
+                  activity: {
+                    sequenceId,
+                    actorId: userId,
+                    summary: sheetStartedSummary(
+                      payload.locationName,
+                      payload.imageModel ?? DEFAULT_IMAGE_MODEL
+                    ),
+                  },
                 })
             );
           } catch (error) {
@@ -481,10 +577,10 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
           } catch (error) {
             failReference(id, 'reference', error);
             await step.do(`fail-location-sheet-claim-${id}`, () =>
-              scopedDb.sequenceLocations.failReferenceClaim(
+              scopedDb.locations.failReferenceClaim(
                 id,
                 referenceVersionId,
-                error instanceof Error ? error.message : String(error)
+                sanitizeFailResponse(error)
               )
             );
           }
@@ -525,7 +621,12 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
           let huskId: string | undefined;
           try {
             const claim = await step.do(`claim-voice-${id}`, () =>
-              scopedDb.characters.createPendingVoiceClaim(id, userId)
+              scopedDb.characters.createPendingVoiceClaim(id, userId, {
+                activity: {
+                  sequenceId,
+                  summary: `Started a voice for ${payload.characterBible.name}`,
+                },
+              })
             );
             huskId = claim.version.id;
             // Someone else's design is in flight: it is making this voice.
@@ -556,13 +657,52 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
                 scopedDb.characters.markVoiceClaimTerminal(
                   husk,
                   'failed',
-                  error instanceof Error ? error.message : String(error)
+                  sanitizeFailResponse(error)
                 )
               );
             }
           }
         }),
       ]);
+      // The second wave (#2015): a look other than the default is drawn from
+      // the default look's sheet, so a look whose default sheet this run
+      // made waits for it. Its face is that landed sheet, from the run's own
+      // result, never a re-read. A default that failed or parked fails the
+      // look, which holds the stills that wear it.
+      await Promise.allSettled(
+        references.lookSheetsAfterDefault.map(async (draft) => {
+          const sheetVersionId = afterDefaultClaims.get(draft.lookId);
+          // The claim step failed and was reported.
+          if (!sheetVersionId) return;
+          const landed = generatedCharacters.get(draft.characterDbId);
+          const versionId = landed?.sheetVersionId;
+          if (!landed || landed.diverged || !versionId) {
+            const error = new Error(
+              `${draft.characterName}'s default look sheet did not land in this run, so this look has no face to be drawn from`
+            );
+            failReference(draft.lookId, 'reference', error);
+            // Its claim was taken at kickoff; no child holds it, so clear it
+            // here (a no-op once a newer run took it).
+            await step.do(`fail-character-sheet-claim-${draft.lookId}`, () =>
+              scopedDb.characterLooks.failSheetClaim(
+                draft.lookId,
+                sheetVersionId,
+                sanitizeFailResponse(error)
+              )
+            );
+            return;
+          }
+          const payload = await step.do(
+            `finish-look-sheet-${draft.lookId}`,
+            () =>
+              finishCharacterSheetPayload(draft, {
+                url: landed.sheetImageUrl,
+                versionId,
+              })
+          );
+          await spawnCharacterSheet(payload, sheetVersionId);
+        })
+      );
     }
 
     if (freshPhases && references) await completePhase('references');
@@ -577,16 +717,21 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
     // Frozen click-time rows, overlaid only with this run's child results.
     // A concurrent sheet selection cannot change a render already requested.
     const renderRefs: ShotImageRefs = {
-      characters: plan.renderRefs.characters.map((row) => {
-        const generated = generatedCharacters.get(row.id);
-        return generated
-          ? {
-              ...row,
-              sheetImageUrl: generated.sheetImageUrl,
-              selectedSheetVersionId: generated.sheetVersionId ?? null,
-            }
-          : row;
-      }),
+      // Each sheet this run made lands on its look (#2015), so a scene
+      // dressed in that look renders from it.
+      characters: plan.renderRefs.characters.map((row) =>
+        [...generatedCharacters].reduce(
+          (character, [lookId, generated]) =>
+            character.looks.some((look) => look.id === lookId) ||
+            character.lookId === lookId
+              ? withLookSheet(character, lookId, {
+                  sheetImageUrl: generated.sheetImageUrl,
+                  selectedSheetVersionId: generated.sheetVersionId ?? null,
+                })
+              : character,
+          row
+        )
+      ),
       locations: plan.renderRefs.locations.map((row) => {
         const generated = generatedLocations.get(row.id);
         return generated
@@ -1036,6 +1181,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             scene: {
               continuity: {
                 characterTags: target.motionRender.characterTags,
+                characterLooks: target.motionRender.characterLooks ?? undefined,
                 elementTags: target.motionRender.elementTags,
                 environmentTag: target.motionRender.environmentTag,
               },
@@ -1074,6 +1220,14 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               ? (still?.url ?? undefined)
               : undefined,
             referenceOnly: !target.usesStartFrame,
+            // Decided once, here; the preflight below holds what it says
+            // (#2036). The via is a credential, read through its hatch.
+            seedanceEditSeconds: seedanceEditSeconds({
+              model,
+              onArk: await seedanceRunsOnArk(scopedDb.credentials),
+              prompt,
+              references: referenceImages,
+            }),
             // Same rule as `expectedFrameVersionId` above — a clip rendered
             // from references names no still.
             frameVersionId: target.usesStartFrame ? (still?.id ?? null) : null,
@@ -1714,7 +1868,7 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
             await step.do('fail-music-track-claim', async () => {
               await scopedDb.sequenceVariants.failMusicClaim(
                 { sequenceId, variantId: claimedTrack },
-                error instanceof Error ? error.message : String(error)
+                sanitizeFailResponse(error)
               );
             });
           };
@@ -1924,16 +2078,23 @@ export class UpdateStaleShotsWorkflow extends OpenStoryWorkflowEntrypoint<Update
               scopedDb.liveRead,
               addMicros(
                 gateEstimate(
-                  estimateVideoCost(model, input.duration ?? 3, {
-                    pricing: await getEffectiveFalPricing(),
-                    resolution:
-                      input.draft && supportsDraftMode(model)
-                        ? DRAFT_RESOLUTION
-                        : input.resolution,
-                    referenceOnly: input.referenceOnly,
-                    hasReferenceImages:
-                      (input.referenceImages?.length ?? 0) > 0,
-                  }),
+                  estimateVideoCost(
+                    model,
+                    Math.max(
+                      input.duration ?? 3,
+                      input.seedanceEditSeconds ?? 0
+                    ),
+                    {
+                      pricing: await getEffectiveFalPricing(),
+                      resolution:
+                        input.draft && supportsDraftMode(model)
+                          ? DRAFT_RESOLUTION
+                          : input.resolution,
+                      referenceOnly: input.referenceOnly,
+                      hasReferenceImages:
+                        (input.referenceImages?.length ?? 0) > 0,
+                    }
+                  ),
                   { model, operation: 'update-stale-shots:video' }
                 ),
                 estimateTtsCost(ttsChars)
@@ -2043,11 +2204,7 @@ export function dialogueTargetOutcome(
         });
       }
     } else if (!target.regenVideo) {
-      failures.push({
-        shotId: target.shotId,
-        stage: 'dialogue',
-        error: outcome.error,
-      });
+      failures.push(toFailure(target.shotId, 'dialogue', outcome.error));
     }
   }
   return { updated, failures };
@@ -2061,6 +2218,6 @@ function toFailure(
   return {
     shotId,
     stage,
-    error: error instanceof Error ? error.message : String(error),
+    error: sanitizeFailResponse(error),
   };
 }

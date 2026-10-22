@@ -32,12 +32,14 @@ type ScopedMethod = {
 type ClaimDomain = {
   /** Tables whose rows this domain generates or whose pointer it moves. */
   tables: readonly string[];
-  /** Takes the claim at the trigger (last kickoff wins). */
-  claim: ScopedMethod;
+  /** Takes the claim at the trigger (last kickoff wins). A domain with a
+   * conditional twin names both. */
+  claim: ScopedMethod | readonly [ScopedMethod, ...ScopedMethod[]];
   /** Clears the claim on failure ONLY if this run still holds it. */
   clear: ScopedMethod;
-  /** Moves the pointer and consumes the claim in one guarded UPDATE. */
-  promote: ScopedMethod;
+  /** Moves the pointer and consumes the claim in one guarded UPDATE. A domain
+   * with two ways to land (a drawn row, an existing row pointed at) names both. */
+  promote: ScopedMethod | readonly [ScopedMethod, ...ScopedMethod[]];
   /** The user's selector: moves the pointer unconditionally. Never from a run. */
   userSelect: ScopedMethod;
 };
@@ -62,36 +64,28 @@ const CLAIM_DOMAINS: Record<string, ClaimDomain> = {
   },
   // Sheets (#1113): pointer claims on the parent row naming the id the run's
   // result will carry. The row is appended at completion (no pending row),
-  // so a claim miss parks it as divergent in the same batch.
+  // so a claim miss parks it as divergent in the same batch. A character's
+  // sheets belong to its looks (#2015): the pointer and the claim are on
+  // `character_looks`, and the claim is taken only while the look version
+  // and the bible version are still the ones the run was snapshotted from
+  // (#1863).
   'character sheets': {
-    tables: ['character_sheet_variants'],
-    claim: 'characters.claimSheet',
-    clear: 'characters.failSheetClaim',
+    tables: ['character_sheet_variants', 'character_looks'],
+    claim: 'characterLooks.claimSheet',
+    clear: 'characterLooks.failSheetClaim',
     promote: 'characterSheetVariants.promoteIfPending',
     userSelect: 'characterSheetVariants.select',
   },
+  // A location is the team's (#1695): the pointer and the claim are on its
+  // own row, whichever sequence (or none) started the run. The bible parent
+  // claims through the conditional twin (#1863): taken only while the bible
+  // version its upsert returned still holds.
   'location sheets': {
     tables: ['location_sheet_variants'],
-    claim: 'sequenceLocations.claimReference',
-    clear: 'sequenceLocations.failReferenceClaim',
+    claim: ['locations.claimReference', 'locations.claimReferenceIfUnmoved'],
+    clear: 'locations.failReferenceClaim',
     promote: 'locationSheetVariants.promoteIfPending',
     userSelect: 'locationSheetVariants.select',
-  },
-  // The library location keeps its reference on the row; its parked results
-  // share `location_sheet_variants` with the sequence locations above.
-  'library location references': {
-    tables: ['location_library'],
-    claim: 'locations.claimReference',
-    clear: 'locations.clearReferenceClaimIf',
-    promote: 'locations.updateReferenceIfClaimed',
-    userSelect: 'locationSheetVariants.promoteAtomically',
-  },
-  'talent sheets': {
-    tables: ['talent_sheets', 'talent_sheet_variants'],
-    claim: 'talent.claimSheet',
-    clear: 'talent.clearSheetClaimIf',
-    promote: 'talent.landSheet',
-    userSelect: 'talentSheetVariants.promoteAtomically',
   },
   // Pointer claim, taken together with the generating husk (#1715).
   voices: {
@@ -181,6 +175,9 @@ const EXCEPTIONS: Record<string, string> = {
   // edit and a recast each append; nothing is generated into it async.
   character_bible_versions: 'authored; analysis and edits append',
   location_bible_versions: 'authored; analysis and edits append',
+  // Look definitions (#2015): authored like a bible. The look's SHEET is the
+  // generated thing, and it lands through the `character sheets` claim.
+  character_look_versions: 'authored; analysis and edits append',
   // Style snapshots (#1600): copied from the catalog on create, switch and
   // automatic derivation; a snapshot, not a generation.
   sequence_style_versions: 'snapshot of the catalog style; appended on change',
@@ -199,7 +196,6 @@ const UNCLAIMED_WRITERS: readonly ScopedMethod[] = [
   'shotPromptVersions.writeAiVersion',
   'shotSpecVersions.write',
   'characters.updateVoice',
-  'locations.updateReference',
   'sequenceMusicPromptVersions.write',
 ];
 const UNCLAIMED_CALL_SITES: Record<string, string> = {
@@ -218,12 +214,6 @@ const UNCLAIMED_CALL_SITES: Record<string, string> = {
     'pre-#1786 user edit; the rescue write is select: false',
   'src/stills/server/workflows/soften-image-prompt.ts: framePromptVersions.write':
     'select: false, lands unselected (#1786)',
-  // A library sheet payload queued before #1113 carries no claim (drain path;
-  // character and sequence-location runs land through the claim batch in its
-  // unclaimed mode). The library talent twin is `talent.sheets.create`,
-  // nested past this scan.
-  'src/cast/server/workflows/library-location-sheet-workflow.ts: locations.updateReference':
-    'pre-#1113 payload, no claim',
   // The music prompt pass selects its output with no claim (#1115); a track
   // regeneration claims the track, not the prompt.
   'src/audio/server/workflows/music-prompt-workflow.ts: sequenceMusicPromptVersions.write':
@@ -288,14 +278,16 @@ describe('claim discipline (#1130)', () => {
     const missing: string[] = [];
     for (const [name, domain] of Object.entries(CLAIM_DOMAINS)) {
       for (const role of ['claim', 'clear', 'promote', 'userSelect'] as const) {
-        const [module = '', method = ''] = domain[role].split('.');
-        const methods: unknown = Reflect.get(scopedDb, module);
-        const fn: unknown =
-          typeof methods === 'object' && methods !== null
-            ? Reflect.get(methods, method)
-            : undefined;
-        if (typeof fn !== 'function') {
-          missing.push(`${name}.${role}: ${domain[role]}`);
+        for (const spelled of [domain[role]].flat()) {
+          const [module = '', method = ''] = spelled.split('.');
+          const methods: unknown = Reflect.get(scopedDb, module);
+          const fn: unknown =
+            typeof methods === 'object' && methods !== null
+              ? Reflect.get(methods, method)
+              : undefined;
+          if (typeof fn !== 'function') {
+            missing.push(`${name}.${role}: ${spelled}`);
+          }
         }
       }
     }

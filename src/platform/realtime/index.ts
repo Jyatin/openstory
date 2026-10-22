@@ -66,6 +66,10 @@ type RealtimeChannelApi = {
  */
 const TRANSIENT_EVENTS: ReadonlySet<SchemaEventPath> = new Set([
   'shotPrompt.streaming',
+  // The channel DO broadcasts these itself and keeps the open set in `runs`.
+  // An emit through here must not land in history either (#2113).
+  'generation.run:started',
+  'generation.run:ended',
 ]);
 
 /** Resolve the Durable Object stub for a channel id. */
@@ -156,26 +160,6 @@ export function getChannelHistory(
  */
 export function getGenerationChannel(sequenceId?: string): RealtimeChannelApi {
   return sequenceId ? realtimeChannel(sequenceId) : noopChannel('generation');
-}
-
-/**
- * Get a channel for talent library events.
- * @param talentId - The talent ID to use as the channel identifier
- */
-export function getTalentChannel(talentId?: string): RealtimeChannelApi {
-  return talentId
-    ? realtimeChannel(`talent:${talentId}`)
-    : noopChannel('talent');
-}
-
-/**
- * Get a channel for location library events.
- * @param locationId - The location ID to use as the channel identifier
- */
-export function getLocationChannel(locationId?: string): RealtimeChannelApi {
-  return locationId
-    ? realtimeChannel(`location:${locationId}`)
-    : noopChannel('location');
 }
 
 /**

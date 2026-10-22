@@ -25,10 +25,17 @@ export type GenerationStage = (typeof GENERATION_STAGES)[number];
 export const generationStageSchema = z.enum(GENERATION_STAGES);
 
 /**
- * The stop when a caller names none (public API, MCP, old rows): the whole
- * film. The composer's own default is in `use-generation-settings.ts`.
+ * The stop when `createSequenceSchema` is handed neither a stop nor a legacy
+ * flag: the whole film.
  */
 export const DEFAULT_GENERATION_STOP_AT: GenerationStage = 'music';
+
+/**
+ * Where a new sequence stops unless the caller says otherwise (#2004): once
+ * the dialogue is recorded, before paying for motion. One value for the
+ * composer and for the public API and MCP create (#2084).
+ */
+export const NEW_SEQUENCE_STOP_AT: GenerationStage = 'dialogue';
 
 export const GENERATION_STAGE_META: Record<
   GenerationStage,
@@ -236,7 +243,7 @@ export function bannerStagesForStopAt(
  * Generate-dialog / continue-slider stops. Same as a full-run banner — the
  * last thumb is Motion & Music (`stopAt: 'music'`). Reference-only has no
  * Images stop. Voices off has no Dialogue stop — clips still run before
- * motion when a talent already holds a voiceId. Start frames + Voices share
+ * motion when a character already holds a voice. Start frames + Voices share
  * one start-frames-and-dialogue stop (the two ticks do not fit on the canvas slider).
  */
 export function sliderStages(

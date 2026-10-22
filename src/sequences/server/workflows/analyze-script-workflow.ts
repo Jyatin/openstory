@@ -2,11 +2,14 @@
 import { sanitizeScriptContent } from '@/sequences/prompt-validation';
 import { resolveVideoModels } from '@/models/resolve-video-models';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
-import { buildCastCharacterBible } from '@/cast/character-prompt';
 import { getGenerationChannel } from '@/platform/realtime';
 import { spawnAndAwaitChild } from '@/platform/server/workflow/await-child';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import {
+  queuedBeforeCast,
+  queuedBeforeLooks,
+} from '@/cast/server/workflows/sheet-snapshots';
 import { handleLlmAuthFailure } from '@/platform/server/workflow/llm-auth-failure';
 import { sanitizeFailResponse } from '@/platform/server/workflow/sanitize-fail-response';
 import type {
@@ -15,13 +18,14 @@ import type {
   LocationMatchingWorkflowOutput,
   SceneSplitWorkflowInput,
   SceneSplitWorkflowResult,
-  TalentMatchingWorkflowInput,
-  TalentMatchingWorkflowOutput,
 } from '@/platform/server/workflow/types';
 import {
   GENERATION_STAGE_META,
   type GenerationStage,
 } from '@/sequences/pipeline';
+import { persistSceneLooks } from '@/sequences/server/scene-persistence';
+import { logRunEvent } from '@/sequences/server/db/sequence-events';
+import { relabelBibleLooks, relabelLookPicks } from '@/cast/bible-looks';
 import { createCastRecords } from '@/cast/server/workflows/cast-records';
 import { shotWorkItems } from '@/shots/server/shot-work-items';
 import { persistShotSpec } from '@/shots/server/persist-shot-spec';
@@ -37,6 +41,8 @@ const logger = getLogger(['openstory', 'workflow', 'analyze-script']);
 const PARENT_BINDING_NAME = 'ANALYZE_SCRIPT_WORKFLOW' as const;
 
 export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeScriptWorkflowInput> {
+  protected override readonly failureLabel = 'Script analysis';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<AnalyzeScriptWorkflowInput>>,
     step: WorkflowStep,
@@ -54,7 +60,6 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
       elementIds,
       videoModel,
       videoModels: videoModelsInput,
-      suggestedTalentIds,
       suggestedLocationIds,
       referenceOnly,
     } = input;
@@ -66,6 +71,8 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
     if (!script) {
       throw new WorkflowValidationError('No script found');
     }
+    // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: a payload queued before #2050
+    if (!input.cast) throw queuedBeforeCast();
 
     // Record start time of analysis (used for analysis-duration metric below).
     const startTime = await step.do('start-time', () =>
@@ -109,8 +116,8 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
     // Elements uploaded while creating this sequence kick off `/element-vision`
     // (fire-and-forget) which writes their description/consistencyTag. Scene-
     // split reads those descriptions, so wait (bounded) for any still-running
-    // vision before loading — mirrors the talent-sheet / location-reference
-    // waits. Already-completed elements short-circuit with no added latency.
+    // vision before loading — mirrors the location-reference wait.
+    // Already-completed elements short-circuit with no added latency.
     //
     // Vision MUST be terminal before scene-split:
     // a scene split against a half-described element bakes the wrong look
@@ -214,6 +221,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         userCountry: input.userCountry,
         modelId: analysisModelId,
         elements: elementsMinimal,
+        cast: input.cast,
         videoModel: primaryVideoModel,
         // Shot-list covers scenes in this recipe. Auto-style derives in
         // parallel, so a first auto run still has the placeholder here.
@@ -227,7 +235,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
       timeout: '45 minutes',
     });
 
-    const { scenes, shotMapping, characterBible, locationBible, elementBible } =
+    const { shotMapping, characterBible, locationBible, elementBible } =
       sceneSplitResult;
 
     // Claimed only now: the split is in D1, so a style failure fails a run
@@ -235,7 +243,7 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
     const styleConfig = (await stylePromise) ?? inputStyleConfig;
 
     // ----------------------------------------------------------------------
-    // PHASE 1b: talent + location matching in parallel, then the cast rows.
+    // PHASE 1b: location matching, then the cast rows.
     // Still the Script stage — same banner segment, new caption.
     // ----------------------------------------------------------------------
     await step.do('phase-1-casting', async () => {
@@ -244,85 +252,69 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         phaseName: 'Casting characters & locations…',
       });
     });
-    const [talentSettled, locationMatchSettled] = await Promise.allSettled([
-      spawnAndAwaitChild<
-        TalentMatchingWorkflowInput,
-        TalentMatchingWorkflowOutput
-      >(step, {
-        binding: this.env.TALENT_MATCHING_WORKFLOW,
-        parentBindingName: PARENT_BINDING_NAME,
-        parentInstanceId,
-        childId: `talent-matching:${sequenceId ?? 'no-seq'}`,
-        childPayload: {
-          sequenceId,
-          userId: input.userId,
-          teamId: input.teamId,
-          reservationId: input.reservationId,
-          analysisModelId,
-          suggestedTalentIds,
-          suggestedTalent: input.suggestedTalent,
-          characterBible,
-        },
-        spawnStepName: 'spawn-talent-matching',
-        awaitStepName: 'await-talent-matching',
-        timeout: '45 minutes',
-      }),
-      spawnAndAwaitChild<
-        LocationMatchingWorkflowInput,
-        LocationMatchingWorkflowOutput
-      >(step, {
-        binding: this.env.LOCATION_MATCHING_WORKFLOW,
-        parentBindingName: PARENT_BINDING_NAME,
-        parentInstanceId,
-        childId: `location-matching:${sequenceId ?? 'no-seq'}`,
-        childPayload: {
-          sequenceId,
-          userId: input.userId,
-          teamId: input.teamId,
-          reservationId: input.reservationId,
-          analysisModelId,
-          suggestedLocationIds,
-          suggestedLocations: input.suggestedLocations,
-          locationBible,
-        },
-        spawnStepName: 'spawn-location-matching',
-        awaitStepName: 'await-location-matching',
-        timeout: '45 minutes',
-      }),
-    ]);
-    if (talentSettled.status === 'rejected') {
-      throw new Error(
-        `Talent matching failed: ${String(talentSettled.reason)}`
-      );
-    }
-    if (locationMatchSettled.status === 'rejected') {
-      throw new Error(
-        `Location matching failed: ${String(locationMatchSettled.reason)}`
-      );
-    }
-    const talentCharacterMatches = talentSettled.value.matches;
-    const libraryLocationMatches = locationMatchSettled.value.matches;
+    const locationMatch = await spawnAndAwaitChild<
+      LocationMatchingWorkflowInput,
+      LocationMatchingWorkflowOutput
+    >(step, {
+      binding: this.env.LOCATION_MATCHING_WORKFLOW,
+      parentBindingName: PARENT_BINDING_NAME,
+      parentInstanceId,
+      childId: `location-matching:${sequenceId ?? 'no-seq'}`,
+      childPayload: {
+        sequenceId,
+        userId: input.userId,
+        teamId: input.teamId,
+        reservationId: input.reservationId,
+        analysisModelId,
+        suggestedLocationIds,
+        suggestedLocations: input.suggestedLocations,
+        locationBible,
+      },
+      spawnStepName: 'spawn-location-matching',
+      awaitStepName: 'await-location-matching',
+      timeout: '45 minutes',
+    });
+    const libraryLocationMatches = locationMatch.matches;
 
-    // Derive and hash against the same cast attributes persisted below, so
-    // live verification agrees with the first prompts from analysis.
-    const castCharacterBible = buildCastCharacterBible(
-      characterBible,
-      talentCharacterMatches
-    );
+    // The bible the prompts hash is the one persisted below.
+    const analysedCastBible = characterBible;
     // Cast, locations and script-detected elements land NOW, sheet-less, so a
     // run stopped at Script shows the whole bible for review before any
     // reference image is billed. The executor later fills their selected sheets.
-    await step.do('create-cast-records', async () => {
-      if (!sequenceId) return { elements: [] };
+    const castRecords = await step.do('create-cast-records', async () => {
+      if (!sequenceId) return { elements: [], lookIds: {} };
       return createCastRecords(scopedDb, {
         sequenceId,
+        cast: input.cast,
         characterBible,
-        talentMatches: talentCharacterMatches,
         locationBible,
         locationMatches: libraryLocationMatches,
         elementBible,
         existingElements: elementsMinimal,
       });
+    });
+    // Looks (#2015): the bibles call named each outfit by a slug. The cast is
+    // persisted now, so swap the slugs for `character_looks.id` on the bible
+    // the prompts read and on the scenes that pick a non-default look, and
+    // write those picks onto the scenes. Only persisted ids are ever stored.
+    // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard: step results cached by a run that started before #2015
+    if (!castRecords.lookIds || !sceneSplitResult.sceneLooks) {
+      throw queuedBeforeLooks();
+    }
+    const lookIds = castRecords.lookIds;
+    const castCharacterBible = relabelBibleLooks(analysedCastBible, lookIds);
+    const sceneLooks = sceneSplitResult.sceneLooks;
+    const scenes = sceneSplitResult.scenes.map((scene) => {
+      const picks = relabelLookPicks(sceneLooks[scene.sceneId] ?? {}, lookIds);
+      return Object.keys(picks).length > 0 && scene.continuity
+        ? {
+            ...scene,
+            continuity: { ...scene.continuity, characterLooks: picks },
+          }
+        : scene;
+    });
+    await step.do('persist-scene-looks', async () => {
+      if (sequenceId) await persistSceneLooks(scopedDb, sequenceId, scenes);
     });
     // Each shot's spec lands as its first version, with the prompts derived
     // from it (#1915). Derivation reads only the spec and the frozen bibles.
@@ -351,6 +343,16 @@ export class AnalyzeScriptWorkflow extends OpenStoryWorkflowEntrypoint<AnalyzeSc
         });
       }
     });
+    if (sequenceId) {
+      await logRunEvent(step, scopedDb.sequenceEvents, 'analysis-completed', {
+        sequenceId,
+        actorId: input.userId,
+        kind: 'analysis.completed',
+        targetType: 'sequence',
+        targetId: sequenceId,
+        summary: 'Analysed the script',
+      });
+    }
     await stageComplete('script');
     await recordDuration('script');
   }

@@ -10,6 +10,14 @@ columns are gone (#1819).
 - Pure half (units, requires graph, cascade, Update all's filter, footer
   copy): `src/sequences/generation-plan.ts`.
 - Loader (rows + verdicts, one read per table): `src/sequences/server/generation-plan.ts`.
+  Every read is per sequence, never per shot, look or location (#2082): the
+  sheet verdicts take their rows (character sheets, live sheet versions, location
+  photos, style) from one batch and call the detail page's compare
+  (`lookSheetStaleness`, `locationSheetStaleness`) in memory. The one
+  exception is a character whose default look has no row yet, which the
+  compare backfills (a read and a write per such character).
+  `generation-plan-queries.test.ts` pins the count against a sequence of 2
+  and of 8 shots, characters and locations.
 - Wire: `getGenerationPlanFn` (`src/sequences/generation-plan.fn.ts`).
 
 ## Stops: how far a run goes
@@ -69,8 +77,9 @@ holds a recording keeps its `dialogue` unit either way.
 
 - `missing` — no artifact. New: today's `untracked` collapses this into "do
   nothing".
-- `stale` — the existing verdicts, verbatim: `computeShotStaleness`,
-  `readReferenceStaleness`, `readMusicPromptStaleness`, the media verdicts
+- `stale` — the existing verdicts, verbatim: `computeShotStaleness`, the
+  sheet compares behind `readReferenceStaleness` (`lookSheetStaleness`,
+  `locationSheetStaleness`), `readMusicPromptStaleness`, the media verdicts
   (`loadShotMediaStates`). Element refs have no verdict: an image is done.
 - `running` — a claim or status column: pending prompt/image claims,
   `shot_dialogue_claims` (live, not demoted), `sheetStatus` /
@@ -95,12 +104,22 @@ Generation preconditions (`SHOT_UNITS`, plus `music` ← `prompt:music`), not th
   (reference-only) + `dialogue` when the shot has one.
 - `dialogue` ← a `voice` on every speaker.
 - `music` ← `prompt:music`.
+- A `sheet:character` whose id is not the character's (a look other than the
+  default) ← `sheet:character:<characterId>`, the default look's sheet it is
+  drawn from. `characterId` is required on every plan sheet; it equals `id`
+  on the default look.
 
 Cascade, in kind order: an upstream `missing` / `stale` turns a `done` unit
 `stale` with `cascaded: true` (a sheet in the plan puts its stills in the
 plan); an upstream `running` / `blocked` turns a unit with work `blocked`. A
-`done` unit keeps its artifact. `requires` is the graph resolved to the
-plan's own units.
+`done` unit keeps its artifact. A look follows its default sheet by the same
+rules: a default this run makes puts the look in the same run (a `done` look
+cascades `stale`, because its face is about to move), and a default running
+elsewhere blocks it. The run draws such a look after the default lands, from
+the sheet it landed (the second references wave, see
+`docs/developer-guide/workflow.md`), so one run makes every look a script
+uses, with the stills and clips that wear them. `requires` is the graph
+resolved to the plan's own units.
 
 ## What a continue does
 
@@ -178,7 +197,9 @@ refetch on focus, invalidated by realtime and by any refused continue —
 `refetchAfterRefusedContinue`).
 
 - **The steps show at every step (#1780 §1)** until every unit is done — a
-  finished sequence hides them: one sticky footer, the slider first, then the Motion / Music / Drafts
+  finished sequence hides them, unless the row says voices are off and this
+  deployment can design one (#2067): Continue still owes the voices, so the
+  steps stay and the thumb caps at Dialogue. One sticky footer, the slider first, then the Motion / Music / Drafts
   controls of whichever step the sequence is at (their own buttons — batch
   motion, Generate Music, Render finals — are unchanged). Stops before the
   first with work are locked (done).
@@ -187,14 +208,18 @@ refetch on focus, invalidated by realtime and by any refused continue —
 - **The continue button** (`Generate`, or `Regenerate` when every unit it owes
   exists and is only stale — `planWorkLabel`; under it `2 references, 12
 prompts, 12 images`, `planWorkLine` — a Generate that also redoes stale
-  work names it apart, `8 videos, 1 music track · redo 15 prompts, 8 images` —
-  and a line per blocked noun,
+  work names it apart, `8 videos, 1 music track · redo 15 prompts, 8 images`,
+  and a sheet the run points at instead of drawing is counted apart,
+  `2 references (1 reused)` (`PlanUnit.reused`, #2017; the quote prices it
+  at zero) — and a line per blocked noun,
   `blockedLines`) shows when the
   plan's first work is before Motion.
 - **A switch shows only when it changes a step the run takes.** Start frames
   from Images, Draft first from Motion, Music at the Music stop. Voices has no
-  switch (#2004): a new sequence records dialogue wherever voice design is
-  configured, and a voice is turned off on the character. Turning on one that was skipped caps
+  switch and no caller boolean (#2067): a sequence owes dialogue wherever
+  voice design is configured, including a row stored off, and a voice is
+  turned off on the character. That stored-off row caps
+  the thumb at Dialogue (`switchStopAt`, saved off, requested on). Turning on a skipped switch caps
   the thumb at its step (Images / Dialogue; `switchStopAt`, shared by the
   footer and the server, so the label, the quote and the run agree) only when
   a later unit is already done or stale. Nothing past that step yet — no clip,
@@ -328,9 +353,10 @@ Storyboard freezes the same plan a Continue click uses and spawns the same
 just created. The loader ignores this parent run's processing banner, while
 retaining actual artifact claims. Frozen stop-at, switches and model choices
 remain authoritative. The reservation grows from this materialized plan before
-rendering. Missing first character sheets reuse a compatible matched talent
-sheet, with zero generation cost; explicit regeneration still renders the edit.
-Voice-only cast never owes a sheet.
+rendering. Explicit regeneration still renders the edit.
+A look's sheet is the character's, shared by every sequence that casts it
+(#2017), so a sequence that casts a character with a finished sheet owes
+none. Voice-only cast never owes a sheet.
 
 Analysis persists each shot's spec as its first `shot_spec_versions` row
 (#1915), and the visual and motion directions derived from it as ordinary
@@ -342,7 +368,10 @@ the first still therefore does not invalidate it or add a still prerequisite.
 Scene and style changes still invalidate it. A current motion digest does not include the still URL, so rendering the first still does not stale the motion prompt. Restore copies the source and spec of the row being restored. An element rename writes `renamed` on the prompt and `rename` on a new spec version. A content-checker rescue writes `softened` or `shortened`. A user edit uses the ordinary current-input provenance and Update all does not overwrite it.
 
 Planning and prompt staleness load every active character/location bible, even
-before its first sheet exists. The selected sheet fields on these rows remain
+before its first sheet exists. A location is the team's (#1695,
+`team-locations.md`): a `sheet:location` unit's id is the location's, its sheet
+is shared by every sequence that uses it, and a sequence style change does not
+stale it. The selected sheet fields on these rows remain
 optional. Filtering these inputs to completed sheets changes a derived prompt's
 hash during the fresh handoff and loses the reference IDs needed to attach the
 executor's newly generated sheets. Sheet-only readers keep their narrower APIs;

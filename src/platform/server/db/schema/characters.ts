@@ -1,20 +1,15 @@
 /**
  * Characters Schema
- * Scripted characters (roles) extracted from scripts, linked to talent for casting
+ * Scripted characters (roles) extracted from scripts. A character is the
+ * person: face, looks, sheets and voice.
  */
 
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
-import {
-  index,
-  integer,
-  snakeCase,
-  text,
-  uniqueIndex,
-} from 'drizzle-orm/sqlite-core';
+import { index, integer, snakeCase, text } from 'drizzle-orm/sqlite-core';
 import { generateId } from '@/platform/id';
 import type { CharacterBible } from './bible-versions';
-import { sequences } from './sequences';
-import { talent } from './talent';
+import type { CharacterLook, CharacterLookMinimal } from './character-looks';
+import { teams } from './teams';
 
 const SHEET_STATUSES = [
   'pending',
@@ -43,8 +38,11 @@ export type VoicePreview = {
 
 /**
  * Characters table
- * Stores characters extracted from a sequence's script with their generated reference sheets
- * and optional casting assignment to talent
+ *
+ * A character belongs to the team (#2017). A sequence uses one through a
+ * `sequence_cast` link that holds the script id and the soft-remove; the
+ * character itself, at its current bible, voice and looks, is what every
+ * sequence reads.
  */
 export const characters = snakeCase.table(
   'characters',
@@ -53,18 +51,19 @@ export const characters = snakeCase.table(
       .$defaultFn(() => generateId())
       .primaryKey()
       .notNull(),
-    sequenceId: text()
+    // The team that owns the character (#2017).
+    teamId: text()
       .notNull()
-      .references(() => sequences.id, { onDelete: 'cascade' }),
-    // Casting assignment (which talent plays this character)
-    talentId: text().references(() => talent.id, {
-      onDelete: 'set null',
-    }),
-    // From script analysis
-    characterId: text().notNull(), // e.g. "char_001" from script analysis
-    // The live `character_bible_versions` row (#1600): the bible IS that row.
-    // No FK (same cycle-avoidance as the sheet pointer). Null only on a row
-    // written by a worker older than #1600, which reads the legacy columns.
+      .references(() => teams.id),
+    // Unread since #2065: every team character is listed and attachable.
+    // Dropped in a follow-up (a native drop, no rebuild).
+    legacyInLibrary: integer('in_library', { mode: 'boolean' })
+      .default(false)
+      .notNull(),
+    // The character's current `character_bible_versions` row (#1600), read
+    // by every sequence that casts it. No FK (same cycle-avoidance as the
+    // sheet pointer). Null only on a row written by a worker older than
+    // #1600.
     selectedBibleVersionId: text(),
     // LEGACY bible columns (#1600). The bible lives in
     // `character_bible_versions`; these are read only as the fallback for a
@@ -93,8 +92,7 @@ export const characters = snakeCase.table(
     useVoice: integer({ mode: 'boolean' }),
     // The selected `character_voice_versions` row (#1657): the voice IS that
     // row (#1788). Its `voiceId` is an ElevenLabs/Seed voice on the PLATFORM
-    // account, copied onto `talent.voiceId` at save-to-library and back at
-    // cast, so release through `releaseVoiceIfUnreferenced`, never a bare
+    // account. Release through `releaseVoiceIfUnreferenced`, never a bare
     // delete. Null until the first voice write: a character without a voice
     // is a legitimate state, not an unknown.
     selectedVoiceVersionId: text(),
@@ -108,30 +106,28 @@ export const characters = snakeCase.table(
     firstMentionSceneId: text(),
     firstMentionText: text(),
     firstMentionLine: integer(),
-    // Generation lifecycle. NOT a mirror of the version row's status: these
-    // are stamped when no variant exists yet — 'generating' at trigger time,
-    // 'failed' when the workflow dies (#1419). Frames solved the same gap by
-    // opening a primary row before the status flips (#1942).
-    sheetStatus: text().$type<SheetStatus>().default('pending').notNull(),
-    sheetError: text(),
-    // Soft pointer to the live `character_sheet_variants` row (#1108 sheet
-    // versions). No FK — same cycle-avoidance as frames.selectedImageVersionId.
-    // Null on rows the #1419 backfill snapshotted rather than a user
-    // selecting: for those the live version is the one keyed to this row's own
-    // id, and it fills in the first time anyone re-rolls or selects.
-    selectedSheetVersionId: text(),
-    // The sheet claim (#1113): the id the in-flight sheet run's version row
-    // will carry. Set at the trigger (last kickoff wins); cleared by every
-    // write that changes a sheet input or picks a sheet. The run promotes its
-    // row only while this still names it, else parks it as divergent. Null
-    // when no run holds the pointer.
-    pendingPromoteSheetVersionId: text(),
-    // Soft-remove from the sequence (#1108 Phase 2, undoable). Deleted rows
-    // are excluded from default lists / prompt-context bibles but keep their
-    // sheet + bible fields, so restore is lossless. Continuity tags on scenes
-    // are NOT stripped on delete (plan §1: leave tags + warning).
-    deletedAt: integer({ mode: 'timestamp' }),
+    // LEGACY sheet columns (#2015). The sheet belongs to a look
+    // (`character_looks`): its status, pointer and claim live there, and "the
+    // character's sheet" is its default look's. These are read only as the
+    // fallback for a character an older worker wrote with no look
+    // (`cast/server/db/characters.ts`) and are never written. The `legacy`
+    // names keep the SQL column names but make every raw reader a compile
+    // error. Drop them once a deploy has run with no writer and a second
+    // backfill.
+    legacySheetStatus: text('sheet_status')
+      .$type<SheetStatus>()
+      .default('pending')
+      .notNull(),
+    legacySheetError: text('sheet_error'),
+    legacySelectedSheetVersionId: text('selected_sheet_version_id'),
+    legacyPendingPromoteSheetVersionId: text(
+      'pending_promote_sheet_version_id'
+    ),
     // Timestamps
+    // Deleted from the team (#2065): off the Characters page and the `@`
+    // picker, rows kept. Null while live. Not the same as a sequence
+    // removing it, which is `sequence_cast.removedAt`.
+    deletedAt: integer({ mode: 'timestamp' }),
     createdAt: integer({ mode: 'timestamp' })
       .$defaultFn(() => new Date())
       .notNull(),
@@ -139,15 +135,7 @@ export const characters = snakeCase.table(
       .$defaultFn(() => new Date())
       .notNull(),
   },
-  (table) => [
-    index('idx_characters_sequence_id').on(table.sequenceId),
-    index('idx_characters_talent_id').on(table.talentId),
-    // Unique constraint: one character per sequence/characterId combination
-    uniqueIndex('characters_sequence_character_key').on(
-      table.sequenceId,
-      table.characterId
-    ),
-  ]
+  (table) => [index('idx_characters_team').on(table.teamId)]
 );
 
 // Type exports
@@ -173,14 +161,93 @@ export type LegacyCharacterBibleColumn =
   | 'legacyIsPerson'
   | 'legacyConsistencyTag';
 
+/** The legacy sheet columns (#2015) — never read outside the resolver. */
+export type LegacyCharacterSheetColumn =
+  | 'legacySheetStatus'
+  | 'legacySheetError'
+  | 'legacySelectedSheetVersionId'
+  | 'legacyPendingPromoteSheetVersionId';
+
+/**
+ * The `sequence_cast` link a cast read came through (#2017). Only a read
+ * made through a sequence has one: a character read from no sequence (the
+ * Characters page) is a plain {@link Character}, and what it can do there
+ * takes no link.
+ */
+export type CharacterLink = {
+  /** The `sequence_cast` row this read came through. */
+  castId: string;
+  sequenceId: string;
+  /** The script id in this sequence, e.g. "char_001". */
+  characterId: string;
+};
+
+/**
+ * A character as one sequence casts it (#2017): the fields of its
+ * `sequence_cast` link, under the names the character's own columns had.
+ */
+export type CharacterCast = CharacterLink & {
+  /** Removed from this sequence (`sequence_cast.removedAt`). */
+  deletedAt: Date | null;
+  /** The character's current bible version. */
+  selectedBibleVersionId: string;
+  /** The character's current voice version; null when it has no voice. */
+  selectedVoiceVersionId: string | null;
+};
+
+/**
+ * What a character shows of the look it is wearing (#2015). Off a scoped read
+ * that is its default look; `wearLook` swaps in the look a scene picks. The
+ * names are the ones the character's own columns had, so "the character's
+ * sheet" still reads the same everywhere.
+ */
+export type CharacterWornLook = {
+  /** The look these fields belong to. */
+  lookId: string;
+  lookName: string;
+  standardClothing: string | null;
+  /**
+   * Hair, makeup, injuries. On the default look this is the EFFECTIVE
+   * styling (`effectiveStyling`, #2065): the look's own joined with the
+   * bible's legacy features text.
+   */
+  styling: string | null;
+  sheetStatus: SheetStatus;
+  sheetError: string | null;
+  selectedSheetVersionId: string | null;
+  pendingPromoteSheetVersionId: string | null;
+};
+
 /**
  * A character with its bible resolved from the selected
  * `character_bible_versions` row (#1600). Carries no sheet image — see
  * {@link CharacterWithSheet}.
  */
-export type Character = Omit<CharacterRow, LegacyCharacterBibleColumn> &
+export type Character = Omit<
+  CharacterRow,
+  | LegacyCharacterBibleColumn
+  | LegacyCharacterSheetColumn
+  | 'legacyInLibrary'
+  // The row's own `deletedAt` (deleted from the team) on a read from no
+  // sequence; a cast read carries its link's, from `CharacterCast`.
+  | 'deletedAt'
+  | 'selectedBibleVersionId'
+  | 'selectedVoiceVersionId'
+> &
+  Omit<CharacterCast, keyof CharacterLink> &
   CharacterBible &
-  CharacterVoice;
+  CharacterWornLook &
+  CharacterVoice & {
+    /**
+     * LEGACY (#2065): the features text the pinned bible version still
+     * holds. Already part of the default look's `styling`; read only by
+     * the digests stamped before #2065, by the write that carries it to
+     * the next bible version, and by the deprecated API field.
+     */
+    legacyDistinguishingFeatures: string | null;
+    /** Every look, default first; removed ones included (`deletedAt`). */
+    looks: CharacterLook[];
+  };
 
 /**
  * A character's voice, resolved from the selected `character_voice_versions`
@@ -208,27 +275,44 @@ export type CharacterVoice = {
 export type CharacterWithSheet = Character & {
   sheetImageUrl: string | null;
   sheetImagePath: string | null;
+  /** The square portrait drawn from the sheet; null when it has none. */
+  sheetPortraitUrl: string | null;
   sheetGeneratedAt: Date | null;
   sheetInputHash: string | null;
 };
+
+/** A character read through a sequence's link (#2017). */
+export type CastCharacter = Character & CharacterLink;
+export type CastCharacterWithSheet = CharacterWithSheet & CharacterLink;
 
 /**
  * A new character: the row's own columns plus the bible its first version
  * row carries. `voiceOnly` / `isPerson` default to false / true, as the
  * columns did. `voiceId` / `voiceDescription` are the voice the cast arrives
- * with (the talent's, or the analysed description); a voice the character
- * already has wins, and one that lands becomes its first voice version.
+ * with; a voice the character already has wins, and one that lands becomes
+ * its first voice version.
  */
 export type NewCharacter = Omit<
   InferInsertModel<typeof characters>,
-  LegacyCharacterBibleColumn | 'selectedBibleVersionId'
+  | LegacyCharacterBibleColumn
+  | LegacyCharacterSheetColumn
+  | 'legacyInLibrary'
+  | 'deletedAt'
+  | 'selectedBibleVersionId'
+  // The scoped module's own team.
+  | 'teamId'
 > &
-  Pick<CharacterBible, 'name'> &
-  Partial<Omit<CharacterBible, 'name'>> &
+  // The sequence that casts it, and how (#2017).
+  Pick<CharacterCast, 'sequenceId' | 'characterId'> &
+  Pick<CharacterBible, 'name' | 'rendering'> &
+  Partial<Omit<CharacterBible, 'name' | 'rendering'>> &
+  // The default look's clothing and sheet lifecycle (#2015). `sheetStatus`
+  // defaults to 'pending', as the column did.
+  Partial<Pick<CharacterWornLook, 'standardClothing' | 'sheetStatus'>> &
   Partial<Pick<CharacterVoice, 'voiceId' | 'voiceDescription'>>;
 
 export type CharacterMinimal = Pick<
-  CharacterWithSheet,
+  CastCharacterWithSheet,
   | 'id'
   | 'characterId'
   | 'name'
@@ -240,16 +324,11 @@ export type CharacterMinimal = Pick<
   | 'voiceOnly'
   | 'isPerson'
   | 'consistencyTag'
+  | 'lookId'
+  | 'lookName'
 > & {
   /** Designed ElevenLabs voice, when the row has one (#1554). */
   voiceId?: string | null;
-};
-
-// Composite types for API responses
-export type CharacterWithTalent = CharacterWithSheet & {
-  talent: {
-    id: string;
-    name: string;
-    imageUrl: string | null;
-  } | null;
+  /** The looks a scene can pick from (`dressForScene`). */
+  looks: CharacterLookMinimal[];
 };

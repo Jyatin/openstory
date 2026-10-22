@@ -57,30 +57,6 @@ bun deploy:production              # Workers Builds prod deploy command (migrate
 
 ## Project Structure
 
-```
-src/
-  routes/           # TanStack file routes (thin: params, loader, which screen)
-  ui/               # app shell, providers, cn, cross-cutting hooks
-    shadcn/         #   generated shadcn primitives (lint/knip-ignored; managed by the CLI)
-  platform/         # DOMAIN-BLIND infrastructure: auth, env, db client + schema,
-                    # storage, workflow engine, logger, realtime transport, emails
-    server/         #   its server-only half
-    ui/             #   its React half (auth forms, realtime client)
-  models/           # catalog, vias (fal/BytePlus/xAI/Google adapters), duration/resolution grids
-  sequences/        # aggregate: script analysis, pipeline, checkpoint, export
-  shots/            # content unit (frame + scene + staleness + prompt versions)
-  motion/           # video request/submit/poll + player
-  stills/           # image gen, sheets, upscale
-  audio/            # music
-  cast/             # talent, locations, elements, bibles
-  look/             # style
-  billing/          # money, estimates, pricing data + refresh, Stripe
-  studio/           # playground
-e2e/                # Playwright tests
-scripts/            # CLI tooling and setup
-drizzle/migrations/ # Generated SQL (do NOT hand-edit)
-```
-
 Inside a product domain: root files are client-safe (catalogs, pure logic, zod); `server/` is server-only (workflows, `server/db/<table>.ts` scoped-db modules, AI calls, prompts); `*.fn.ts` is a Start server fn (client imports the stub; `.handler()` is stripped); `ui/` is React + hooks. Domains may import each other's roots and `server/` halves; the coupling is real and is not hidden.
 
 **`src/platform` is domain-blind.** It may not value-import a product domain (`import type` is free) — enforced by `boundaries/platform-domain-blind` in `.oxlintrc.json` and, for relative imports the alias pattern cannot see, by `src/platform/domain-blind.test.ts`. A platform file that needs a domain belongs to that domain. Platform tests are exempt; the only other exceptions are the **composition roots** listed in the `boundaries/platform-domain-blind` override — the ScopedDb aggregate (`server/db/scoped.ts`, `scoped-workflow.ts`, `scoped/admin.ts`), `server/db/seed-system-templates.ts`, the public API layer `server/api-v1/**`, the MCP tool adapters `server/mcp/tools/**`, the realtime `query-cache-updater`, and the workflow base (`server/workflow/base-workflow.ts`, which bootstraps each run). Keep that list short: a new entry usually means a file that belongs in a domain.
@@ -105,24 +81,7 @@ Inside a product domain: root files are client-safe (catalogs, pure logic, zod);
 - Team-based resources (sequences, styles, characters).
 - Script-driven generation for consistency.
 
-**Data model:**
-
-```
-teams
-  ├── users (members)
-  ├── sequences (videos)
-  │   └── frames (scenes with metadata)
-  └── libraries (styles, characters, vfx, audio)
-```
-
 ## Setup
-
-```bash
-bun install
-bun dev                            # That's it — env, migrations, seed all happen on first run
-bun setup                          # Optional: add FAL_KEY / OPENROUTER_KEY interactively
-bun setup --prod                   # Production config + deploy (--deploy, --pr-preview also available)
-```
 
 **Branch + commit conventions:** Branches must be named `<issue-number>-feature-name` (e.g. `393-improve-readme`). Lefthook extracts the issue number and tags commits with `#<issue>` automatically. See `CONTRIBUTING.md`. Lefthook also runs quality checks pre-commit.
 
@@ -197,13 +156,16 @@ Pass a stable `deduplicationId` in the options to make a trigger idempotent.
 
 **Defining workflows** — each lives in `src/<domain>/server/workflows/<name>-workflow.ts`,
 extends `OpenStoryWorkflowEntrypoint` (`src/platform/server/workflow/base-workflow.ts`),
-and must be wired in three places (a test in
+and must be wired in four places (a test in
 `src/platform/server/workflow/wiring-consistency.test.ts` enforces this):
 
 1. `wrangler.jsonc` `workflows[]` — declares the binding + `class_name`.
 2. `src/server.ts` — re-exports the class so it lands in the Worker bundle.
 3. `TRIGGER_TO_BINDING` in `src/platform/server/workflow/trigger-bindings.ts` — maps the
    trigger path to the binding name.
+4. `WORKFLOW_CLASS_TO_BINDING` in the same file — maps the class to that
+   binding so the sequence chip can status a child whose instance id has no
+   trigger key (`continue:…`, `element-sheets:…`).
 
 The base class validates `userId`/`teamId` on the payload, builds a
 `ScopedDb`, and sanitizes/handles failures. Subclasses implement
@@ -280,6 +242,64 @@ changing the area, and update it in the same PR.**
   scene roster before #2012 is accepted until `LEGACY_HASH_UNTIL`. Design
   rationale:
   `docs/architecture/workflow-snapshots-and-content-hash-staleness.md`.
+- **Character looks (#2015)** — `docs/architecture/character-looks.md`. A
+  look owns clothing and the sheet; "the character's sheet" is its default
+  look's. Never dress by hand: `matchCharactersToShotImage` and
+  `resolveShotReferences` take the scene's `characterLooks` (required) and
+  return the cast dressed. A default look's id is its character's id. Look
+  sheets land only through `characterLooks.claimSheet`, which is conditional
+  on the snapshot. Never read the `legacy*` sheet or clothing columns. The
+  default look owns what the bible called distinguishing features
+  (#2065): a look's `styling` is already resolved (`effectiveStyling`), so
+  never read `legacyDistinguishingFeatures` or a look's `storedStyling` to
+  show or prompt with, and copy a look version forward from `storedStyling`.
+- **Team characters (#2017)** — `docs/architecture/team-characters.md`. A
+  character belongs to the team; a sequence uses it through a `sequence_cast`
+  link that holds only the script id, the soft remove and the `attached`
+  flag. There are no per-sequence versions, sheets or voices: every sequence
+  reads the character's current bible, voice, looks and look sheets, and an
+  edit from any sequence stales the others by derivation. A sheet reads no
+  sequence style: the bible's required `rendering` (`renderingFor`,
+  `renderingOfStyle` in `src/cast/rendering.ts`) is what it takes from one,
+  and `PHOTOREAL_RENDERING` keeps the prompt the recorded character-sheet fixtures match on. A method takes a
+  `sequenceId` only for the link's own fields or the event it writes; a write
+  made from no sequence (the Characters page, #2065) passes `null` there and
+  writes no event. A sheet or voice run started from no sequence
+  (`castAccessMiddleware`, `sequence: null`) stores under the team and
+  reports on the character's own channel (`castChannelId`). Analysis never rewrites a character the writer attached
+  or another sequence has cast: ask `analysisMayNotRewrite`, the one place
+  that rule lives. There is no library flag (#2065): every team character is
+  listed and attachable, and stays when its last sequence lets it go. A voice
+  is held until the character is deleted; removing a character from a
+  sequence or archiving a sequence releases nothing. A delete is soft
+  (`characters.deleted_at`) and refused while any sequence, archived ones
+  included, casts it (`getCastInAnySequenceOrArchive`). Nothing cascades
+  from `characters`: a hard delete goes through `deleteCharactersStatements`
+  and is refused while it would strand a saved voice.
+- **Team locations (#1695)** — `docs/architecture/team-locations.md`. A
+  location belongs to the team; a sequence uses it through a
+  `sequence_location_links` row that holds only the script id, the first
+  mention, the soft remove and the `attached` flag. There is no location
+  library, no per-sequence sheet and no public template: every sequence
+  reads the location's current bible and sheet, and an edit from any
+  sequence stales the others by derivation. A sheet reads no sequence
+  style: the bible's required `rendering` (`renderingForLocation`) is what
+  it takes from one, and its hash reads the bible, the uploaded reference
+  photos and the image model. A method takes a `sequenceId` only for the
+  link's own fields or the event it writes; a write made from no sequence
+  (the Locations page) passes `null` there and writes no event. A sheet run
+  started from no sequence stores under the team and reports on the
+  location's own channel (`locationChannelId`). A match is a link, never a
+  copy: analysis binds a script location to one the writer picked
+  (`boundTo`), and Replace re-points the link (`locations.replace`); neither
+  draws a sheet. Analysis never rewrites a location the writer attached or
+  another sequence has used: ask `analysisMayNotRewrite`, the one place that
+  rule lives. A read through a link answers with the script's tag
+  (`scriptConsistencyTag`) when it has one, so do not read the bible's tag
+  to match a scene. A delete is soft (`deleted_at` on the location) and
+  refused while any sequence, archived ones included, uses it. Nothing
+  cascades from a location: a hard delete goes through
+  `deleteLocationsStatements`. The SQL table is still `sequence_locations`.
 - **Generation plan, stop-at and continue (#1408, #1816)** —
   `docs/architecture/generation-plan.md`. What a sequence still owes is the
   generation plan, derived from live D1 — never a stored stage. `stopAt` is the
@@ -303,30 +323,23 @@ changing the area, and update it in the same PR.**
   playhead reaches it (#1845). The HLS playlist and its ingest remux are
   gone — a whole clip must never sit in Worker memory, and a fragmented MP4
   cannot be written without holding it. Download only hands over a render of
-  the current cut; "Render MP4 on server" makes one.
+  the current cut; "Render MP4 on server" makes one. The player itself is
+  `packages/stitch` (#1853, published as `@openstory/stitch`): it knows clips and cues, never shots —
+  the shot mapping and subtitles (`shotCues`) live in
+  `src/sequences/ui/theatre/playback-clips.ts`. A CLI cut is shared without
+  the CLI (#2127): `stitch bundle` writes a static folder, `stitch share`
+  uploads it (`POST /api/v1/stitches`, media names only, rewritten to
+  `/r2/stitches/<team>/<id>/…`, then one PUT per file, then
+  `POST …/$id/publish`, which checks every file is there and every image
+  for a real person before the row is published) and `/stitch/$id` plays
+  a published row with no auth. `create_stitch` on MCP stores through
+  `storeUpload`, so its row is born published.
 
 ## Frame System
 
 Frames are the core content unit — each represents one scene from script analysis.
 
 **Critical:** `frame.metadata` IS the `Scene` object (no wrapper). Fully typed via Drizzle JSONB.
-
-```typescript
-frame.metadata = {
-  sceneId,
-  sceneNumber,
-  originalScript: { extract, dialogue: [{ character, line, tone, shotNumber?, voiceToken? }] },
-  metadata: { title, durationSeconds, location, timeOfDay, storyBeat },
-  variants: { cameraAngles, movementStyles, moodTreatments }, // A/B/C options
-  selectedVariant: { cameraAngle, movementStyle, moodTreatment, rationale },
-  prompts: {
-    visual: { fullPrompt, negativePrompt, components, parameters },
-    motion: { fullPrompt, components, parameters },
-  },
-  continuity: { characterTags, environmentTag, colorPalette, lightingSetup },
-  musicDesign: { presence, style, mood, atmosphere },
-};
-```
 
 Access via `frameService.getSceneData(frame)`, `getVisualPrompt(frame)`, `getMotionPrompt(frame)`, or directly: `frame.metadata.metadata.title`, `frame.metadata.prompts.visual.fullPrompt`. Storing the full scene lets us regenerate without re-analyzing the script and preserves variants for retries.
 
@@ -378,13 +391,14 @@ bun db:migrate   # Apply migrations to local.db
 
 **The structure.** `wrangler.jsonc` separates dev from prod via env blocks:
 
-- **default** (no env) — triple duty: (1) `bun dev` / `vite dev` / `bun cf:dev` local simulation, (2) the patch base for PR-preview deploys (CI rewrites D1/bucket/workflow names in place), and (3) the provisioning template for Deploy-to-Cloudflare button deploys — its `database_name`/`bucket_name` are what a button user's fresh resources get called, and `streaming_tail_consumers` must stay `[]` so button deploys don't reference our log-forwarder Worker. The D1 binding has a **placeholder** `database_id: "dev-local-d1"` so any misrouted remote call (or buggy preview patch, or wrong-env deploy) 404s against Cloudflare rather than silently writing to prod. R2 buckets are **local Miniflare** too — stored media URLs are origin-relative (`/r2/<key>`, #894) and the worker's `/r2/$` route streams them from the binding when `R2_PUBLIC_STORAGE_DOMAIN` is unset (with a CDN domain set, the route redirects to it). Local dev needs no Cloudflare credentials. (Opt back into remote R2 by setting `"remote": true` on the binding + `R2_PUBLIC_STORAGE_DOMAIN` in `.env.local`; revert when done.)
+- **default** (no env) — triple duty: (1) `bun dev` / `vite dev` / `bun cf:dev` local simulation, (2) the patch base for PR-preview deploys (CI rewrites D1/bucket/workflow names in place), and (3) the provisioning template for Deploy-to-Cloudflare button deploys — its `database_name`/`bucket_name` are what a button user's fresh resources get called, and `tail_consumers` must stay `[]` so button deploys don't reference our log-forwarder Worker. The D1 binding has a **placeholder** `database_id: "dev-local-d1"` so any misrouted remote call (or buggy preview patch, or wrong-env deploy) 404s against Cloudflare rather than silently writing to prod. R2 buckets are **local Miniflare** too — stored media URLs are origin-relative (`/r2/<key>`, #894) and the worker's `/r2/$` route streams them from the binding when `R2_PUBLIC_STORAGE_DOMAIN` is unset (with a CDN domain set, the route redirects to it). Local dev needs no Cloudflare credentials. (Opt back into remote R2 by setting `"remote": true` on the binding + `R2_PUBLIC_STORAGE_DOMAIN` in `.env.local`; revert when done.)
 - **`[env.production]`** — real prod D1 (`database_name: openstory-prd`, `database_id: d5981bee-...`; the `#897` cutover recreated it from the old `velro-prd`/`d6a35f64-...`, which is retired). Production builds MUST set `CLOUDFLARE_ENV=production` (so the built `dist/server/wrangler.json` bakes this block) and the migrate step MUST pass `--env=production` (wired in `deploy:production` / `cf:deploy:prd`). This block ALSO declares the **video-export Cloudflare Container** (#968): `containers[]` (built from `containers/video-export/Dockerfile`), the `VIDEO_EXPORT_CONTAINER` Durable Object binding, and migration tag `v2`. It is **production-only** so `bun dev` and e2e stay Docker-free — `wrangler deploy`/Workers Builds builds + pushes the image (Docker required only at deploy, which Workers Builds provides). See `docs/architecture/public-api-internals.md`.
 - **`[env.test]`** — Playwright e2e. Local Miniflare D1 (`database_id: "openstory-test-local"`) AND local Miniflare R2 — fully hermetic, no Cloudflare credentials in CI. Activated via `CLOUDFLARE_ENV=test` (set in `playwright.config.ts` envPrefix and CI workflow env block) for `vite dev`, or `wrangler dev --env=test` for the built-server path.
 
 **Rules:**
 
 - Never add `"remote": true` to a D1 binding. The placeholder-id strategy is the safety net.
+- `compatibility_date` is `2026-10-08` (#1999), the newest date `workerd@1.20261001.1` (Wrangler 4.147.0) will start. A later date refuses to boot local dev and e2e. Production, test, and PR previews inherit the top-level value. Keep `enable_request_signal` (no default date; realtime disconnect cleanup). Do not add an opt-out flag without the review in `docs/deployment/cloudflare.md`. The log-forwarder Worker keeps its own date.
 - Production deploys run on **Workers Builds** (dashboard-connected to `main`, #900): build command `bun run build` with `CLOUDFLARE_ENV=production` as a build env var, deploy command `bun run deploy:production`. Manual fallback: `bun cf:deploy:prd`. Don't deploy a build made without `CLOUDFLARE_ENV=production` — it bakes the default block (placeholder D1) and fails loudly.
 - PR-preview deploys patch the default block at runtime in `.github/workflows/deploy-cloudflare.yml` and deploy without `--env`. Each PR gets its own real D1 named `openstory-pr-<n>`.
 
@@ -398,13 +412,23 @@ Remote migrations apply via `wrangler d1 migrations apply` (#897/#900: the `depl
 
 This destroyed `team_members`, `session`, `account`, and `passkey` in production on 2026-04-29 (issue #612, migration `20260428013041_productive_kabuki`). `PRAGMA defer_foreign_keys = ON` does **not** help — it defers constraint _checks_ but CASCADE still fires.
 
-**Workarounds (in order):**
+**Rules (in order):**
 
 1. **Avoid table rebuilds.** Prefer `ALTER TABLE … RENAME COLUMN / ADD COLUMN / DROP COLUMN` — SQLite/D1 support these without a rebuild.
-2. **Apply destructive migrations manually.** Snapshot first (`wrangler d1 export`), then apply via the D1 dashboard or `wrangler d1 ... --file=…`. Do not let the automated `wrangler d1 migrations apply` paths run it (mark it applied in `d1_migrations` afterwards so they skip it).
+2. **Never apply a migration to production by hand.** Every migration reaches prod only through the normal merge and deploy: no dashboard, no `wrangler d1 execute`, no hand-marked `d1_migrations` row. A migration that has to rebuild a parent table is made safe for the automatic path instead. All of these, in one custom file (worked example: `20261006232156_drop_character_legacy_columns`, #2017):
+   - No child with a cascade, set-null or set-default FK into the parent. Loosen them to `no action` in an earlier migration.
+   - A guard at the top that counts such FKs across every table and fails the file unless there are none, so it fails closed if the earlier migration did not run.
+   - `PRAGMA defer_foreign_keys = ON` first. Under it a cascade child is silently emptied and `restrict` does not stop it; that is what the guard is for.
+   - Copy out, drop, **create the table again** and copy back with named columns. Not drizzle's rename, which fails at commit.
+   - The pattern drops any trigger on the rebuilt table without a word (none exist today).
+
+   Prove it before merging, on a copy of production and on a scratch remote D1. What has been run for the worked example: `wrangler d1 migrations apply --local` on local data and on a copy of production, the PR-preview path on an empty remote D1, and on 2026-10-07 `migrations apply --remote` on a throwaway remote D1 loaded with a production export (188,226 rows; all eight character tables identical in count, no foreign key violations, both files recorded). Still local only: the out-of-order control, the guard stopping file 2 when file 1 has not run. Details: `docs/architecture/team-characters.md` § Migrations.
+
 3. **Avoid `ON DELETE CASCADE`** on FKs to long-lived parent tables (`user`, `teams`, `sequences`). Use `'restrict'` or `'no action'` and clean up children in app code.
 
-**Local guardrail:** `scripts/check-migrations.ts` runs as a Lefthook pre-commit step on staged `drizzle/migrations/**/*.sql`. It flags `DROP TABLE`, `TRUNCATE`, `DELETE FROM`, `ALTER TABLE … DROP COLUMN`, and annotates each `DROP TABLE` with the count of inbound `ON DELETE CASCADE` FKs. Bypass for a manually-applied migration: `bun scripts/check-migrations.ts --allow-destructive`. Note `--allow-destructive` is an argument to the SCRIPT — the Lefthook step (`lefthook.yml`) invokes it without one, so to land an intentionally destructive migration commit with `LEFTHOOK_EXCLUDE=migration-safety git commit`, NOT `--no-verify` (which also skips typecheck, lint, format and knip). A native `ALTER TABLE … DROP COLUMN` is flagged but is exactly the refactor the check asks for — it rebuilds no table, so #612 does not apply.
+**Loading a D1 export.** A whole `wrangler d1 export` file does not load back: a child's rows come before its parent table exists (`no such table`). Export twice, `--no-data` then `--no-schema`, and load the schema file first. On **local** D1 the data file then loads as it is. On **remote** D1 it still fails with a foreign key error: the remote import is evidently not one transaction, so the pragma at the top of the file does not cover it. Put the rows in parent-table-first order before loading (no table in this schema references itself or forms a loop, so such an order exists; `scripts/reorder-d1-dump.ts` does the reordering, but its table list is an old snapshot and it stops on a table it does not know, so regenerate the list first). Verified 2026-10-07 on local D1 and on a remote D1 with a production export.
+
+**Local guardrail:** `scripts/check-migrations.ts` runs as a Lefthook pre-commit step on staged `drizzle/migrations/**/*.sql`. It flags `DROP TABLE`, `TRUNCATE`, `DELETE FROM`, `ALTER TABLE … DROP COLUMN`, and annotates each `DROP TABLE` with the count of inbound `ON DELETE CASCADE` FKs. Bypass for a migration that is destructive on purpose and has been made safe for the automatic path: `bun scripts/check-migrations.ts --allow-destructive`. Note `--allow-destructive` is an argument to the SCRIPT — the Lefthook step (`lefthook.yml`) invokes it without one, so to land an intentionally destructive migration commit with `LEFTHOOK_EXCLUDE=migration-safety git commit`, NOT `--no-verify` (which also skips typecheck, lint, format and knip). A native `ALTER TABLE … DROP COLUMN` is flagged but is exactly the refactor the check asks for — it rebuilds no table, so #612 does not apply.
 
 **Schema-drift trap (#898):** drizzle-kit only diffs **top-level exported** tables — removing a table's named export from `src/platform/server/db/schema/index.ts` (e.g. in a dead-code sweep) makes the next `db:generate` emit `DROP TABLE` for it. Keep every table individually exported. And never change a column's SQL `.default()` without generating the migration in the same PR — a default change forces a full table rebuild (see trap above); prefer `$defaultFn()` for app-level defaults with no DDL impact.
 
@@ -414,7 +438,7 @@ Refs: [drizzle-orm#3065](https://github.com/drizzle-team/drizzle-orm/issues/3065
 
 ## React Patterns
 
-**Quick reference** (rules; examples below for the contrarian ones):
+**Quick reference** (rules; do/don't examples for the contrarian ones live in the `react-patterns` skill):
 
 - **Server data:** TanStack Query with `suspense: true`. No `isLoading` checks; use `<Suspense fallback={<Skeleton />} />`.
 - **Styling:** shadcn/ui base components handle theming; Tailwind ONLY for layout (`flex`, `grid`, `gap`). No hard-coded colors. No `margin` on components — use flex+gap on the parent.
@@ -424,74 +448,6 @@ Refs: [drizzle-orm#3065](https://github.com/drizzle-team/drizzle-orm/issues/3065
 - **Mutation errors:** the global error toast in `src/ui/query-client.ts` is opt-in via `meta: { globalError: true }` (#1571). Default is off because nearly every mutation surfaces its own failure (titled toast, inline state, try/catch). Set it on a hook whose callers do nothing with the error.
 - **Routing:** TanStack Router `createFileRoute`, params via `Route.useParams()`. URL reflects state via search params.
 - **Files:** `kebab-case.tsx`, named exports, vanilla TS (`.ts`) for logic. `@/` alias. No default exports.
-
-### Data fetching
-
-```tsx
-// ❌ useState + useEffect
-const [user, setUser] = useState(null);
-const [isLoading, setIsLoading] = useState(true);
-useEffect(() => { fetch(...).then(r => r.json()).then(d => { setUser(d); setIsLoading(false); }); }, [userId]);
-if (isLoading) return <div>Loading...</div>;
-
-// ✅ TanStack Query + Suspense — no isLoading checks
-const UserContent: React.FC<{ userId: string }> = ({ userId }) => {
-  const { data: user } = useQuery({ queryKey: ['user', userId], queryFn: () => fetchUser(userId), suspense: true });
-  return <div>{user.name}</div>;
-};
-
-export const UserProfile: React.FC<{ userId: string }> = (props) => (
-  <Suspense fallback={<Skeleton className="h-6 w-32" />}><UserContent {...props} /></Suspense>
-);
-```
-
-### Styling
-
-```tsx
-// ❌ Hard-coded colors, dark variants, margin on the component
-<div className="w-[300px] m-4 p-6 bg-white dark:bg-slate-900 text-slate-900 dark:text-white rounded-xl shadow-lg border border-slate-200 dark:border-slate-700">
-  <h3 className="text-xl font-bold mb-2">{frame.title}</h3>
-</div>
-
-// ✅ shadcn base handles theming; Tailwind for layout only; gap on parent (not margin on child)
-<Card onClick={onSelect} className="cursor-pointer">
-  <CardHeader><CardTitle>{frame.title}</CardTitle><CardDescription>{frame.description}</CardDescription></CardHeader>
-</Card>
-
-// Parent owns spacing:
-<div className="grid grid-cols-3 gap-4">
-  {frames.map(f => <FrameCard key={f.id} frame={f} />)}
-</div>
-```
-
-### Forms
-
-```tsx
-// ❌ Controlled inputs everywhere, manual validation, setState per field
-
-// ✅ Uncontrolled + FormData + Zod + TanStack Query mutation
-export const ScriptForm: React.FC = () => {
-  const mutation = useMutation({ mutationFn: createScript });
-
-  const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const result = scriptSchema.safeParse(
-      Object.fromEntries(new FormData(e.currentTarget))
-    );
-    if (!result.success) return; // surface errors inline
-    mutation.mutate(result.data);
-  };
-
-  return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-4">
-      <Input name="title" placeholder="Script title…" required />
-      <Button type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? 'Creating…' : 'Create'}
-      </Button>
-    </form>
-  );
-};
-```
 
 See `src/ui/` and any domain's `ui/` for the house pattern.
 
@@ -504,7 +460,7 @@ See `src/ui/` and any domain's `ui/` for the house pattern.
 - Animation: honor `prefers-reduced-motion`; animate `transform`/`opacity`; interruptible. CSS > WAAPI > JS libs.
 - Accessibility: redundant cues (not color-only), `aria-label` for icon-only buttons, tabular numerics for comparisons, prefer native semantics.
 - Buttons: no icons on labelled buttons — text only, and loading is the label (`Generating…`), not a spinner. Only an icon-only button (`size="icon"` + `aria-label`) carries an icon. Keep labels one line: a count list goes in muted text under the button, not in it.
-- Performance: virtualize long lists (`virtua`); explicit image dimensions; mutations <500ms.
+- Performance: virtualize long lists (`useVirtualizer` from `@tanstack/react-virtual`); explicit image dimensions; mutations <500ms.
 
 ---
 
@@ -540,13 +496,9 @@ const { thingUnderTest } = await import('./thing-under-test');
 
 When re-mocking inside an `it()` block to test a different code path, call `vi.resetModules()` first — otherwise the dynamic import returns the cached module from the prior mock.
 
-**Local HTTPS (optional).** Ports 3000–3009 are reserved for `bun dev` worktrees. Each laptop keeps a private hostname map at `~/.openstory/dev-tunnels.json` (not git). `bun tunnel:provision` uses `wrangler login` (no API token) to allocate ten random `*.openstory.so` names on a named tunnel (ingress `127.0.0.1:3000`…`:3009`) and prints Google OAuth redirect URIs to add by hand. DNS may need a one-time `cloudflared tunnel login` (also browser, not an API key). `bun dev` sets `VITE_APP_URL` from that file for the worktree's `PORT`. Press `t + Enter` **once** on the machine to connect the named tunnel. E2E uses port **3020** so it never collides. Details: `docs/developer-guide/local-dev-tunnels.md`.
+**Local HTTPS (optional):** ports 3000–3009 are reserved for `bun dev` worktrees; E2E uses **3020**. Setup and the `t + Enter` tunnel: `docs/developer-guide/local-dev-tunnels.md`.
 
 **E2E:** Playwright drives `vite dev` (cf-plugin → Workerd) on port 3020 with `E2E_TEST=true`. `bun test:e2e:setup` applies D1 migrations against the isolated `[env.test]` block in `wrangler.jsonc` and seeds via `getPlatformProxy()`. Aimock (`:4010`) intercepts LLM/fal calls. R2 is NOT mocked: uploads do real puts into the local Miniflare R2 binding (asset bytes come from durable `assets.openstory.so/e2e/…` URLs that `scripts/mirror-e2e-fixture-media.ts` vendors after every record — provider CDNs like `fal.media` / `imgen.x.ai` expire) and reads are served by the worker's `/r2/$` route. Recording (`E2E_RECORD=1`) hits real LLM/fal then mirrors; locally-served URLs sent to real providers are made fetchable via `fal.storage.upload` / data-URIs (`src/platform/server/storage/external-url.ts`). `src/platform/e2e-recorded-fixture-media.test.ts` fails if a fixture still points at a provider host.
-
-## Platform & Deployment
-
-Production target: **Cloudflare Workers** (the only supported platform). Deployment-context helpers (preview/local detection) live in `src/platform/server/env/environment.ts`. Workers Builds auto-deploys main (same mechanism as Deploy-button clones); PRs get GitHub Actions preview deployments with unique D1 databases. See `.env.example` for required vars (or `bun setup` for local defaults).
 
 <!-- intent-skills:start -->
 

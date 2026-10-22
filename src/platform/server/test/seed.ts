@@ -10,26 +10,29 @@
 
 import { generateId } from '@/platform/id';
 import {
+  DEFAULT_LOOK_NAME,
+  characterLookVersions,
+  characterLooks,
   characterSheetVariants,
   characterBibleVersions,
+  characterVoiceVersions,
   characters,
   credits,
   frameVariants,
   frames,
   shots,
   locationBibleVersions,
-  locationLibrary,
-  locationSheets,
+  locationReferencePhotos,
+  locationSheetVariants,
+  locations,
   renderSegments,
   scenes,
-  sequenceLocations,
+  sequenceCast,
+  sequenceLocationLinks,
   sequenceStyleVersions,
   sequences,
   session,
   styles,
-  talent,
-  talentMedia,
-  talentSheets,
   teamMembers,
   teams,
   user,
@@ -38,6 +41,7 @@ import {
 } from '@/platform/server/db/schema';
 import { getDb } from '#db-client';
 import { getSequenceByIdUnscoped } from '@/platform/server/db/scoped';
+import { getPublicAssetsDomain } from '@/platform/public-assets';
 import {
   and,
   asc,
@@ -47,6 +51,7 @@ import {
   isNotNull,
   isNull,
   ne,
+  sql,
 } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 
@@ -73,13 +78,6 @@ export type CreatedTestShot = {
   id: string;
   sequenceId: string;
   orderIndex: number;
-};
-
-export type CreatedTestTalent = {
-  id: string;
-  teamId: string;
-  name: string;
-  defaultSheetId: string;
 };
 
 /**
@@ -172,32 +170,108 @@ export async function createOtpVerification(
 async function deleteSequenceVersionRows(where: SQL | undefined) {
   const db = getDb();
   const ids = db.select({ id: sequences.id }).from(sequences).where(where);
+  // The sequences' characters (#2017), read before their cast links go — only
+  // the ones no other sequence still casts (a team character attached to
+  // a second sequence stays, as `charactersOnlyIn` keeps it: its remaining
+  // link would refuse the delete). One bound parameter however many there are.
+  const cast = await db
+    .select({ id: sequenceCast.characterId })
+    .from(sequenceCast)
+    .where(
+      and(
+        inArray(sequenceCast.sequenceId, ids),
+        sql`NOT EXISTS (SELECT 1 FROM sequence_cast o WHERE o.character_id = ${sequenceCast.characterId} AND o.sequence_id NOT IN ${ids})`
+      )
+    );
+  const theirs = sql`(SELECT value FROM json_each(${JSON.stringify(
+    cast.map((row) => row.id)
+  )}))`;
+  // The sequences' locations (#1695), as `locationsOnlyIn` picks them: one
+  // the writer attached is the team's and stays.
+  const used = await db
+    .select({ id: sequenceLocationLinks.locationId })
+    .from(sequenceLocationLinks)
+    .where(
+      and(
+        inArray(sequenceLocationLinks.sequenceId, ids),
+        eq(sequenceLocationLinks.attached, false),
+        sql`NOT EXISTS (SELECT 1 FROM sequence_location_links o WHERE o.location_id = ${sequenceLocationLinks.locationId} AND o.sequence_id NOT IN ${ids})`
+      )
+    );
+  const theirLocations = inArray(
+    locations.id,
+    sql`(SELECT value FROM json_each(${JSON.stringify(
+      used.map((row) => row.id)
+    )}))`
+  );
   await db.batch([
     db
       .delete(sequenceStyleVersions)
       .where(inArray(sequenceStyleVersions.sequenceId, ids)),
+    db.delete(sequenceCast).where(inArray(sequenceCast.sequenceId, ids)),
     db
       .delete(characterBibleVersions)
+      .where(inArray(characterBibleVersions.characterId, theirs)),
+    db
+      .delete(characterLookVersions)
       .where(
         inArray(
-          characterBibleVersions.characterId,
+          characterLookVersions.lookId,
           db
-            .select({ id: characters.id })
-            .from(characters)
-            .where(inArray(characters.sequenceId, ids))
+            .select({ id: characterLooks.id })
+            .from(characterLooks)
+            .where(inArray(characterLooks.characterId, theirs))
         )
       ),
     db
+      .delete(characterLooks)
+      .where(inArray(characterLooks.characterId, theirs)),
+    // Nothing cascades from `characters` (#2017).
+    db
+      .delete(characterSheetVariants)
+      .where(inArray(characterSheetVariants.characterId, theirs)),
+    db
+      .delete(characterVoiceVersions)
+      .where(inArray(characterVoiceVersions.characterId, theirs)),
+    db.delete(characters).where(inArray(characters.id, theirs)),
+    db
+      .delete(sequenceLocationLinks)
+      .where(inArray(sequenceLocationLinks.sequenceId, ids)),
+    ...deleteLocationRows(theirLocations),
+  ]);
+}
+
+/**
+ * Delete the locations `where` matches with everything they own: nothing
+ * cascades from a location (#1695). Their links go first, in the caller's
+ * batch or here.
+ */
+function deleteLocationRows(where: SQL | undefined) {
+  const db = getDb();
+  const ids = db.select({ id: locations.id }).from(locations).where(where);
+  return [
+    db
+      .delete(locationReferencePhotos)
+      .where(inArray(locationReferencePhotos.locationId, ids)),
+    db
       .delete(locationBibleVersions)
-      .where(
-        inArray(
-          locationBibleVersions.locationId,
-          db
-            .select({ id: sequenceLocations.id })
-            .from(sequenceLocations)
-            .where(inArray(sequenceLocations.sequenceId, ids))
-        )
-      ),
+      .where(inArray(locationBibleVersions.locationId, ids)),
+    db
+      .delete(locationSheetVariants)
+      .where(inArray(locationSheetVariants.locationId, ids)),
+    db.delete(locations).where(where),
+  ] as const;
+}
+
+/** Delete the team locations `where` matches, links included. */
+async function deleteTestLocations(where: SQL | undefined) {
+  const db = getDb();
+  const ids = db.select({ id: locations.id }).from(locations).where(where);
+  await db.batch([
+    db
+      .delete(sequenceLocationLinks)
+      .where(inArray(sequenceLocationLinks.locationId, ids)),
+    ...deleteLocationRows(where),
   ]);
 }
 
@@ -210,6 +284,8 @@ export async function cleanupTestUser(
   await db.delete(session).where(eq(session.userId, userId));
   await db.delete(teamMembers).where(eq(teamMembers.userId, userId));
   await deleteSequenceVersionRows(eq(sequences.teamId, teamId));
+  // A team delete is refused while it has locations (#1695).
+  await deleteTestLocations(eq(locations.teamId, teamId));
   await db.delete(teams).where(eq(teams.id, teamId));
   await db.delete(user).where(eq(user.id, userId));
   // Credits will cascade or be cleaned via team if we add FKs later
@@ -363,139 +439,132 @@ export async function createTestShot(
 }
 
 /**
- * Create test talent + default sheet.
- */
-export async function createTestTalent(
-  teamId: string,
-  name: string
-): Promise<CreatedTestTalent> {
-  const db = getDb();
-  const now = new Date();
-  const talentId = generateId();
-  const sheetId = generateId();
-
-  await db.insert(talent).values({
-    id: talentId,
-    teamId,
-    name,
-    isInTeamLibrary: true,
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  await db.insert(talentSheets).values({
-    id: sheetId,
-    talentId,
-    name: 'Default',
-    imageUrl: `http://localhost:3020/api/test/image?w=512&h=512&label=sheet`,
-    imagePath: `talent/${name.toLowerCase().replace(/\s+/g, '-')}/sheet.webp`,
-    isDefault: true,
-    source: 'manual_upload',
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  return { id: talentId, teamId, name, defaultSheetId: sheetId };
-}
-
-/**
- * Create test talent with reference media (multiple media items).
- */
-export async function createTestTalentWithMedia(
-  teamId: string,
-  name: string,
-  mediaCount = 2
-): Promise<{
-  id: string;
-  name: string;
-  teamId: string;
-  sheetId: string;
-  mediaIds: string[];
-}> {
-  const db = getDb();
-  const now = new Date();
-  const talentId = generateId();
-  const sheetId = generateId();
-
-  await db.insert(talent).values({
-    id: talentId,
-    teamId,
-    name,
-    isInTeamLibrary: true,
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  await db.insert(talentSheets).values({
-    id: sheetId,
-    talentId,
-    name: 'Default',
-    imageUrl: `http://localhost:3020/api/test/image?w=512&h=512&label=sheet`,
-    isDefault: true,
-    source: 'manual_upload',
-    createdAt: now,
-    updatedAt: now,
-  });
-
-  const mediaIds: string[] = [];
-  for (let i = 0; i < mediaCount; i++) {
-    const mediaId = generateId();
-    mediaIds.push(mediaId);
-    await db.insert(talentMedia).values({
-      id: mediaId,
-      talentId,
-      type: 'image',
-      url: `http://localhost:3020/api/test/image?w=400&h=400&label=media`,
-      path: `${teamId}/${talentId}/${mediaId}.jpg`,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
-  return { id: talentId, name, teamId, sheetId, mediaIds };
-}
-
-/**
- * Create a test location + default sheet.
+ * Create a test location for a team, with a completed sheet. It is in no
+ * sequence: a test picks it, and analysis links it.
  */
 export async function createTestLocation(
   teamId: string,
-  name: string
-): Promise<{ id: string; teamId: string; name: string }> {
+  name: string,
+  options: { description?: string; sheetImageUrl?: string } = {}
+): Promise<{
+  id: string;
+  teamId: string;
+  name: string;
+  referenceImageUrl: string;
+}> {
   const db = getDb();
   const now = new Date();
+  const id = generateId();
+  const {
+    description = null,
+    sheetImageUrl = `http://localhost:3020/api/test/image?w=1024&h=576&label=location`,
+  } = options;
 
-  const [inserted] = await db
-    .insert(locationLibrary)
-    .values({
-      teamId,
-      name,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning({ id: locationLibrary.id });
-
-  if (!inserted) {
-    throw new Error('Failed to create test location');
-  }
-
-  const sheetId = generateId();
-  await db.insert(locationSheets).values({
-    id: sheetId,
-    locationId: inserted.id,
-    name: 'Default',
-    imageUrl: `http://localhost:3020/api/test/image?w=1024&h=576&label=location`,
-    imagePath: `locations/${name
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/\s+/g, '-')}/sheet.webp`,
-    isDefault: true,
-    source: 'ai_generated',
+  // The bible lives on its version row (#1600) and the sheet on its variant
+  // row (#1419), both keyed to the location's own id like the backfill.
+  await db.insert(locations).values({
+    id,
+    teamId,
+    legacyName: name,
+    selectedBibleVersionId: id,
+    referenceStatus: 'completed',
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(locationBibleVersions).values({
+    id,
+    locationId: id,
+    name,
+    description,
+    rendering: 'Photoreal live action',
+    source: 'backfill',
+    createdAt: now,
+  });
+  await db.insert(locationSheetVariants).values({
+    id,
+    locationId: id,
+    model: 'prior',
+    url: sheetImageUrl,
+    status: 'completed',
+    generatedAt: now,
     createdAt: now,
     updatedAt: now,
   });
 
-  return { id: inserted.id, teamId, name };
+  return { id, teamId, name, referenceImageUrl: sheetImageUrl };
+}
+
+/**
+ * The team location the full-sequence e2e picks. Its name and description
+ * are what the recorded location-match fixture was recorded with (the public
+ * template of that name, removed in #1695), so they must not change. The
+ * sheet is the real one on the public assets domain.
+ */
+const SUNLIT_LOFT_LOCATION = {
+  name: 'Sunlit Loft Studio',
+  description:
+    'Airy industrial loft with exposed brick, massive arched windows flooding warm natural light, a velvet couch, scattered art supplies, and hanging plants. Creative, intimate, and effortlessly photogenic.',
+};
+
+export async function createSunlitLoftTestLocation(teamId: string) {
+  return await createTestLocation(teamId, SUNLIT_LOFT_LOCATION.name, {
+    description: SUNLIT_LOFT_LOCATION.description,
+    sheetImageUrl: `https://${getPublicAssetsDomain()}/locations/sunlit-loft-studio/sheet.webp`,
+  });
+}
+
+/**
+ * The team character the full-sequence e2e casts as the script's SCARLETT
+ * (#2135). No sequence and no sheet: the run casts her and draws the sheet.
+ */
+export async function createScarlettTestCharacter(teamId: string) {
+  const db = getDb();
+  const now = new Date();
+  const id = generateId();
+  const name = 'Scarlett';
+  await db.insert(characters).values({
+    id,
+    teamId,
+    legacyName: name,
+    selectedBibleVersionId: id,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(characterLooks).values({
+    id,
+    characterId: id,
+    isDefault: true,
+    sortOrder: 0,
+    selectedLookVersionId: id,
+    sheetStatus: 'pending',
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(characterLookVersions).values({
+    id,
+    lookId: id,
+    name: DEFAULT_LOOK_NAME,
+    clothing:
+      'Black fitted turtleneck, slim black trousers, small gold hoop earrings.',
+    styling: null,
+    source: 'edit',
+    createdAt: now,
+  });
+  await db.insert(characterBibleVersions).values({
+    id,
+    characterId: id,
+    name,
+    age: '22',
+    gender: 'Woman',
+    physicalDescription:
+      'A striking, fresh-faced 22-year-old beauty creator: dewy, even skin, high cheekbones, wide dark eyes and a sleek dark bob.',
+    voiceOnly: false,
+    rendering: 'Photoreal live action',
+    isPerson: false,
+    source: 'edit',
+    createdAt: now,
+  });
+  return { id, name };
 }
 
 /**
@@ -505,7 +574,6 @@ export async function createTestCharacter(
   sequenceId: string,
   characterId: string,
   name: string,
-  talentId: string | null = null,
   options: {
     sheetImageUrl?: string;
     sheetStatus?: 'pending' | 'generating' | 'completed' | 'failed';
@@ -525,18 +593,50 @@ export async function createTestCharacter(
     sheetStatus = 'completed',
   } = options;
 
+  const [sequence] = await db
+    .select({ teamId: sequences.teamId })
+    .from(sequences)
+    .where(eq(sequences.id, sequenceId));
+  if (!sequence) throw new Error(`Sequence ${sequenceId} not found`);
+
   // The bible lives on its version row (#1600), keyed to the character's
   // own id like the backfill.
   await db.insert(characters).values({
     id,
-    sequenceId,
-    characterId,
+    teamId: sequence.teamId,
     legacyName: name,
     selectedBibleVersionId: id,
-    talentId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  // Its cast link (#2017), keyed to the character's own id like the backfill.
+  await db.insert(sequenceCast).values({
+    id,
+    sequenceId,
+    characterId: id,
+    scriptCharacterId: characterId,
+    createdAt: now,
+  });
+  // Its default look (#2015), keyed to the character's own id like the
+  // backfill.
+  await db.insert(characterLooks).values({
+    id,
+    characterId: id,
+    isDefault: true,
+    sortOrder: 0,
+    selectedLookVersionId: id,
     sheetStatus,
     createdAt: now,
     updatedAt: now,
+  });
+  await db.insert(characterLookVersions).values({
+    id,
+    lookId: id,
+    name: DEFAULT_LOOK_NAME,
+    clothing: null,
+    styling: null,
+    source: 'backfill',
+    createdAt: now,
   });
   await db.insert(characterBibleVersions).values({
     id,
@@ -544,6 +644,9 @@ export async function createTestCharacter(
     name,
     age: '30s',
     voiceOnly: false,
+    // A seen character says what it is rendered as (#2017); the rendering
+    // backfill wrote this for every old row.
+    rendering: 'Photoreal live action',
     isPerson: true,
     source: 'backfill',
     createdAt: now,
@@ -556,6 +659,7 @@ export async function createTestCharacter(
     await db.insert(characterSheetVariants).values({
       id,
       characterId: id,
+      lookId: id,
       model: 'prior',
       url: sheetImageUrl,
       status: 'completed',
@@ -592,56 +696,17 @@ export async function cleanupSequenceById(
 }
 
 /**
- * Clean up test talent (and cascaded sheets/media) for a team.
- */
-export async function cleanupTestTalent(teamId: string): Promise<void> {
-  const db = getDb();
-  await db.delete(talent).where(eq(talent.teamId, teamId));
-}
-
-/**
- * Clean up a specific talent by ID (cascades to sheets/media).
- */
-export async function cleanupTalentById(talentId: string): Promise<void> {
-  const db = getDb();
-  await db.delete(talent).where(eq(talent.id, talentId));
-}
-
-/**
- * Find and clean up talent by team + name (for UI-created test entities).
- *
- * Specs share one team, so a by-name cleanup must never widen to the whole
- * team: doing so deletes talent that other parallel workers created mid-test
- * and their list assertions then fail on missing rows (#827).
- */
-export async function cleanupTalentByName(
-  teamId: string,
-  name: string
-): Promise<void> {
-  const db = getDb();
-  const [created] = await db
-    .select({ id: talent.id })
-    .from(talent)
-    .where(and(eq(talent.teamId, teamId), eq(talent.name, name)));
-  if (created) {
-    await db.delete(talent).where(eq(talent.id, created.id));
-  }
-}
-
-/**
- * Clean up test locations for a team (cascades to sheets).
+ * Clean up a team's locations.
  */
 export async function cleanupTestLocations(teamId: string): Promise<void> {
-  const db = getDb();
-  await db.delete(locationLibrary).where(eq(locationLibrary.teamId, teamId));
+  await deleteTestLocations(eq(locations.teamId, teamId));
 }
 
 /**
  * Clean up a specific location by ID.
  */
 export async function cleanupLocationById(locationId: string): Promise<void> {
-  const db = getDb();
-  await db.delete(locationLibrary).where(eq(locationLibrary.id, locationId));
+  await deleteTestLocations(eq(locations.id, locationId));
 }
 
 /**
@@ -652,91 +717,13 @@ export async function cleanupLocationByName(
   name: string
 ): Promise<void> {
   const db = getDb();
-  const [created] = await db
-    .select({ id: locationLibrary.id })
-    .from(locationLibrary)
-    .where(
-      and(eq(locationLibrary.teamId, teamId), eq(locationLibrary.name, name))
-    );
-  if (created) {
-    await db.delete(locationLibrary).where(eq(locationLibrary.id, created.id));
-  }
-}
-
-/**
- * Look up a seeded system location by name (isPublic).
- */
-export async function getSystemLocationByName(name: string): Promise<{
-  id: string;
-  name: string;
-  teamId: string;
-  referenceImageUrl: string;
-}> {
-  const db = getDb();
-  const rows = await db
-    .select()
-    .from(locationLibrary)
-    .where(
-      and(eq(locationLibrary.name, name), eq(locationLibrary.isPublic, true))
-    )
-    .limit(1);
-  if (rows.length === 0) {
-    throw new Error(
-      `System location "${name}" not found in test DB — was \`bun scripts/seed.ts --test\` run during global setup?`
-    );
-  }
-  const found = rows[0];
-  if (!found) {
-    throw new Error('test setup: expected location row');
-  }
-  return {
-    id: found.id,
-    name: found.name,
-    teamId: found.teamId,
-    referenceImageUrl: found.referenceImageUrl ?? '',
-  };
-}
-
-/**
- * Look up a seeded system talent by name (isPublic + default sheet).
- */
-export async function getSystemTalentByName(name: string): Promise<{
-  id: string;
-  name: string;
-  teamId: string;
-  sheetId: string;
-}> {
-  const db = getDb();
-  const rows = await db
-    .select()
-    .from(talent)
-    .where(and(eq(talent.name, name), eq(talent.isPublic, true)))
-    .limit(1);
-  const found = rows[0];
-  if (!found) {
-    throw new Error(
-      `System talent "${name}" not found in test DB — was \`bun scripts/seed.ts --test\` run during global setup?`
-    );
-  }
-  const sheets = await db
-    .select()
-    .from(talentSheets)
-    .where(
-      and(eq(talentSheets.talentId, found.id), eq(talentSheets.isDefault, true))
-    )
-    .limit(1);
-  const defaultSheet = sheets[0];
-  if (!defaultSheet) {
-    throw new Error(
-      `System talent "${name}" has no default sheet — re-run seed`
-    );
-  }
-  return {
-    id: found.id,
-    name: found.name,
-    teamId: found.teamId,
-    sheetId: defaultSheet.id,
-  };
+  const named = db
+    .select({ id: locationBibleVersions.locationId })
+    .from(locationBibleVersions)
+    .where(eq(locationBibleVersions.name, name));
+  await deleteTestLocations(
+    and(eq(locations.teamId, teamId), inArray(locations.id, named))
+  );
 }
 
 /**
@@ -923,7 +910,6 @@ export async function getTestShot(shotId: string): Promise<{
 export async function getTestCharacter(characterId: string): Promise<{
   id: string;
   name: string;
-  talentId: string | null;
   sheetStatus: string | null;
 } | null> {
   const db = getDb();
@@ -931,14 +917,14 @@ export async function getTestCharacter(characterId: string): Promise<{
     .select({
       id: characters.id,
       name: characterBibleVersions.name,
-      talentId: characters.talentId,
-      sheetStatus: characters.sheetStatus,
+      sheetStatus: characterLooks.sheetStatus,
     })
     .from(characters)
     .innerJoin(
       characterBibleVersions,
       eq(characterBibleVersions.id, characters.selectedBibleVersionId)
     )
+    .innerJoin(characterLooks, eq(characterLooks.id, characters.id))
     .where(eq(characters.id, characterId));
   return result ?? null;
 }

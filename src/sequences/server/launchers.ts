@@ -36,6 +36,7 @@
  * separately.
  */
 
+import { characterToBible } from '@/cast/server/bibles-from-scoped';
 import { withMeasuredDurations } from '@/cast/server/sequence-elements/media-duration';
 import { getRequestCountry } from '@/platform/server/request-country';
 import {
@@ -51,8 +52,10 @@ import {
   getAnalysisModelById,
 } from '@/models/models.config';
 import { generateId } from '@/platform/id';
+import { getLogger } from '@/platform/logger';
 import { isElevenLabsConfigured } from '@/models/server/elevenlabs-config';
 import { NotFoundError, ValidationError } from '@/platform/errors';
+import { recordTriggerFailure } from '@/sequences/server/db/sequence-events';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import type { Sequence } from '@/platform/server/db/schema';
 import { resolveSequenceStyleConfig } from '@/look/style-config';
@@ -69,6 +72,8 @@ import type {
   StoryboardTriggerInput,
   StoryboardWorkflowInput,
 } from '@/platform/server/workflow/types';
+
+const logger = getLogger(['openstory', 'launchers']);
 
 /** Thrown when a storyboard run is already in flight for the sequence. */
 export class GenerationInProgressError extends Error {
@@ -180,17 +185,38 @@ async function resolveStoryboardPayload(
     await scopedDb.sequenceElements.list(sequenceId)
   );
 
-  // Casting identity is snapshotted here, alongside every other frozen field:
-  // the matching workflows only re-read these rows for the late-arriving sheet
-  // image, never for the name/description they match on.
-  const [suggestedTalentRows, suggestedLocationRows] = await Promise.all([
-    input.suggestedTalentIds?.length
-      ? scopedDb.talent.getByIds(input.suggestedTalentIds)
-      : Promise.resolve([]),
-    input.suggestedLocationIds?.length
-      ? scopedDb.locations.getByIds(input.suggestedLocationIds)
-      : Promise.resolve([]),
-  ]);
+  // Location identity is snapshotted here, alongside every other frozen
+  // field: matching re-reads these rows for the late-arriving sheet image,
+  // never for the name and description it matches on.
+  //
+  // The locations matching may bind a script location to (#1695) are the
+  // team's: the ones the writer picked for this run, then the ones already
+  // attached to the sequence.
+  const attachedLocations = (await scopedDb.locations.list(sequenceId)).filter(
+    (l) => l.attached
+  );
+  const suggestedLocationIds = [
+    ...new Set([
+      ...(input.suggestedLocationIds ?? []),
+      ...attachedLocations.map((l) => l.id),
+    ]),
+  ];
+  const suggestedLocationRows =
+    await scopedDb.locations.getCurrentByIds(suggestedLocationIds);
+
+  // The live cast, frozen for the run (#2050): analysis reads only these,
+  // and must not rewrite one another sequence has ever cast.
+  const castRows = await scopedDb.characters.list(sequenceId);
+  const cast = await Promise.all(
+    castRows.map(async (row) => ({
+      id: row.id,
+      shared: await scopedDb.characters.getAnalysisMayNotRewrite(
+        sequenceId,
+        row.id
+      ),
+      entry: characterToBible(row),
+    }))
+  );
 
   // Capture during the request: durable workflows have no request context.
   const userCountry = getRequestCountry();
@@ -199,15 +225,8 @@ async function resolveStoryboardPayload(
     ...input,
     userCountry,
     sequenceId,
-    suggestedTalent: suggestedTalentRows.map((t) => ({
-      talentId: t.id,
-      name: t.name,
-      description: t.description,
-      personality: t.personality ?? '',
-      movement: t.movement ?? '',
-      voiceId: t.voiceId,
-      voiceDescription: t.voiceDescription,
-    })),
+    cast,
+    suggestedLocationIds,
     suggestedLocations: suggestedLocationRows.map((l) => ({
       locationId: l.id,
       name: l.name,
@@ -282,6 +301,9 @@ export async function triggerStoryboard(
     id: sequenceId,
     expectedRunId: sequence.workflowRunId,
     claimId,
+    activity: {
+      summary: input.resume ? 'Continued generation' : 'Started the storyboard',
+    },
   });
   if (!claimed) throw new GenerationInProgressError();
 
@@ -293,9 +315,31 @@ export async function triggerStoryboard(
   // crashes after create() but the caller retries the whole launcher, the
   // fresh claim produces a fresh instance; a stranded claim resolves as
   // 'failed' on the next acquire and the slot recovers.
-  const workflowRunId = await triggerWorkflow('/storyboard', payload, {
-    deduplicationId: claimId,
-  });
+  let workflowRunId: string;
+  try {
+    workflowRunId = await triggerWorkflow('/storyboard', payload, {
+      deduplicationId: claimId,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await scopedDb.sequence(sequenceId).updateStatus('failed', message);
+    } catch (statusError) {
+      logger.error('Storyboard trigger status was not marked failed', {
+        err: statusError,
+        sequenceId,
+      });
+    }
+    await recordTriggerFailure(scopedDb.sequenceEvents, {
+      sequenceId,
+      actorId: input.userId,
+      kind: 'run.failed',
+      targetType: 'sequence',
+      targetId: sequenceId,
+      summary: 'Storyboard failed',
+    });
+    throw error;
+  }
   await scopedDb.sequences.update({ id: sequenceId, workflowRunId });
 
   return { workflowRunId };

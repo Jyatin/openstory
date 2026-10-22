@@ -37,6 +37,7 @@ import {
   videoVariants,
 } from '@/platform/server/db/schema';
 import type { VideoManifest } from '@/platform/server/db/schema';
+import { clearVersionRows } from '@/platform/server/test/clear-version-rows';
 import { relations } from '@/platform/server/db/schema/relations';
 import {
   computeUploadedStillInputHash,
@@ -44,6 +45,7 @@ import {
   resolveUploadExtension,
 } from './upload-media';
 import { USER_UPLOAD_MODEL } from '@/shots/user-upload-model';
+import { uploadAttestations } from '@/platform/server/db/schema';
 import { isSelectedVersionStale } from '@/shots/scene-segments';
 import { buildRegenerateShotSnapshot } from '@/shots/server/workflows/regenerate-shots-snapshot';
 import { type Client, createClient } from '@libsql/client';
@@ -89,6 +91,7 @@ async function seed() {
   await db.delete(frameVariants);
   await db.delete(framePromptVersions);
   await db.delete(frames);
+  await clearVersionRows(db);
   await db.delete(characters);
   await db.delete(shots);
   await db.delete(renderSegments);
@@ -252,22 +255,24 @@ const SCENE_WITH_REFS: Scene = {
 };
 
 async function seedCharacterWithSheet(sheetInputHash: string) {
-  const [row] = await db
-    .insert(characters)
-    .values({
+  const row = await createCharactersMethods(db, teamId).create(
+    {
       sequenceId,
       characterId: 'char_001',
-      legacyName: 'Jack',
-      legacyConsistencyTag: 'char_001: Jack-denim-jacket',
+      name: 'Jack',
+      rendering: 'Photoreal live action',
+      consistencyTag: 'char_001: Jack-denim-jacket',
       sheetStatus: 'completed',
-    })
-    .returning();
-  if (!row) throw new Error('test setup: character insert returned nothing');
+    },
+    { source: 'analysis', createdBy: null }
+  );
   // The live sheet is read from the version row, not the mirror (#1419) —
-  // keyed to the character's own id, the shape the backfill produced.
+  // keyed to the character's own id, which is its default look's id: the
+  // shape the backfill produced.
   await db.insert(characterSheetVariants).values({
     id: row.id,
     characterId: row.id,
+    lookId: row.id,
     model: 'prior',
     url: '/r2/characters/jack.png',
     status: 'completed',
@@ -275,7 +280,10 @@ async function seedCharacterWithSheet(sheetInputHash: string) {
   });
   // Return the RESOLVED read — the sheet lives on the version row now (#1419),
   // and the staleness hash is computed from it.
-  const resolved = await createCharactersMethods(db).getById(row.id);
+  const resolved = await createCharactersMethods(db, teamId).getById(
+    sequenceId,
+    row.id
+  );
   if (!resolved)
     throw new Error('test setup: character re-read returned nothing');
   return resolved;
@@ -764,6 +772,83 @@ describe('§4.3 C — atomic prompt+image replace (replaceContent)', () => {
     });
 
     expect(await verifyThumbnailStaleness(SCENE_WITH_REFS)).toBe('fresh');
+  });
+});
+
+describe('character sheet upload for a look other than the default (#2015)', () => {
+  it('is allowed before the default has a sheet, and reads stale once one lands', async () => {
+    const { setCharacterSheetFromUpload } = await import('./media-upload');
+    const { readLookSheetStaleness } =
+      await import('@/cast/server/production-staleness');
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const scopedDb = createScopedDb(teamId, actorId);
+    const mia = await scopedDb.characters.create(
+      {
+        sequenceId,
+        characterId: 'char_001',
+        name: 'Mia',
+        rendering: 'Photoreal live action',
+      },
+      { source: 'analysis', createdBy: null }
+    );
+    const gala = await scopedDb.characterLooks.create(
+      sequenceId,
+      mia.id,
+      { name: 'Gala gown', clothing: 'red silk gown', styling: null },
+      { source: 'edit', actorId }
+    );
+    // The upload hashes the sequence style, which must parse as today's.
+    await db
+      .update(styles)
+      .set({
+        config: {
+          version: 2,
+          look: {
+            mood: 'neutral',
+            artStyle: 'cinematic',
+            lighting: 'natural',
+            colorPalette: ['#000', '#fff'],
+            colorGrading: 'neutral',
+          },
+          motion: { camera: 'static' },
+          references: [],
+        },
+      })
+      .where(eq(styles.id, styleId));
+    const sequence = await scopedDb.sequences.getById(sequenceId);
+    if (!sequence) throw new Error('test setup: no sequence');
+    const url = `/r2/characters/teams/${teamId}/sheets/gala.png`;
+    // The upload gate reads the likeness ledger: not a person.
+    await recordLikenessFinding(scopedDb, [url], 'other', {});
+
+    // No default sheet yet: the upload is not refused.
+    await setCharacterSheetFromUpload(
+      { scopedDb, user: { id: actorId }, teamId, sequence },
+      { characterId: mia.id, lookId: gala.id, publicUrl: url }
+    );
+    const uploaded = await scopedDb.characterLooks.getById(gala.id);
+    expect(uploaded?.sheetImageUrl).toBe(url);
+    expect(
+      (await readLookSheetStaleness(scopedDb, sequenceId, mia.id, gala.id))
+        .status
+    ).toBe('fresh');
+
+    // The default look's sheet lands: the upload was stamped with no face,
+    // so it now reads stale, as a look drawn before that face would.
+    await scopedDb.characterSheetVariants.applyConvergent({
+      lookId: mia.id,
+      url: `/r2/characters/teams/${teamId}/sheets/mia.png`,
+      storagePath: `teams/${teamId}/sheets/mia.png`,
+      inputHash: null,
+      model: 'test-model',
+    });
+    expect(
+      (await readLookSheetStaleness(scopedDb, sequenceId, mia.id, gala.id))
+        .status
+    ).toBe('stale');
+    // The ledger row holds the team; the next seed deletes teams.
+    await db.delete(uploadAttestations);
   });
 });
 

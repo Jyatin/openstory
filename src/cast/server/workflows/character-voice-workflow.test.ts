@@ -98,7 +98,7 @@ function makeScopedDb(opts?: {
   const stampVoiceClaimWorkflowRunId = vi.fn(async () => ({ id: 'ver-1' }));
   const updateVoice = vi.fn(async () => ({ id: 'char-1' }));
   const markVoiceReleased = vi.fn(async () => undefined);
-  const getById = vi.fn(async () => ({
+  const getVoice = vi.fn(async () => ({
     id: 'char-1',
     voiceId: opts?.voiceId ?? null,
     selectedVoiceVersionId: opts?.selectedVoiceVersionId ?? null,
@@ -122,7 +122,7 @@ function makeScopedDb(opts?: {
       markVoiceReleased,
     },
     liveRead: {
-      characters: { getById, getVoiceReferenceCount },
+      characters: { getVoice, getVoiceReferenceCount },
     },
     claims: {
       characters: { getVoiceVersionById },
@@ -149,12 +149,13 @@ const characterBible: CharacterBibleEntry = {
   ethnicity: '',
   physicalDescription: '',
   standardClothing: 'duster',
-  distinguishingFeatures: '',
+  looks: [],
   personality: '',
   movement: '',
   voiceDescription: '',
   voiceOnly: false,
   isPerson: true,
+  rendering: 'Photoreal live action',
   consistencyTag: 'sam',
 };
 
@@ -236,7 +237,12 @@ describe('CharacterVoiceWorkflow', () => {
           }),
           expect.objectContaining({ generatedVoiceId: 'g2', takeNumber: 2 }),
         ],
-      })
+      }),
+      {
+        sequenceId: 'seq-1',
+        actorId: 'u1',
+        summary: 'Designed a voice for Sam',
+      }
     );
     expect(promoteVoiceClaimIfPending).toHaveBeenCalledWith('char-1', 'ver-1');
     expect(mockReleaseReplaced).toHaveBeenCalled();
@@ -399,7 +405,11 @@ describe('CharacterVoiceWorkflow', () => {
       'char-1',
       expect.objectContaining({ voiceId: 'voice-1' }),
       'generated',
-      'u1'
+      'u1',
+      {
+        sequenceId: 'seq-1',
+        summary: 'Designed a voice for Sam',
+      }
     );
     expect(completeVoiceClaimIfLive).not.toHaveBeenCalled();
     expect(result.voiceId).toBe('voice-1');

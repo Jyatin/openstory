@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { migrateStyleConfigV1ToV2 } from '@/look/style-config';
-import { buildCastCharacterBible } from '@/cast/character-prompt';
 import type {
-  CharacterWithSheet,
+  CastCharacterWithSheet,
   SequenceElement,
   SequenceLocationWithReference,
   StyleConfig,
@@ -47,12 +46,13 @@ const alice: CharacterBibleEntry = {
   ethnicity: '',
   physicalDescription: '',
   standardClothing: '',
-  distinguishingFeatures: '',
+  looks: [],
   personality: '',
   movement: '',
   voiceDescription: '',
   voiceOnly: false,
   isPerson: true,
+  rendering: 'Photoreal live action',
   consistencyTag: '',
 };
 const bob: CharacterBibleEntry = { ...alice, characterId: 'bob', name: 'Bob' };
@@ -65,6 +65,7 @@ const beach: LocationBibleEntry = {
   architecturalStyle: '',
   keyFeatures: '',
   ambiance: '',
+  rendering: 'Photoreal live action',
   consistencyTag: '',
   firstMention: { sceneId: '', text: '', lineNumber: 0 },
 };
@@ -431,7 +432,7 @@ describe('prompt-driving projection (#867 §4.2)', () => {
   });
 });
 
-describe('casting round-trip — stamp matches verify (#867)', () => {
+describe('character bible round-trip — stamp matches verify (#867)', () => {
   const rawSarah: CharacterBibleEntry = {
     characterId: 'char_001',
     name: 'Detective Sarah',
@@ -440,39 +441,16 @@ describe('casting round-trip — stamp matches verify (#867)', () => {
     ethnicity: 'Caucasian',
     physicalDescription: 'Tall, blonde hair, blue eyes',
     standardClothing: 'Dark trench coat',
-    distinguishingFeatures: 'Scar on left cheek',
+    looks: [],
     personality: '',
     movement: '',
     voiceDescription: '',
     voiceOnly: false,
     isPerson: true,
+    rendering: 'Photoreal live action',
     consistencyTag: 'detective_sarah_blonde_30s',
   };
-  const talentSheet: CharacterBibleEntry = {
-    characterId: 'talent_1',
-    name: 'Elvis Presley',
-    age: '25',
-    gender: 'Male',
-    ethnicity: 'White',
-    physicalDescription: 'Dark hair, sideburns, athletic build',
-    standardClothing: 'White jumpsuit',
-    distinguishingFeatures: 'Sideburns',
-    personality: '',
-    movement: '',
-    voiceDescription: '',
-    voiceOnly: false,
-    isPerson: true,
-    consistencyTag: 'elvis_presley',
-  };
-  const match = {
-    characterId: 'char_001',
-    talentName: 'Elvis Presley',
-    personality: '',
-    movement: '',
-    sheetMetadata: talentSheet,
-  };
-  // Scene references the character by name slug (matching is name-based, stable
-  // across casting).
+  // Scene references the character by name slug.
   const scene = sceneReferencing({
     characterTags: ['detective_sarah'],
     environmentTag: 'beach',
@@ -480,10 +458,9 @@ describe('casting round-trip — stamp matches verify (#867)', () => {
 
   // Simulate the row the character-bible workflow persists, then read it back
   // the way `getShotStalenessFn` does at verify time.
-  const makeCharacter = (b: CharacterBibleEntry): CharacterWithSheet => ({
+  const makeCharacter = (b: CharacterBibleEntry): CastCharacterWithSheet => ({
     id: `row_${b.characterId}`,
     sequenceId: 'seq_1',
-    talentId: 'talent_1',
     characterId: b.characterId,
     name: b.name,
     age: b.age,
@@ -491,11 +468,12 @@ describe('casting round-trip — stamp matches verify (#867)', () => {
     ethnicity: b.ethnicity,
     physicalDescription: b.physicalDescription,
     standardClothing: b.standardClothing,
-    distinguishingFeatures: b.distinguishingFeatures,
+    legacyDistinguishingFeatures: null,
     personality: '',
     movement: '',
     voiceOnly: b.voiceOnly,
     isPerson: true,
+    rendering: 'Photoreal live action',
     voiceId: null,
     voiceDescription: b.voiceDescription || null,
     voicePreviews: null,
@@ -508,12 +486,21 @@ describe('casting round-trip — stamp matches verify (#867)', () => {
     firstMentionLine: null,
     sheetImageUrl: null,
     sheetImagePath: null,
+    sheetPortraitUrl: null,
     sheetStatus: 'completed',
     sheetGeneratedAt: null,
     sheetError: null,
     sheetInputHash: null,
     selectedSheetVersionId: null,
-    selectedBibleVersionId: null,
+    // Wearing its default look (#2015).
+    lookId: 'default-look',
+    lookName: 'Default',
+    looks: [],
+    styling: null,
+    // Cast in its sequence (#2017).
+    castId: 'cast-1',
+    teamId: 'team-1',
+    selectedBibleVersionId: 'bible-1',
     pendingPromoteSheetVersionId: null,
     deletedAt: null,
     createdAt: new Date(0),
@@ -534,49 +521,25 @@ describe('casting round-trip — stamp matches verify (#867)', () => {
       dialogue: { presence: false, lines: [] },
     });
 
-  it('stamp (cast bible fed to prompt) equals verify (cast bible read from the DB)', async () => {
-    const [castSarah] = buildCastCharacterBible([rawSarah], [match]);
-    if (!castSarah) throw new Error('expected one cast entry');
-    const verifyBible = charactersToBible([makeCharacter(castSarah)]);
+  it('stamp (analysed bible fed to the prompt) equals verify (bible read from the DB)', async () => {
+    const verifyBible = charactersToBible([makeCharacter(rawSarah)]);
 
-    const stampHash = await hashVisualPromptInput(ctxWith([castSarah]));
+    const stampHash = await hashVisualPromptInput(ctxWith([rawSarah]));
     const verifyHash = await hashVisualPromptInput(ctxWith(verifyBible));
     expect(stampHash).toBe(verifyHash);
   });
 
-  it('hashing the raw pre-cast bible (the old behaviour) diverged from the DB', async () => {
-    const cast = buildCastCharacterBible([rawSarah], [match]);
-    const rawHash = await hashVisualPromptInput(ctxWith([rawSarah]));
-    const castHash = await hashVisualPromptInput(ctxWith(cast));
-    // physicalDescription + age/gender/ethnicity differ between raw and cast, so
-    // the pre-fix stamp could never match the cast DB row — permanent staleness.
-    expect(rawHash).not.toBe(castHash);
-  });
+  // The MOTION child receives the same bible as the visual child.
+  it('motion: stamp equals verify (bible read from the DB)', async () => {
+    const verifyBible = charactersToBible([makeCharacter(rawSarah)]);
 
-  // The MOTION child receives the same cast bible as the visual child
-  // (analyze-script-workflow builds `castCharacterBible` once and feeds both).
-  // Mirror the visual round-trip for motion so the motion stamp can't silently
-  // regress to hashing the raw bible — that would make every talent-matched
-  // shot's motion prompt permanently stale, exactly like the visual case.
-  it('motion: stamp (cast bible) equals verify (cast bible read from the DB)', async () => {
-    const [castSarah] = buildCastCharacterBible([rawSarah], [match]);
-    if (!castSarah) throw new Error('expected one cast entry');
-    const verifyBible = charactersToBible([makeCharacter(castSarah)]);
-
-    const stampHash = await hashMotionPromptInput(ctxWith([castSarah]));
+    const stampHash = await hashMotionPromptInput(ctxWith([rawSarah]));
     const verifyHash = await hashMotionPromptInput(ctxWith(verifyBible));
     expect(stampHash).toBe(verifyHash);
   });
-
-  it('motion: hashing the raw pre-cast bible diverged from the cast DB row', async () => {
-    const cast = buildCastCharacterBible([rawSarah], [match]);
-    const rawHash = await hashMotionPromptInput(ctxWith([rawSarah]));
-    const castHash = await hashMotionPromptInput(ctxWith(cast));
-    expect(rawHash).not.toBe(castHash);
-  });
 });
 
-// Characters are aligned to the DB via `buildCastCharacterBible`; locations and
+// Locations and
 // elements have no such transform — the prompt STAMP hashes the raw scene-split
 // bible while VERIFY hashes the DB readback (`sequenceLocationsToBible` /
 // `sequenceElementsToBible`). Those readbacks coerce nulls/`type`, so a coercion
@@ -607,8 +570,11 @@ describe('location/element bible round-trip — stamp matches verify (#867)', ()
     l: LocationBibleEntry
   ): SequenceLocationWithReference => ({
     id: `row_${l.locationId}`,
+    teamId: 'team_1',
+    legacyLibraryReferenceHash: null,
+    linkId: `link_${l.locationId}`,
+    attached: false,
     sequenceId: 'seq_1',
-    libraryLocationId: null,
     locationId: l.locationId,
     name: l.name,
     type: l.type,
@@ -616,12 +582,14 @@ describe('location/element bible round-trip — stamp matches verify (#867)', ()
     architecturalStyle: l.architecturalStyle,
     keyFeatures: l.keyFeatures,
     ambiance: l.ambiance,
+    rendering: l.rendering,
     consistencyTag: l.consistencyTag,
     firstMentionSceneId: l.firstMention.sceneId || null,
     firstMentionText: l.firstMention.text || null,
     firstMentionLine: l.firstMention.lineNumber || null,
     referenceImageUrl: null,
     referenceImagePath: null,
+    referencePortraitUrl: null,
     referenceStatus: 'completed',
     referenceGeneratedAt: null,
     referenceError: null,

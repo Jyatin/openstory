@@ -20,6 +20,7 @@ import type {
   VideoVariant,
 } from '@/platform/server/db/schema';
 import type { SHOT_GENERATION_STATUSES } from '@/platform/server/db/schema/shots';
+import type { DialogueLineTiming } from '@/shots/shot-dialogue';
 
 /** A shot's still lifecycle, as {@link readinessImageStatus} derives it. */
 export type ImageStatus = (typeof SHOT_GENERATION_STATUSES)[number];
@@ -145,6 +146,8 @@ export type ShotViewSources = {
   motionPrompt?: AssemblableMotionPrompt | null;
   /** See {@link ShotView.dialogue}. */
   dialogue?: MotionDialogue | null;
+  /** See {@link ShotView.dialogueTiming}. */
+  dialogueTiming?: DialogueLineTiming[] | null;
   /**
    * In-flight variant upscale: the generating framing version the promote
    * claim points at, when it already has a cropped-tile url (minted at
@@ -170,6 +173,11 @@ export type ShotView = Shot & {
    * provider URL). Fallback behind `image.url`, never a selectable still.
    */
   previewThumbnailUrl: string | null;
+  /**
+   * When that preview row was opened: the time its sketch was started. Read
+   * by {@link sketchIsNewerThanClip}.
+   */
+  previewCreatedAt: Date | null;
   video: VideoVariant | null;
   primaryVideo: VideoVariant | null;
   /**
@@ -192,6 +200,14 @@ export type ShotView = Shot & {
    * shot is `{ presence: false, lines: [] }`.
    */
   dialogue: MotionDialogue | null;
+  /**
+   * When each line is heard in the shot's dialogue clip (#1853), derived on
+   * read from the selected section and its speech (`sectionLineTiming`) —
+   * never stored. The theatre times subtitles with it. Null on a view
+   * assembled without it, or a shot with no recording: lines are then
+   * untimed, not silent.
+   */
+  dialogueTiming: DialogueLineTiming[] | null;
   /** Cropped tile for an in-flight variant upscale, or null. */
   pendingUpscaleUrl: string | null;
   /**
@@ -247,7 +263,7 @@ export function shotViewMissingFrame(
   shot: Shot,
   video: Pick<
     ShotViewSources,
-    'video' | 'primaryVideo' | 'motionPrompt' | 'dialogue'
+    'video' | 'primaryVideo' | 'motionPrompt' | 'dialogue' | 'dialogueTiming'
   >
 ): ShotView {
   const frame: Frame = {
@@ -294,6 +310,7 @@ export function toShotView(
     frame,
     image,
     previewThumbnailUrl: preview?.url ?? null,
+    previewCreatedAt: preview?.createdAt ?? null,
     imagePromptVersion,
     primaryImage,
     imageStatus,
@@ -307,6 +324,7 @@ export function toShotView(
     gridSheet: sources.gridSheet ?? null,
     motionPrompt: sources.motionPrompt ?? null,
     dialogue: sources.dialogue ?? null,
+    dialogueTiming: sources.dialogueTiming ?? null,
     pendingUpscaleUrl: sources.pendingUpscaleUrl ?? null,
     pendingUpscaleIndex: null,
   };
@@ -409,4 +427,37 @@ export function isMotionGenerating(
 ): boolean {
   const hasStill = shot.imageStatus === 'completed' && !!shot.image?.url;
   return (referenceOnly || hasStill) && shot.videoStatus === 'generating';
+}
+
+/**
+ * Is the shot's sketch newer than its clip (#2111)? A sketch is redrawn only
+ * when a reference-only shot's prompt changes, so a clip that finished before
+ * the sketch was started shows a shot that is no longer written. The rail and
+ * the theatre then show the sketch; a new render brings the clip back.
+ *
+ * Times, not ids: clips copied in by migrations reuse their shot's id, which
+ * sorts before the shot's first sketch. A clip with no finish time keeps
+ * showing. Ceiling: a prompt edited while its clip was rendering lets that
+ * clip win when it lands.
+ */
+export function sketchIsNewerThanClip(shot: {
+  previewCreatedAt: Date | null;
+  video: { generatedAt: Date | null } | null;
+}): boolean {
+  const drawn = shot.previewCreatedAt;
+  const finished = shot.video?.generatedAt;
+  // `new Date`: a patched cache row can hold the ISO string.
+  return (
+    !!drawn &&
+    !!finished &&
+    new Date(drawn).getTime() > new Date(finished).getTime()
+  );
+}
+
+/** The clip the rail shows for a shot: none while its sketch is newer. */
+export function shownClipUrl(shot: {
+  previewCreatedAt: Date | null;
+  video: { url: string | null; generatedAt: Date | null } | null;
+}): string | null {
+  return sketchIsNewerThanClip(shot) ? null : (shot.video?.url ?? null);
 }

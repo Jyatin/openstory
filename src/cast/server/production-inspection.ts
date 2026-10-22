@@ -3,10 +3,14 @@ import { z } from 'zod';
 import { createSelectSchema } from 'drizzle-orm/zod';
 import {
   characterBibleVersions,
+  characterLookVersions,
+  characterLooks,
   characterVoiceVersions,
   characters,
+  sequenceCast,
   locationBibleVersions,
-  sequenceLocations,
+  locations,
+  sequenceLocationLinks,
   sequenceElements,
 } from '@/platform/server/db/schema';
 import { projectRead, readDate } from '@/platform/server/read-projection';
@@ -56,20 +60,62 @@ export const characterVoiceVersionReadSchema = characterVoiceSchema
     releasedAt: readDate.nullable(),
     createdAt: readDate,
   });
+/** A look's sheet state. */
+const lookSheetShape = createSelectSchema(characterLooks).pick({
+  sheetStatus: true,
+  sheetError: true,
+  selectedSheetVersionId: true,
+}).shape;
+/**
+ * One outfit of a character (#2015). `versionId` is its live definition;
+ * list its sheets with list_versions kind character_sheet and this id.
+ */
+const characterLookReadSchema = createSelectSchema(characterLooks)
+  .pick({ id: true, isDefault: true })
+  .extend(lookSheetShape)
+  .extend(
+    createSelectSchema(characterLookVersions).pick({
+      name: true,
+      clothing: true,
+      styling: true,
+    }).shape
+  )
+  .extend({
+    versionId: z.string(),
+    sheetImageUrl: z.string().nullable(),
+    // Set on a removed look; a scene that still picks it keeps wearing it.
+    deletedAt: readDate.nullable(),
+  });
 export const characterReadSchema = createSelectSchema(characters)
-  .pick({
-    id: true,
-    sequenceId: true,
-    characterId: true,
-    talentId: true,
-    useVoice: true,
-    firstMentionSceneId: true,
-    firstMentionText: true,
-    firstMentionLine: true,
-    sheetStatus: true,
-    sheetError: true,
-    selectedSheetVersionId: true,
-    selectedVoiceVersionId: true,
+  .pick({ id: true })
+  // How the sequence casts it (#2017): its cast link.
+  .extend({
+    sequenceId: createSelectSchema(sequenceCast).shape.sequenceId,
+    characterId: createSelectSchema(sequenceCast).shape.scriptCharacterId,
+  })
+  .extend(
+    createSelectSchema(characters).pick({
+      useVoice: true,
+      firstMentionSceneId: true,
+      firstMentionText: true,
+      firstMentionLine: true,
+      selectedVoiceVersionId: true,
+    }).shape
+  )
+  // The sheet and the clothing are the character's default look's (#2015).
+  .extend(lookSheetShape)
+  .extend({
+    standardClothing: createSelectSchema(
+      characterLookVersions
+    ).shape.clothing.meta({
+      description:
+        'Deprecated: the default look’s clothing. Read looks[].clothing.',
+    }),
+    // Derived (#2065): the default look's styling owns this text.
+    distinguishingFeatures: z.string().nullable().meta({
+      description:
+        'Deprecated: features text not yet moved into the default look’s styling, else null. Read looks[].styling, which already includes it.',
+    }),
   })
   // The bible lives on its version row (#1600).
   .extend(
@@ -79,8 +125,7 @@ export const characterReadSchema = createSelectSchema(characters)
       gender: true,
       ethnicity: true,
       physicalDescription: true,
-      standardClothing: true,
-      distinguishingFeatures: true,
+      rendering: true,
       personality: true,
       movement: true,
       voiceOnly: true,
@@ -99,20 +144,30 @@ export const characterReadSchema = createSelectSchema(characters)
     effectiveUseVoice: z.boolean(),
     voicePreviews: voicePreviewsSchema,
     selectedSheet: referenceSchema.nullable(),
+    // Every look, the default first. The sheet fields above are the default
+    // look's.
+    looks: z.array(characterLookReadSchema),
   });
-export const locationReadSchema = createSelectSchema(sequenceLocations)
+/**
+ * A location as a sequence uses it (#1695): the team's location at its
+ * current bible, plus the sequence's link. `locationId` is the script id.
+ */
+export const locationReadSchema = createSelectSchema(locations)
   .pick({
     id: true,
-    sequenceId: true,
-    locationId: true,
-    libraryLocationId: true,
-    firstMentionSceneId: true,
-    firstMentionText: true,
-    firstMentionLine: true,
     referenceStatus: true,
     referenceError: true,
     selectedReferenceVersionId: true,
   })
+  .extend(
+    createSelectSchema(sequenceLocationLinks).pick({
+      sequenceId: true,
+      firstMentionSceneId: true,
+      firstMentionText: true,
+      firstMentionLine: true,
+      attached: true,
+    }).shape
+  )
   .extend(
     createSelectSchema(locationBibleVersions).pick({
       name: true,
@@ -121,10 +176,13 @@ export const locationReadSchema = createSelectSchema(sequenceLocations)
       architecturalStyle: true,
       keyFeatures: true,
       ambiance: true,
+      rendering: true,
       consistencyTag: true,
     }).shape
   )
   .extend({
+    locationId: createSelectSchema(sequenceLocationLinks).shape
+      .scriptLocationId,
     createdAt: readDate,
     updatedAt: readDate,
     selectedReference: referenceSchema.nullable(),
@@ -189,8 +247,7 @@ const locationSheets = (
     rows,
     (l) => l.selectedReferenceVersionId ?? l.id,
     (ids) => scopedDb.locationSheetVariants.getByIds(ids),
-    (sheet, l) =>
-      sheet.parentType === 'sequence_location' && sheet.parentId === l.id
+    (sheet, l) => sheet.locationId === l.id
   );
 
 function inspectCharacter(
@@ -202,8 +259,13 @@ function inspectCharacter(
     characterReadSchema,
     {
       ...row,
+      distinguishingFeatures: row.legacyDistinguishingFeatures,
       effectiveUseVoice: usesVoice(row, { generateVoices }),
       selectedSheet: sheet,
+      looks: row.looks.map((look) => ({
+        ...look,
+        versionId: look.lookVersionId,
+      })),
     },
     origin
   );
@@ -253,7 +315,7 @@ export async function listLocations(
 ) {
   await productionAccess(scopedDb).sequence(input.sequenceId);
   const page = await readPage(input, [input.sequenceId, 'locations'], (next) =>
-    scopedDb.sequenceLocations.list(input.sequenceId, next)
+    scopedDb.locations.list(input.sequenceId, next)
   );
   return {
     locations: (await locationSheets(scopedDb, page.items)).map((read) =>
@@ -342,7 +404,7 @@ export async function listDeletedCast(scopedDb: ScopedDb, sequenceId: string) {
   const sequence = await productionAccess(scopedDb).sequence(sequenceId);
   const [characters, locations, elements] = await Promise.all([
     scopedDb.characters.listDeleted(sequence.id),
-    scopedDb.sequenceLocations.listDeleted(sequence.id),
+    scopedDb.locations.listDeleted(sequence.id),
     scopedDb.sequenceElements.listDeleted(sequence.id),
   ]);
   return {

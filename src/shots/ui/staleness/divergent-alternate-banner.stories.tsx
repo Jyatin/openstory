@@ -27,14 +27,7 @@ const meta: Meta<typeof DivergentAlternateBanner> = {
     },
     entityType: {
       control: 'select',
-      options: [
-        'shot',
-        'character',
-        'location',
-        'library-location',
-        'talent',
-        'sequence',
-      ],
+      options: ['shot', 'character', 'location', 'sequence'],
     },
     density: {
       control: 'radio',

@@ -1,9 +1,6 @@
-import type {
-  LibraryLocation,
-  Style,
-  Talent,
-  TalentWithSheets,
-} from '@/platform/server/db/schema';
+import type { Style } from '@/platform/server/db/schema';
+import { ConflictError, NotFoundError } from '@/platform/errors';
+import type { TeamLocation } from '@/cast/server/db/locations';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the runtime side-effecting deps so resolve.ts (and the safe-fetch ingest
@@ -14,7 +11,7 @@ vi.doMock('#storage', () => ({ uploadFile: uploadFileMock }));
 vi.doMock('@/platform/server/storage/buckets', () => ({
   STORAGE_BUCKETS: {
     ELEMENTS: 'elements',
-    TALENT: 'talent',
+    CHARACTERS: 'characters',
     LOCATIONS: 'locations',
   },
   getPublicUrl: (bucket: string, path: string) =>
@@ -22,8 +19,12 @@ vi.doMock('@/platform/server/storage/buckets', () => ({
 }));
 vi.doMock('@/platform/id', () => ({ generateId: () => 'gen-1' }));
 
-const { resolveStyle, resolveTalentIds, resolveLocationIds, ingestElements } =
-  await import('./resolve');
+const {
+  resolveStyle,
+  resolveCharacterIds,
+  resolveLocationIds,
+  ingestElements,
+} = await import('./resolve');
 
 function makeStyle(overrides: Partial<Style> = {}): Style {
   return {
@@ -61,56 +62,17 @@ function makeStyle(overrides: Partial<Style> = {}): Style {
   };
 }
 
-function makeTalent(
-  overrides: Partial<TalentWithSheets> = {}
-): TalentWithSheets {
-  const base: Talent = {
-    id: 'talent-1',
-    teamId: 'team-1',
-    name: 'Ada Lovelace',
-    description: null,
-    personality: null,
-    movement: null,
-    voiceId: null,
-    voiceDescription: null,
-    imageUrl: null,
-    imagePath: null,
-    pendingPromoteSheetId: null,
-    isFavorite: false,
-    isHuman: true,
-    isInTeamLibrary: true,
-    isPublic: false,
-    isTemplate: false,
-    createdBy: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
-  return {
-    ...base,
-    sheets: [],
-    sheetCount: 0,
-    defaultSheet: null,
-    ...overrides,
-  };
-}
-
-function makeLocation(
-  overrides: Partial<LibraryLocation> = {}
-): LibraryLocation {
+function makeLocation(overrides: Partial<TeamLocation> = {}): TeamLocation {
   return {
     id: 'loc-1',
-    teamId: 'team-1',
     name: 'Rooftop Bar',
     description: null,
     referenceImageUrl: null,
-    referenceImagePath: null,
-    isPublic: false,
-    isTemplate: false,
-    referenceInputHash: null,
-    pendingReferenceClaimId: null,
-    createdBy: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    referencePortraitUrl: null,
+    referenceStatus: 'pending',
+    lastUsedAt: null,
+    usedAnywhere: false,
+    sequences: [],
     ...overrides,
   };
 }
@@ -155,102 +117,188 @@ describe('resolveStyle', () => {
   });
 });
 
-describe('resolveTalentIds', () => {
-  it('resolves existing talent by name and id (no create)', async () => {
-    const talent = [
-      makeTalent({ id: 't-ada', name: 'Ada Lovelace' }),
-      makeTalent({ id: 't-grace', name: 'Grace Hopper' }),
-    ];
-    const createTalent = vi.fn();
-    const ids = await resolveTalentIds(
-      { talent: { list: async () => talent }, createTalent },
-      ['Ada Lovelace', 't-grace']
+function library(rows: Array<{ id: string; name: string }>) {
+  return {
+    listTeam: async () =>
+      rows.map((row) => ({
+        ...row,
+        physicalDescription: null,
+        voiceOnly: false,
+        lastUsedAt: null,
+        castAnywhere: false,
+        sheetImageUrl: null,
+        sheetPortraitUrl: null,
+        sequences: [],
+      })),
+  };
+}
+
+describe('resolveCharacterIds', () => {
+  const empty = library([]);
+
+  it('resolves an existing team character by name and id', async () => {
+    const createCharacter = vi.fn();
+    const ids = await resolveCharacterIds(
+      {
+        characters: library([
+          { id: 'c-ada', name: 'Ada Lovelace' },
+          { id: 'c-grace', name: 'Grace Hopper' },
+        ]),
+        createCharacter,
+      },
+      ['Ada Lovelace', 'c-grace']
     );
-    expect(ids).toEqual(['t-ada', 't-grace']);
-    expect(createTalent).not.toHaveBeenCalled();
+    expect(ids).toEqual(['c-ada', 'c-grace']);
+    expect(createCharacter).not.toHaveBeenCalled();
   });
 
-  it('delegates inline-create to createTalent and mixes with refs', async () => {
-    const talent = [makeTalent({ id: 't-ada', name: 'Ada Lovelace' })];
-    const createTalent = vi.fn(async (input: { name: string }) => ({
+  it('delegates inline-create to createCharacter and mixes with refs', async () => {
+    const createCharacter = vi.fn(async (input: { name: string }) => ({
       id: `new-${input.name}`,
     }));
-    const ids = await resolveTalentIds(
-      { talent: { list: async () => talent }, createTalent },
+    const ids = await resolveCharacterIds(
+      {
+        characters: library([{ id: 'c-ada', name: 'Ada Lovelace' }]),
+        createCharacter,
+      },
       ['Ada Lovelace', { name: 'Hero', description: 'brave', isHuman: true }]
     );
-    expect(ids).toEqual(['t-ada', 'new-Hero']);
-    expect(createTalent).toHaveBeenCalledWith({
+    expect(ids).toEqual(['c-ada', 'new-Hero']);
+    expect(createCharacter).toHaveBeenCalledWith({
       name: 'Hero',
       description: 'brave',
       isHuman: true,
     });
   });
 
-  it('throws NotFound when a referenced talent is missing', async () => {
+  it('throws NotFound when a referenced character is missing', async () => {
     await expect(
-      resolveTalentIds(
-        { talent: { list: async () => [] }, createTalent: vi.fn() },
-        ['Nobody']
-      )
-    ).rejects.toThrow(/No character\/talent found/);
+      resolveCharacterIds({ characters: empty, createCharacter: vi.fn() }, [
+        'Nobody',
+      ])
+    ).rejects.toThrow(/No character found/);
   });
 
   it('dedupes overlapping ids', async () => {
-    const talent = [makeTalent({ id: 't-ada', name: 'Ada Lovelace' })];
-    const ids = await resolveTalentIds(
-      { talent: { list: async () => talent }, createTalent: vi.fn() },
-      ['t-ada', 'Ada Lovelace']
+    const ids = await resolveCharacterIds(
+      {
+        characters: library([{ id: 'c-ada', name: 'Ada Lovelace' }]),
+        createCharacter: vi.fn(),
+      },
+      ['c-ada', 'Ada Lovelace']
     );
-    expect(ids).toEqual(['t-ada']);
+    expect(ids).toEqual(['c-ada']);
   });
 
-  it('reuses an existing talent by name instead of creating a duplicate', async () => {
-    const talent = [makeTalent({ id: 't-ada', name: 'Ada Lovelace' })];
-    const createTalent = vi.fn();
-    const ids = await resolveTalentIds(
-      { talent: { list: async () => talent }, createTalent },
-      [{ name: 'Ada Lovelace', isHuman: true }]
-    );
-    expect(ids).toEqual(['t-ada']);
-    expect(createTalent).not.toHaveBeenCalled();
+  it('refuses an inline create whose name a team character has, naming its id', async () => {
+    const createCharacter = vi.fn();
+    await expect(
+      resolveCharacterIds(
+        {
+          characters: library([{ id: 'c-ada', name: 'Ada Lovelace' }]),
+          createCharacter,
+        },
+        [{ name: 'ada lovelace', isHuman: true }]
+      )
+    ).rejects.toThrow(/already has a character named "ada lovelace".*c-ada/);
+    expect(createCharacter).not.toHaveBeenCalled();
   });
 
   it('creates only once when the same name is inlined twice', async () => {
-    const createTalent = vi.fn(async (input: { name: string }) => ({
+    const createCharacter = vi.fn(async (input: { name: string }) => ({
       id: `new-${input.name}`,
     }));
-    const ids = await resolveTalentIds(
-      { talent: { list: async () => [] }, createTalent },
+    const ids = await resolveCharacterIds(
+      { characters: empty, createCharacter },
       [{ name: 'Hero' }, { name: 'Hero' }]
     );
     expect(ids).toEqual(['new-Hero']);
-    expect(createTalent).toHaveBeenCalledTimes(1);
+    expect(createCharacter).toHaveBeenCalledTimes(1);
+  });
+
+  it('a name two characters share is refused and asks for the id', async () => {
+    await expect(
+      resolveCharacterIds(
+        {
+          characters: library([
+            { id: 'c-1', name: 'Sarah' },
+            { id: 'c-2', name: 'sarah' },
+          ]),
+          createCharacter: vi.fn(),
+        },
+        ['Sarah']
+      )
+    ).rejects.toThrow(/names 2 characters\. Use the id: c-1, c-2/);
   });
 });
 
 describe('resolveLocationIds', () => {
+  // `listTeam` is the team's own locations: another team's never appear.
+  const team = [
+    makeLocation({ id: 'l-roof', name: 'Rooftop Bar' }),
+    makeLocation({ id: 'l-pier-1', name: 'Pier' }),
+    makeLocation({ id: 'l-pier-2', name: 'pier' }),
+  ];
+  const deps = (createLocation = vi.fn()) => ({
+    locations: { listTeam: async () => team },
+    createLocation,
+  });
+
+  it('names a team location by id', async () => {
+    expect(await resolveLocationIds(deps(), ['l-roof'])).toEqual(['l-roof']);
+  });
+
+  it('names a team location by name, forgivingly, and dedupes', async () => {
+    expect(
+      await resolveLocationIds(deps(), ['rooftop-bar', 'Rooftop Bar', 'l-roof'])
+    ).toEqual(['l-roof']);
+  });
+
+  it('asks for the id when two team locations share the name', async () => {
+    await expect(resolveLocationIds(deps(), ['Pier'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(ConflictError);
+        expect(String(error)).toContain('l-pier-1, l-pier-2');
+        return true;
+      }
+    );
+    // The id still names one of them.
+    expect(await resolveLocationIds(deps(), ['l-pier-2'])).toEqual([
+      'l-pier-2',
+    ]);
+  });
+
+  it('does not find another team\u2019s id, or a name nothing has', async () => {
+    await expect(
+      resolveLocationIds(deps(), ['l-other-team'])
+    ).rejects.toBeInstanceOf(NotFoundError);
+    await expect(resolveLocationIds(deps(), ['Beach'])).rejects.toThrow(
+      'No location found matching "Beach".'
+    );
+  });
+
   it('resolves existing and delegates inline-create to createLocation', async () => {
-    const locations = [makeLocation({ id: 'l-roof', name: 'Rooftop Bar' })];
     const createLocation = vi.fn(async (input: { name: string }) => ({
       id: `new-${input.name}`,
     }));
-    const ids = await resolveLocationIds(
-      { locations: { list: async () => locations }, createLocation },
-      ['Rooftop Bar', { name: 'Beach' }]
-    );
+    const ids = await resolveLocationIds(deps(createLocation), [
+      'Rooftop Bar',
+      { name: 'Beach' },
+      { name: 'beach' },
+    ]);
     expect(ids).toEqual(['l-roof', 'new-Beach']);
+    expect(createLocation).toHaveBeenCalledTimes(1);
     expect(createLocation).toHaveBeenCalledWith({ name: 'Beach' });
   });
 
-  it('reuses an existing location by name instead of creating a duplicate', async () => {
-    const locations = [makeLocation({ id: 'l-roof', name: 'Rooftop Bar' })];
+  it('reuses the team location of that name instead of creating a duplicate', async () => {
     const createLocation = vi.fn();
-    const ids = await resolveLocationIds(
-      { locations: { list: async () => locations }, createLocation },
-      [{ name: 'Rooftop Bar' }]
-    );
-    expect(ids).toEqual(['l-roof']);
+    expect(
+      await resolveLocationIds(deps(createLocation), [{ name: 'Rooftop Bar' }])
+    ).toEqual(['l-roof']);
+    await expect(
+      resolveLocationIds(deps(createLocation), [{ name: 'Pier' }])
+    ).rejects.toBeInstanceOf(ConflictError);
     expect(createLocation).not.toHaveBeenCalled();
   });
 });

@@ -224,6 +224,12 @@ export type PlanTarget = {
     description: string;
     selectedModel: string | null;
     elementTags?: string[];
+    /**
+     * The scene's look picks (#2015), so a reference-only clip attaches the
+     * sheet of the look the scene dresses each character in; null when the
+     * scene picks none.
+     */
+    characterLooks: Record<string, string> | null;
     environmentTag?: string;
     location?: string;
     siblingShotIds?: string[];
@@ -674,7 +680,7 @@ export async function computePlan(args: {
       scopedDb.frames.listAnchorsBySequence(sequenceId),
       loadSceneContextBySequence(scopedDb, sequenceId),
       scopedDb.characters.list(sequenceId),
-      scopedDb.sequenceLocations.list(sequenceId),
+      scopedDb.locations.list(sequenceId),
       scopedDb.sequenceElements.list(sequenceId),
       sequence.styleId
         ? scopedDb.styles.getById(sequence.styleId)
@@ -1089,7 +1095,9 @@ async function decideShotTarget(args: {
       elements: refs.elements,
     });
     return [
-      ...matched.characters.map((c) => c.id),
+      // The look whose sheet the shot attaches (#2015): a failed sheet holds
+      // the shots of the scenes that wear it, and no others.
+      ...matched.characters.map((c) => c.lookId),
       ...matched.locations.map((l) => l.id),
       ...matched.elements.map((e) => e.id),
     ];
@@ -1145,6 +1153,7 @@ async function decideShotTarget(args: {
           })
         ),
         characterTags: scene.continuity?.characterTags,
+        characterLooks: scene.continuity?.characterLooks ?? null,
         sceneTitle: scene.metadata?.title,
         description: scene.originalScript.extract,
         elementTags: scene.continuity?.elementTags ?? undefined,
@@ -1230,11 +1239,13 @@ export async function claimTargets(args: {
   targets: PlanTarget[];
   sequenceId: string;
   parentInstanceId: string;
+  /** Who started the update; named on each image's start line. */
+  actorId: string;
 }): Promise<{
   claimsByShot: Record<string, ShotClaims>;
   skipped: SkippedShot[];
 }> {
-  const { scopedDb, targets, sequenceId, parentInstanceId } = args;
+  const { scopedDb, targets, sequenceId, parentInstanceId, actorId } = args;
   const claimsByShot: Record<string, ShotClaims> = {};
   const skipped: SkippedShot[] = [];
 
@@ -1244,6 +1255,7 @@ export async function claimTargets(args: {
       target,
       sequenceId,
       parentInstanceId,
+      actorId,
     });
     // Only report already-in-flight when this run owns nothing for the shot.
     // Partial ownership (e.g. visual ours, motion foreign) still regenerates
@@ -1267,8 +1279,9 @@ async function claimShotArtifacts(args: {
   target: PlanTarget;
   sequenceId: string;
   parentInstanceId: string;
+  actorId: string;
 }): Promise<{ claims: ShotClaims; foreignClaim: boolean }> {
-  const { scopedDb, target, sequenceId, parentInstanceId } = args;
+  const { scopedDb, target, sequenceId, parentInstanceId, actorId } = args;
   const claims: ShotClaims = {
     visualVersionId: null,
     motionVersionId: null,
@@ -1327,6 +1340,7 @@ async function claimShotArtifacts(args: {
       target,
       sequenceId,
       parentInstanceId,
+      actorId,
       visualVersionId: claims.visualVersionId,
     });
     if (imageResult.kind === 'ours') {
@@ -1381,10 +1395,17 @@ async function claimImageArtifact(args: {
   target: PlanTarget;
   sequenceId: string;
   parentInstanceId: string;
+  actorId: string;
   visualVersionId: string | null;
 }): Promise<ClaimResult | { kind: 'none' }> {
-  const { scopedDb, target, sequenceId, parentInstanceId, visualVersionId } =
-    args;
+  const {
+    scopedDb,
+    target,
+    sequenceId,
+    parentInstanceId,
+    actorId,
+    visualVersionId,
+  } = args;
   const liveClaims = await scopedDb.frameVariants.listLiveClaims(
     target.frameId
   );
@@ -1406,6 +1427,7 @@ async function claimImageArtifact(args: {
       dependsOnVersionId: visualVersionId,
       workflowRunId: parentInstanceId,
       isPrimary: true,
+      actorId,
     });
     return { kind: 'ours', id: row.id };
   }
@@ -1429,6 +1451,7 @@ async function claimImageArtifact(args: {
       pendingInputHash: target.imageLiveHash,
       workflowRunId: parentInstanceId,
       isPrimary: true,
+      actorId,
     });
     return { kind: 'ours', id: row.id };
   } catch (error) {

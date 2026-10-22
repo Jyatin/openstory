@@ -15,12 +15,23 @@ import {
 } from '@/cast/ui/element/element-selector';
 import { GenerateSequenceIcon } from '@/ui/icons/generate-sequence-icon';
 import { LocationSuggestionSelector } from '@/cast/ui/location-library/location-suggestion-selector';
-import { buildMentionItems } from '@/shots/ui/prompt-mention/mention-items';
+import {
+  buildMentionItems,
+  libraryCharacterIdOf,
+  libraryLocationIdOf,
+  libraryLocationMentionItems,
+  libraryMentionItems,
+  type MentionItem,
+} from '@/shots/ui/prompt-mention/mention-items';
+import {
+  useAttachLibraryCharacter,
+  useLibraryCharacters,
+} from '@/cast/ui/use-team-characters';
 import { GenerationStopAlert } from '@/sequences/ui/generation/generation-stop-alert';
 import { GenerationSettings } from '@/ui/settings/generation-settings';
 import { StyleCategorySelect } from '@/look/ui/style-category-select';
 import { StyleSelector } from '@/look/ui/style-selector';
-import { TalentSuggestionSelector } from '@/cast/ui/talent/talent-suggestion-selector';
+import { CastSelector } from '@/cast/ui/cast-selector';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,7 +79,11 @@ import {
   useSequenceElements,
   type DraftElementUpload,
 } from '@/cast/ui/use-sequence-elements';
-import { useSequenceLocations } from '@/cast/ui/use-sequence-locations';
+import {
+  useAttachLocation,
+  useSequenceLocations,
+} from '@/cast/ui/use-sequence-locations';
+import { useTeamLocationList } from '@/cast/ui/use-team-locations';
 import { TARGET_DURATION_PRESETS } from '@/sequences/ui/target-duration-chip';
 import {
   useRecommendedStyles,
@@ -77,6 +92,7 @@ import {
 } from '@/look/ui/use-styles';
 import { AUTO_STYLE_ID } from '@/look/auto-style';
 import { errorMessage } from '@/platform/errors';
+import { toast } from 'sonner';
 import {
   assessDurationFit,
   briefRequestsUnrenderableText,
@@ -342,7 +358,7 @@ export const ScriptView: FC<{
     save: saveSettings,
   } = useGenerationSettings();
 
-  // Load draft from localStorage (script, style, talent, location)
+  // Load draft from localStorage (script, style, location)
   const { draft, isLoaded: draftLoaded, saveDraft } = useSequenceDraft();
 
   // Which video models can render reference-only for this team — resolved
@@ -458,11 +474,12 @@ export const ScriptView: FC<{
     );
   };
   const [selections, setSelections] = useState({
-    talentIds: sequence?.suggestedTalentIds ?? [],
     locationIds: sequence?.suggestedLocationIds ?? [],
+    // Team characters picked for a sequence that does not exist yet, in the
+    // cast picker or with `@` (#2050): create casts every one.
+    castCharacterIds: [] as string[],
   });
-  const { talentIds: selectedTalentIds, locationIds: selectedLocationIds } =
-    selections;
+  const { locationIds: selectedLocationIds, castCharacterIds } = selections;
   const [draftElements, setDraftElements] = useState<DraftElementUpload[]>([]);
   const [isElementBusy, setIsElementBusy] = useState(false);
   const elementSelectorRef = useRef<ElementSelectorHandle>(null);
@@ -500,7 +517,7 @@ export const ScriptView: FC<{
     if (!allowElementDrop || !hasDraggedImages(e)) return;
     dragCounterRef.current = 0;
     setIsDraggingFiles(false);
-    // A nested dropzone (talent/location dialog, element popover) already took
+    // A nested dropzone (location dialog, element popover) already took
     // this drop — portals still bubble React events here, so don't add it as
     // an element too (#1269).
     if (e.defaultPrevented) return;
@@ -636,6 +653,18 @@ export const ScriptView: FC<{
   // state instead (#1079). Always defined — the editor's mention extension is
   // registered at init and can't be enabled later.
   const mentionSequenceId = sequence?.id;
+  const { requireAuth, isAuthenticated } = useAuthGate();
+  // Team characters not cast here are offered too, and attach on pick
+  // (#2050): straight onto the sequence when there is one, else onto the
+  // draft, which create casts before analysis.
+  const { data: libraryCharacters, isError: libraryCharactersFailed } =
+    useLibraryCharacters(isAuthenticated);
+  const attachLibraryCharacter = useAttachLibraryCharacter();
+  // The team's locations, the same way (#1695): a pick links the sequence
+  // to one, or goes onto the draft's suggested locations.
+  const { data: teamLocations, isError: teamLocationsFailed } =
+    useTeamLocationList(isAuthenticated);
+  const attachLocation = useAttachLocation();
   const { data: mentionElements } = useSequenceElements(mentionSequenceId);
   const { data: mentionCharacters } = useSequenceCharacters(
     mentionSequenceId ?? ''
@@ -643,34 +672,107 @@ export const ScriptView: FC<{
   const { data: mentionLocations } = useSequenceLocations(
     mentionSequenceId ?? ''
   );
-  const mentionItems = useMemo(
-    () =>
-      mentionSequenceId
-        ? buildMentionItems({
-            characters: mentionCharacters ?? [],
-            elements: mentionElements ?? [],
-            locations: mentionLocations ?? [],
-          })
-        : buildMentionItems({
-            characters: [],
-            elements: draftElements.map((el) => ({
-              id: el.tempPath,
-              token: el.token,
-              description: el.description,
-              imageUrl: el.tempPublicUrl,
-              consistencyTag: el.consistencyTag,
-              kind: elementKindFromFilename(el.filename) ?? 'image',
-            })),
-            locations: [],
-          }),
-    [
-      mentionSequenceId,
-      mentionCharacters,
-      mentionElements,
-      mentionLocations,
-      draftElements,
-    ]
-  );
+  const mentionItems = useMemo(() => {
+    const library = libraryCharacters ?? [];
+    const libraryRows = library.map((c) => ({
+      id: c.id,
+      name: c.name,
+      sheetImageUrl: c.sheetImageUrl,
+    }));
+    // On the create screen a picked team character is the cast, whether or
+    // not the script names her yet.
+    const draftCast = libraryRows
+      .filter((c) => castCharacterIds.includes(c.id))
+      .map((c) => ({ ...c, characterId: c.id, consistencyTag: null }));
+    const cast = mentionSequenceId ? (mentionCharacters ?? []) : draftCast;
+    const items = mentionSequenceId
+      ? buildMentionItems({
+          characters: cast,
+          elements: mentionElements ?? [],
+          locations: mentionLocations ?? [],
+        })
+      : buildMentionItems({
+          characters: cast,
+          elements: draftElements.map((el) => ({
+            id: el.tempPath,
+            token: el.token,
+            description: el.description,
+            imageUrl: el.tempPublicUrl,
+            consistencyTag: el.consistencyTag,
+            kind: elementKindFromFilename(el.filename) ?? 'image',
+          })),
+          locations: [],
+        });
+    return [
+      ...items,
+      ...libraryMentionItems(libraryRows, new Set(cast.map((c) => c.id))),
+      // A draft has no locations of its own yet, so every team location is
+      // offered; picking one twice is the same pick.
+      ...libraryLocationMentionItems(
+        teamLocations ?? [],
+        new Set((mentionLocations ?? []).map((l) => l.id))
+      ),
+    ];
+  }, [
+    mentionSequenceId,
+    mentionCharacters,
+    mentionElements,
+    mentionLocations,
+    draftElements,
+    libraryCharacters,
+    castCharacterIds,
+    teamLocations,
+  ]);
+
+  // A picked library row inserts her name as a cast row would; the attach
+  // runs beside it. A refused attach (a live cast member already has the
+  // name) leaves the name as prose and says why.
+  const onMentionSelect = (item: MentionItem): MentionItem => {
+    const locationId = libraryLocationIdOf(item);
+    if (locationId) {
+      if (mentionSequenceId) {
+        attachLocation.mutate(
+          { sequenceId: mentionSequenceId, locationId },
+          {
+            onError: (error) =>
+              toast.error(`Could not add ${item.label}`, {
+                description: errorMessage(error),
+              }),
+          }
+        );
+      } else {
+        setSelections((s) =>
+          s.locationIds.includes(locationId)
+            ? s
+            : { ...s, locationIds: [...s.locationIds, locationId] }
+        );
+      }
+      // Its name in capitals, as a scene heading reads.
+      const { pickOnly: _pickOnly, ...picked } = item;
+      return picked;
+    }
+    const characterId = libraryCharacterIdOf(item);
+    if (!characterId) return item;
+    if (mentionSequenceId) {
+      attachLibraryCharacter.mutate(
+        { sequenceId: mentionSequenceId, characterId },
+        {
+          onError: (error) =>
+            toast.error(`Could not add ${item.label}`, {
+              description: errorMessage(error),
+            }),
+        }
+      );
+    } else {
+      setSelections((s) =>
+        s.castCharacterIds.includes(characterId)
+          ? s
+          : { ...s, castCharacterIds: [...s.castCharacterIds, characterId] }
+      );
+    }
+    const { pickOnly: _pickOnly, ...picked } = item;
+    return { ...picked, section: 'cast' };
+  };
 
   // Renaming a draft element rewrites its token references in the script so
   // the tile name and what the analyser will see stay in sync (the persisted
@@ -709,14 +811,14 @@ export const ScriptView: FC<{
     }));
     setSampleStyleId(draft.sampleStyleId);
     setSelections((s) => ({
-      talentIds:
-        draft.selectedTalentIds.length > 0
-          ? draft.selectedTalentIds
-          : s.talentIds,
       locationIds:
         draft.selectedLocationIds.length > 0
           ? draft.selectedLocationIds
           : s.locationIds,
+      castCharacterIds:
+        draft.castCharacterIds.length > 0
+          ? draft.castCharacterIds
+          : s.castCharacterIds,
     }));
     if (draft.elementUploads.length > 0) {
       setDraftElements(draft.elementUploads);
@@ -787,8 +889,8 @@ export const ScriptView: FC<{
       script: script ?? '',
       styleId,
       sampleStyleId,
-      selectedTalentIds,
       selectedLocationIds,
+      castCharacterIds,
       elementUploads: draftElements,
     });
   }, [
@@ -797,8 +899,8 @@ export const ScriptView: FC<{
     script,
     sampleStyleId,
     styleId,
-    selectedTalentIds,
     selectedLocationIds,
+    castCharacterIds,
     draftElements,
     saveDraft,
   ]);
@@ -865,7 +967,6 @@ export const ScriptView: FC<{
   ) => setEnhanceUI((s) => ({ ...s, [key]: value }));
 
   const navigate = useNavigate();
-  const { requireAuth, isAuthenticated } = useAuthGate();
   const { needsBillingSetup, showGate } = useBillingGate();
 
   // Style recommendations. We rank a *snapshot* of the script (not the live
@@ -965,10 +1066,11 @@ export const ScriptView: FC<{
       musicModel: audioModels[0] ?? DEFAULT_MUSIC_MODEL,
       audioModels,
       targetDurationSeconds: enhancedTarget ?? undefined,
-      suggestedTalentIds:
-        selectedTalentIds.length > 0 ? selectedTalentIds : undefined,
       suggestedLocationIds:
         selectedLocationIds.length > 0 ? selectedLocationIds : undefined,
+      // Every pick is cast; the picker shows each one, a deleted one included.
+      castCharacterIds:
+        castCharacterIds.length > 0 ? castCharacterIds : undefined,
       elementUploads:
         draftElements.length > 0
           ? draftElements.map((el) => ({
@@ -1202,19 +1304,28 @@ export const ScriptView: FC<{
   const isMobile = useIsMobile();
   const [referencesSheetOpen, setReferencesSheetOpen] = useState(false);
   const referenceCount =
-    selectedTalentIds.length +
+    (isEditing ? 0 : castCharacterIds.length) +
     selectedLocationIds.length +
     (isEditing ? 0 : draftElements.length);
   const referenceSelectors = (
     <>
-      <TalentSuggestionSelector
-        selectedTalentIds={selectedTalentIds}
-        onSelectionChange={(v) =>
-          setSelections((s) => ({ ...s, talentIds: v }))
-        }
-        disabled={loading}
-      />
+      {/* A sequence that exists is cast on its Cast tab and with `@`. */}
+      {!isEditing && (
+        <CastSelector
+          characters={isAuthenticated ? libraryCharacters : []}
+          signedOut={!isAuthenticated}
+          failed={libraryCharactersFailed}
+          selectedIds={castCharacterIds}
+          onSelectionChange={(v) =>
+            setSelections((s) => ({ ...s, castCharacterIds: v }))
+          }
+          disabled={loading}
+        />
+      )}
       <LocationSuggestionSelector
+        locations={isAuthenticated ? teamLocations : []}
+        signedOut={!isAuthenticated}
+        failed={teamLocationsFailed}
         selectedLocationIds={selectedLocationIds}
         onSelectionChange={(v) =>
           setSelections((s) => ({ ...s, locationIds: v }))
@@ -1440,7 +1551,7 @@ export const ScriptView: FC<{
         className="flex flex-col min-h-0 max-h-full"
       >
         {/* Control bar. Below md the three reference selectors fold into one
-            References sheet; md+ shows Talent / Locations / Elements inline. */}
+            References sheet; md+ shows Cast / Locations / Elements inline. */}
         <CardHeader className="shrink-0 flex flex-row items-center md:flex-col md:items-start lg:flex-row justify-between gap-3 px-6 py-4 border-b border-border/50 bg-card/40 short-h:py-2">
           <GenerationSettings
             aspectRatio={aspectRatio}
@@ -1491,9 +1602,15 @@ export const ScriptView: FC<{
             </SheetTrigger>
             <SheetContent side="bottom" className="px-4 pb-6">
               <SheetHeader className="px-0">
-                <SheetTitle>Talent, locations & elements</SheetTitle>
+                <SheetTitle>
+                  {isEditing
+                    ? 'Locations & elements'
+                    : 'Cast, locations & elements'}
+                </SheetTitle>
                 <SheetDescription>
-                  Pre-cast talent, pin locations, or add reference images.
+                  {isEditing
+                    ? 'Pin locations, or add reference images.'
+                    : 'Cast characters, pin locations, or add reference images.'}{' '}
                   Anything you skip is extracted from the script.
                 </SheetDescription>
               </SheetHeader>
@@ -1548,6 +1665,7 @@ export const ScriptView: FC<{
               disabled={loading || isDerivedScript}
               showCharacterCount={false}
               mentionItems={mentionItems}
+              onMentionSelect={onMentionSelect}
             />
           </div>
           {enhanceError && (

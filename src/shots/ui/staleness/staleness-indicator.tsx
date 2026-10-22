@@ -26,8 +26,6 @@ export type StalenessEntityType =
   | 'shot'
   | 'character'
   | 'location'
-  | 'library-location'
-  | 'talent'
   | 'sequence';
 
 type StalenessIndicatorDensity =

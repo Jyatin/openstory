@@ -40,6 +40,9 @@ import {
   gateEstimate,
 } from '@/billing/cost-estimation';
 import { estimateTtsCost } from '@/billing/elevenlabs-pricing';
+import { seedanceEditSeconds } from '@/motion/seedance-edit';
+import { seedanceRunsOnArk } from '@/motion/server/motion-generation';
+import { withMeasuredDurations } from '@/cast/server/sequence-elements/media-duration';
 import { addMicros, ZERO_MICROS, type Microdollars } from '@/billing/money';
 import { ValidationError } from '@/platform/errors';
 import {
@@ -58,7 +61,7 @@ import { estimateStoryboardPreflightCost } from '@/billing/storyboard-preflight-
 import { aspectRatioToImageSize } from '@/models/aspect-ratios';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import type {
-  CharacterWithSheet,
+  CastCharacterWithSheet,
   Sequence,
   Shot,
 } from '@/platform/server/db/schema';
@@ -81,6 +84,7 @@ import {
   notifySequenceReady,
   sequenceScenesUrl,
 } from './notify-sequence-ready';
+import { recordTriggerFailure } from '@/sequences/server/db/sequence-events';
 import { assertNoActiveStoryboard, triggerStoryboard } from './launchers';
 import type {
   BatchMotionMusicWorkflowInput,
@@ -95,7 +99,7 @@ import { getLogger } from '@/platform/logger';
 const logger = getLogger(['openstory', 'sequences', 'smart-retry']);
 
 function getSceneCharacterReferenceImages(
-  allCharacters: CharacterWithSheet[],
+  allCharacters: CastCharacterWithSheet[],
   characterTags: string[]
 ) {
   if (characterTags.length === 0) return [];
@@ -510,9 +514,12 @@ export async function executeSmartRetry(
     const [motionCharacters, motionElements, motionLocations, voiceCharacters] =
       await Promise.all([
         context.scopedDb.characters.listWithSheets(sequence.id),
-        context.scopedDb.sequenceElements.list(sequence.id),
+        // A clip with no known length passes every length gate unchecked.
+        context.scopedDb.sequenceElements
+          .list(sequence.id)
+          .then((rows) => withMeasuredDurations(context.scopedDb, rows)),
         anyReferenceOnly
-          ? context.scopedDb.sequenceLocations.listWithReferences(sequence.id)
+          ? context.scopedDb.locations.listWithReferences(sequence.id)
           : Promise.resolve([]),
         context.scopedDb.characters.list(sequence.id),
       ]);
@@ -534,6 +541,9 @@ export async function executeSmartRetry(
       ),
     });
 
+    const seedanceOnArk = await seedanceRunsOnArk(
+      toWorkflowScopedDb(context.scopedDb).credentials
+    );
     const batchShots: BatchMotionMusicWorkflowInput['shots'] = [];
     let videoCost = ZERO_MICROS;
     for (const shot of failedMotionShots) {
@@ -548,17 +558,6 @@ export async function executeSmartRetry(
       const spoken = batchDialogue.byShotId.get(shot.id);
       const voicedLines = spoken?.voicedLines ?? [];
       const audioClips = spoken?.audioClips ?? [];
-      videoCost = addMicros(
-        videoCost,
-        gateEstimate(
-          estimateVideoCost(
-            shotVideoModel,
-            snapDuration(undefined, shotVideoModel),
-            { pricing, resolution: sequence.resolution, referenceOnly }
-          ),
-          { model: shotVideoModel, operation: 'smart-retry:motion' }
-        )
-      );
       const prompt = resolveMotionPromptFromVersion(
         selectedMotion,
         {
@@ -567,6 +566,33 @@ export async function executeSmartRetry(
           description: scene?.originalScript.extract ?? null,
         },
         shotVideoModel
+      );
+      const referenceImages = buildMotionReferenceImages({
+        scene: scene ?? null,
+        characters: motionCharacters,
+        elements: motionElements,
+        motionPrompt: prompt,
+        referenceOnly,
+        locations: motionLocations,
+      });
+      // No refusal here: images above may already be running, so a clip this
+      // model cannot use fails its own shot at the submit, at once.
+      const editSeconds = seedanceEditSeconds({
+        model: shotVideoModel,
+        onArk: seedanceOnArk,
+        prompt,
+        references: referenceImages,
+      });
+      videoCost = addMicros(
+        videoCost,
+        gateEstimate(
+          estimateVideoCost(
+            shotVideoModel,
+            Math.max(snapDuration(undefined, shotVideoModel), editSeconds ?? 0),
+            { pricing, resolution: sequence.resolution, referenceOnly }
+          ),
+          { model: shotVideoModel, operation: 'smart-retry:motion' }
+        )
       );
       batchShots.push({
         shotId: shot.id,
@@ -577,14 +603,8 @@ export async function executeSmartRetry(
         sequenceTitle: sequence.title,
         imageUrl: referenceOnly ? undefined : (imageUrl ?? undefined),
         referenceOnly,
-        referenceImages: buildMotionReferenceImages({
-          scene: scene ?? null,
-          characters: motionCharacters,
-          elements: motionElements,
-          motionPrompt: prompt,
-          referenceOnly,
-          locations: motionLocations,
-        }),
+        seedanceEditSeconds: editSeconds,
+        referenceImages,
         frameVersionId: referenceOnly ? null : (shot.image?.id ?? null),
         motionPromptVersionId: selectedMotion?.id ?? null,
         prompt,
@@ -708,6 +728,14 @@ export async function executeSmartRetry(
             { sequenceId: sequence.id, variantId },
             error instanceof Error ? error.message : String(error)
           );
+          await recordTriggerFailure(context.scopedDb.sequenceEvents, {
+            sequenceId: sequence.id,
+            actorId: user.id,
+            kind: 'run.failed',
+            targetType: 'sequence',
+            targetId: sequence.id,
+            summary: 'Music generation failed',
+          });
           throw error;
         }
         // Outside the try: a started run's claim must not be failed.

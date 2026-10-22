@@ -21,8 +21,10 @@ import {
 } from '@/platform/server/db/schema';
 import type { TeamMemberRole } from '@/platform/server/db/schema/teams';
 import { createAdminMethods } from '@/platform/server/db/scoped/admin';
+import { createSearchMethods } from '@/platform/server/db/scoped/search';
 import { createApiKeysMethods } from '@/models/server/db/api-keys';
 import { createBillingMethods } from '@/billing/server/db/billing';
+import { createCharacterLooksMethods } from '@/cast/server/db/character-looks';
 import { createCharacterSheetVariantsMethods } from '@/cast/server/db/character-sheet-variants';
 import {
   createComplianceMethods,
@@ -48,18 +50,16 @@ import { createShotVariantsMethods } from '@/shots/server/db/shot-variants';
 import { createShotsMethods } from '@/shots/server/db/shots';
 import { createVideoVariantsMethods } from '@/motion/server/db/video-variants';
 import { createLibraryMethods } from '@/look/server/db/library';
-import {
-  createLocationSheetsMethods,
-  createLocationSheetsReadMethods,
-  createLocationsMethods,
-  createPublicLocationsReadMethods,
-} from '@/cast/server/db/location-library';
+import { createLocationsMethods } from '@/cast/server/db/locations';
 import { createLocationSheetVariantsMethods } from '@/cast/server/db/location-sheet-variants';
 import { createBytePlusAssetsMethods } from '@/models/server/db/byteplus-assets';
 import { createModelUsageMethods } from '@/billing/server/db/model-usage';
 import { createSequenceElementsMethods } from '@/cast/server/db/sequence-elements';
 import { createSequenceExportsMethods } from '@/sequences/server/db/sequence-exports';
-import { createSequenceLocationsMethods } from '@/cast/server/db/sequence-locations';
+import {
+  createPublicStitchReads,
+  createStitchesMethods,
+} from '@/stitches/server/db/stitches';
 import { createSequenceMusicPromptVersionsMethods } from '@/audio/server/db/sequence-music-prompt-versions';
 import { createSequenceVariantsMethods } from '@/audio/server/db/sequence-variants';
 import {
@@ -71,11 +71,6 @@ import {
   createPublicStylesReadMethods,
   createStylesMethods,
 } from '@/look/server/db/styles';
-import {
-  createPublicTalentReadMethods,
-  createTalentMethods,
-} from '@/cast/server/db/talent';
-import { createTalentSheetVariantsMethods } from '@/cast/server/db/talent-sheet-variants';
 import { createTeamManagementMethods } from '@/platform/server/db/scoped/team-management';
 import { and, inArray, isNull, lt, notExists, eq, sql } from 'drizzle-orm';
 
@@ -256,45 +251,6 @@ export async function listPublicStyles() {
 }
 
 /**
- * List public ("system") talent without team scoping or auth. Lets anonymous
- * visitors browse and pre-cast system talent on the public new-sequence
- * screen and talent library page.
- */
-export async function listPublicTalent(options?: { favoritesOnly?: boolean }) {
-  return createPublicTalentReadMethods(getDb()).list(options);
-}
-
-/**
- * List public ("system") library locations without team scoping or auth.
- */
-export async function listPublicLibraryLocations() {
-  return createPublicLocationsReadMethods(getDb()).list();
-}
-
-/**
- * Fetch a public ("system") talent with its sheets and media, no auth.
- * Returns undefined if the talent isn't public. Lets anonymous visitors open a
- * talent detail page read-only.
- */
-export async function getPublicTalentWithRelations(talentId: string) {
-  return createPublicTalentReadMethods(getDb()).getWithRelations(talentId);
-}
-
-/**
- * Fetch a public ("system") library location with its sheets, no auth.
- * Returns null if the location isn't public. Mirrors getLibraryLocationByIdFn's
- * shape so the same detail page renders for anonymous visitors.
- */
-export async function getPublicLibraryLocationById(locationId: string) {
-  const db = getDb();
-  const location =
-    await createPublicLocationsReadMethods(db).getById(locationId);
-  if (!location) return null;
-  const sheets = await createLocationSheetsReadMethods(db).list(locationId);
-  return { ...location, sequenceTitle: 'Library' as const, sheets };
-}
-
-/**
  * Get a sequence by ID without team scoping.
  * Only for admin operations where team context isn't available yet.
  */
@@ -434,10 +390,8 @@ export function createScopedDb(teamId: string, userId: string) {
     sequences: createSequencesMethods(db, teamId, userId),
     sequence: (sequenceId: string) => createSequenceMethods(db, sequenceId),
 
-    talent: createTalentMethods(db, teamId, userId),
     styles: createStylesMethods(db, teamId, userId),
-    locations: createLocationsMethods(db, teamId, userId),
-    locationSheets: createLocationSheetsMethods(db),
+    locations: createLocationsMethods(db, teamId),
     library: createLibraryMethods(db, teamId),
 
     scenes: { ...createScenesMethods(db), ...reads.scenes },
@@ -459,15 +413,15 @@ export function createScopedDb(teamId: string, userId: string) {
     frameVariants: createFrameVariantsMethods(db),
     framePromptVersions: createFramePromptVersionsMethods(db),
     sequenceEvents: createSequenceEventsMethods(db),
-    characterSheetVariants: createCharacterSheetVariantsMethods(db),
-    locationSheetVariants: createLocationSheetVariantsMethods(db),
-    talentSheetVariants: createTalentSheetVariantsMethods(db, teamId),
+    characterSheetVariants: createCharacterSheetVariantsMethods(db, teamId),
+    characterLooks: createCharacterLooksMethods(db, teamId),
+    locationSheetVariants: createLocationSheetVariantsMethods(db, teamId),
     sequenceMusicPromptVersions: createSequenceMusicPromptVersionsMethods(db),
     sequenceVariants: createSequenceVariantsMethods(db),
     sequenceExports: createSequenceExportsMethods(db),
+    stitches: createStitchesMethods(db, teamId, userId),
 
-    characters: createCharactersMethods(db),
-    sequenceLocations: createSequenceLocationsMethods(db),
+    characters: createCharactersMethods(db, teamId),
     sequenceElements: createSequenceElementsMethods(db),
 
     // Direct model access (#458) — flat team-scoped runs of arbitrary fal
@@ -485,6 +439,7 @@ export function createScopedDb(teamId: string, userId: string) {
     billing: createBillingMethods(db, teamId, userId),
     apiKeys: createApiKeysMethods(db, teamId, userId),
     teamManagement: createTeamManagementMethods(db, teamId, userId),
+    search: createSearchMethods(db, teamId),
 
     // Compliance (#1180). `provenance` is its own domain rather than a member
     // of `compliance` because workflows must reach it and the workflow write
@@ -538,4 +493,14 @@ export async function submitPublicContentReport(
   input: Parameters<ReturnType<typeof createPublicReportIntake>['submit']>[0]
 ) {
   return createPublicReportIntake(getDb()).submit(input);
+}
+
+/**
+ * One shared stitch by id (#2127), for the public page at /stitch/<id>.
+ *
+ * Module-level and unscoped, like `submitPublicContentReport`: the viewer has
+ * no team, and the ULID is the only credential, as it is for a stored media URL.
+ */
+export async function getPublicStitch(id: string) {
+  return createPublicStitchReads(getDb()).getById(id);
 }

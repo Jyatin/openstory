@@ -2,17 +2,18 @@
  * Resolvers that turn the public API's human-friendly references into the
  * concrete ids / uploads `createSequences` expects:
  *   - style:   id | name | slug  → styleId (auto-pick a default when omitted)
- *   - talent:  id | name         → suggestedTalentIds
- *   - location:id | name         → suggestedLocationIds
+ *   - character: id | name     → castCharacterIds (a team character)
+ *   - location:id | name         → suggestedLocationIds (a team location, #1695)
  *   - element: hosted URL        → ingested DraftElementUploadInput
  *
- * Every lookup goes through the team-scoped `list()` (team-owned + public), so
- * a caller can never resolve another team's private library entry.
+ * Every lookup goes through a team-scoped read (styles: team-owned + public;
+ * characters and locations: the team's only), so a caller can never resolve
+ * another team's private entry.
  */
 
 import type { Style } from '@/platform/server/db/schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
-import { NotFoundError } from '@/platform/errors';
+import { ConflictError, NotFoundError } from '@/platform/errors';
 import type { DraftElementUploadInput } from '@/cast/draft-element-upload';
 import { DRAFT_ELEMENT_UPLOAD_PREFIX } from '@/cast/server/sequence-elements/storage-path';
 import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
@@ -43,7 +44,7 @@ function matchesRef(ref: string, candidate: { id: string; name: string }) {
 // create-with-ingest path, keeping these resolvers pure and cast-free to test.
 type StyleDeps = { styles: Pick<ScopedDb['styles'], 'list'> };
 
-type TalentCreate = Exclude<
+type CharacterCreate = Exclude<
   NonNullable<ApiCreateSequenceInput['characters']>[number],
   string
 >;
@@ -52,12 +53,12 @@ type LocationCreate = Exclude<
   string
 >;
 
-type TalentResolveDeps = {
-  talent: Pick<ScopedDb['talent'], 'list'>;
-  createTalent: (input: TalentCreate) => Promise<{ id: string }>;
+type CharacterResolveDeps = {
+  characters: Pick<ScopedDb['characters'], 'listTeam'>;
+  createCharacter: (input: CharacterCreate) => Promise<{ id: string }>;
 };
 type LocationResolveDeps = {
-  locations: Pick<ScopedDb['locations'], 'list'>;
+  locations: Pick<ScopedDb['locations'], 'listTeam'>;
   createLocation: (input: LocationCreate) => Promise<{ id: string }>;
 };
 
@@ -106,44 +107,63 @@ export async function resolveStyle(
 }
 
 /**
- * Resolve a mixed list of talent items — reference strings (id|name) and inline
- * create objects — into a deduped list of talent ids for `suggestedTalentIds`.
- * Inline creates matching an existing name (or a name already created in this
- * list) reuse that id. New names are delegated to `deps.createTalent`.
+ * Resolve a mixed list of character items — reference strings (id|name) and
+ * inline create objects — into the team characters to cast into the new
+ * sequence (`castCharacterIds`). A string names one of the team's characters,
+ * by id then by name; two of that name is a conflict that asks for the id.
+ * An inline create whose name a team character already has is a conflict; a
+ * repeat of an earlier create in this list reuses it. New names are delegated
+ * to `deps.createCharacter`.
  */
-export async function resolveTalentIds(
-  deps: TalentResolveDeps,
+export async function resolveCharacterIds(
+  deps: CharacterResolveDeps,
   items: ApiCreateSequenceInput['characters']
 ): Promise<string[]> {
   if (!items || items.length === 0) return [];
   const { refs, creates } = partition(items);
   const ids: string[] = [];
 
-  const all = await deps.talent.list();
-  const seen = new Map<string, string>();
-  for (const talent of all) {
-    seen.set(talent.id, talent.id);
-    seen.set(slugify(talent.name), talent.id);
-  }
+  const team = await deps.characters.listTeam();
+  /** The one team character `ref` names, or null; several is a conflict. */
+  const named = (ref: string, matches: typeof team): string | null => {
+    if (matches.length > 1) {
+      throw new ConflictError(
+        `"${ref}" names ${matches.length} characters. Use the id: ${matches.map((c) => c.id).join(', ')}.`
+      );
+    }
+    return matches[0]?.id ?? null;
+  };
 
   for (const ref of refs) {
-    const match = all.find((t) => matchesRef(ref, t));
-    if (!match) {
-      throw new NotFoundError(`No character/talent found matching "${ref}".`);
-    }
-    ids.push(match.id);
-    seen.set(slugify(match.name), match.id);
+    const byId = team.find((c) => c.id === ref);
+    const id =
+      byId?.id ??
+      named(
+        ref,
+        team.filter((c) => matchesRef(ref, c))
+      );
+    if (!id) throw new NotFoundError(`No character found matching "${ref}".`);
+    ids.push(id);
   }
 
+  const created = new Map<string, string>();
   for (const create of creates) {
-    const existingId = seen.get(slugify(create.name));
-    if (existingId) {
-      ids.push(existingId);
+    const slug = slugify(create.name);
+    const earlier = created.get(slug);
+    if (earlier) {
+      ids.push(earlier);
       continue;
     }
-    const created = await deps.createTalent(create);
-    ids.push(created.id);
-    seen.set(slugify(create.name), created.id);
+    const taken = team.filter((c) => slugify(c.name) === slug);
+    if (taken.length > 0) {
+      // Reusing it would drop this create's description and person flag.
+      throw new ConflictError(
+        `The team already has a character named "${create.name}". Pass its name or id as a string to cast it: ${taken.map((c) => c.id).join(', ')}.`
+      );
+    }
+    const character = await deps.createCharacter(create);
+    ids.push(character.id);
+    created.set(slug, character.id);
   }
 
   return [...new Set(ids)];
@@ -151,8 +171,11 @@ export async function resolveTalentIds(
 
 /**
  * Resolve a mixed list of location items — reference strings (id|name) and
- * inline create objects — into a deduped list of ids for `suggestedLocationIds`.
- * Inline-create is delegated to `deps.createLocation`.
+ * inline create objects — into a deduped list of team location ids for
+ * `suggestedLocationIds`. A string names one of the team's locations, by id
+ * then by name; two of that name is a conflict that asks for the id. An inline
+ * create whose name a team location (or an earlier create in this list) has
+ * reuses it. New names are delegated to `deps.createLocation`.
  */
 export async function resolveLocationIds(
   deps: LocationResolveDeps,
@@ -162,31 +185,45 @@ export async function resolveLocationIds(
   const { refs, creates } = partition(items);
   const ids: string[] = [];
 
-  const all = await deps.locations.list();
-  const seen = new Map<string, string>();
-  for (const location of all) {
-    seen.set(location.id, location.id);
-    seen.set(slugify(location.name), location.id);
-  }
+  const team = await deps.locations.listTeam();
+  /** The one team location `ref` names, or null; several is a conflict. */
+  const named = (ref: string, matches: typeof team): string | null => {
+    if (matches.length > 1) {
+      throw new ConflictError(
+        `"${ref}" names ${matches.length} locations. Use the id: ${matches.map((l) => l.id).join(', ')}.`
+      );
+    }
+    return matches[0]?.id ?? null;
+  };
 
   for (const ref of refs) {
-    const match = all.find((l) => matchesRef(ref, l));
-    if (!match) {
-      throw new NotFoundError(`No location found matching "${ref}".`);
-    }
-    ids.push(match.id);
-    seen.set(slugify(match.name), match.id);
+    const byId = team.find((l) => l.id === ref);
+    const id =
+      byId?.id ??
+      named(
+        ref,
+        team.filter((l) => matchesRef(ref, l))
+      );
+    if (!id) throw new NotFoundError(`No location found matching "${ref}".`);
+    ids.push(id);
   }
 
+  const created = new Map<string, string>();
   for (const create of creates) {
-    const existingId = seen.get(slugify(create.name));
+    const slug = slugify(create.name);
+    const existingId =
+      created.get(slug) ??
+      named(
+        create.name,
+        team.filter((l) => slugify(l.name) === slug)
+      );
     if (existingId) {
       ids.push(existingId);
       continue;
     }
-    const created = await deps.createLocation(create);
-    ids.push(created.id);
-    seen.set(slugify(create.name), created.id);
+    const location = await deps.createLocation(create);
+    ids.push(location.id);
+    created.set(slug, location.id);
   }
 
   return [...new Set(ids)];

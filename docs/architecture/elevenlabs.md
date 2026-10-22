@@ -56,12 +56,12 @@ before the workflow step returns (Cloudflare Workflows' 1 MiB `step.do` cap).
 
 **Character voices (#1553).** `sequences.generateVoices` is the sequence
 default; `characters.useVoice` overrides it per character (NULL = inherit) —
-resolve with `usesVoice()`. There is no sequence-level switch (#2004): a new
-sequence is on wherever voice design is configured
-(`getVoiceDesignAvailableFn`), the public API included unless it sends
-`false`, and a voice is turned off on the character. Older sequences keep
-what they stored. The launcher refuses the flag when
-`isElevenLabsConfigured()` is false.
+resolve with `usesVoice()`. Voices are on wherever voice design is configured.
+There is no `voices` field on the public API or MCP, and no sequence switch
+(#2067). A row stored off (the old API default) is still on: Continue asks
+for voices and caps the run at Dialogue. A voice is turned off on the
+character. The launcher refuses the flag when `isElevenLabsConfigured()` is
+false.
 In-flight Voice Design is a stills-style husk (#1715): a
 `character_voice_versions` row with `status: 'generating'` (no `voiceId` /
 previews yet) and `characters.pendingPromoteVoiceVersionId` pointing at it.
@@ -111,16 +111,17 @@ shows Take 2 after promoting the second preview, not a generic “Designed
 take” (#1709). A `generatedVoiceId` can be saved once; after create()
 succeeds (or ElevenLabs says it already did / the preview aged out) the
 take is `unusable` and Use this take is hidden — the R2 MP3 stays. Previews cost no slot; a saved voice is an
-**account-wide** ElevenLabs slot, so the id is shared by copy (talent ↔
-character at cast / save-to-library) and freed only through
-`releaseVoiceIfUnreferenced` (`getVoiceReferenceCount` over characters'
-selected voice versions and `talent.voiceId`, soft-deleted characters included,
-**provider delete first, row write second** so a failed delete stays
-retryable; `heldBy: 1` when the caller's own row still holds the id) on
-character soft-delete, per-character switch-off, choose-take, recast to a
-talent with a different voice, sequence archive (before the status flip, so
-a failed release is retryable), talent delete and regenerate — never a bare
-delete, and the upsert keeps a voice the row already holds. Billed at
+**account-wide** ElevenLabs slot. The voice lives on the character. A slot is freed only
+through `releaseVoiceIfUnreferenced` (`getVoiceReferenceCount` over
+characters' current voice versions; a character holds its voice until it is
+deleted, #2017, so removing it from a sequence or archiving a sequence
+releases nothing, **provider delete first, row write second** so a failed
+delete stays retryable; `heldBy` is the caller's own reference — the
+character's current pointer, counted exactly by
+`characters.getOwnVoiceHolds`) on character soft-delete, per-character
+switch-off, choose-take, sequence archive (before the status flip, so a
+failed release is retryable) and regenerate — never a bare delete, and the
+upsert keeps a voice the row already holds. Billed at
 `VOICE_DESIGN_COST` per design call; pre-flight prices one call per
 estimated character (`generateVoices` on `estimateStoryboardCost`), the
 in-run gate the real speaking count. **Voices are versioned (#1657):** every
@@ -130,9 +131,7 @@ in-run gate the real speaking count. **Voices are versioned (#1657):** every
 `characters.selectedVoiceVersionId`, the only selection pointer. The voice
 IS that row (#1788): `characters` has no voice columns except `useVoice`;
 every scoped read joins the selected version and re-adds `voiceId` /
-`voiceDescription` / `voicePreviews` under those names. A cast's talent
-voice only fills what the selected version lacks, as a new 'library' (or
-'analysis', description only) version. `createdBy` is the person whose action made the
+`voiceDescription` / `voicePreviews` under those names. `createdBy` is the person whose action made the
 version — required on `updateVoice` so no writer forgets it, null when nobody
 did (the cast-records seed). 'removed' means the character dropped its voice id;
 only `releasedAt` means the ElevenLabs slot was actually freed.
@@ -460,7 +459,7 @@ prevention half (a words-per-second placement budget per shot), and
 `splitOverfullShots` enforces it after parse: a shot over the longest clip's
 word budget is split between lines into back-to-back shots. Preflight
 reserves the TTS cost on the references slice (static card), including when
-Voices is off — talent may already hold a `voiceId`. The optimised-prompt
+Voices is off — a character may already hold a `voiceId`. The optimised-prompt
 JSON carries the audio refs for paste-into-Videos. Models with no audio
 reference slot (Grok, Omni Flash, Kling) still get a section and a cut clip
 in References; motion just does not bind it.
@@ -510,17 +509,25 @@ Out of scope here: voice cloning from an uploaded sample, realtime/agents.
 includes every shot before rendering is complete. `toPlaybackClips` uses
 rendered clips where available and still entries elsewhere, preferring the
 selected still with the storyboard preview as fallback. A still plays its
-selected `shots.audioClips` and holds for their actual combined duration;
-without audio it holds for `durationMs` (3 seconds for legacy missing
-durations). The Mediabunny canvas source yields timed still frames on the same
+selected `shots.audioClips` from the start of the shot and holds for the
+longer of the shot (`durationMs`, 3 seconds when that is missing) and the
+clips' combined duration. A short take no longer rushes the picture.
+`shotIdAtSequenceTime` reads the stitcher's measured offsets, so the
+highlighted shot follows that hold. The Mediabunny canvas source yields timed still frames on the same
 timeline as video frames; it does not encode temporary videos. PCM dialogue
 cut files are decoded with `AudioBufferSink` and scheduled on the existing
 audio clock, so pause, seeking, volume and music work across both kinds of
-entry. Rendered clips use only their embedded audio. Theatre play does not
-show lines on screen. Image failures fall back to the preview, then a
+entry. Rendered clips use only their embedded audio. Every entry also carries
+the shot's lines as subtitles (`shotCues`): each timed line for the time its
+reading spoke it. Wording is `spokenLines` when the take has them, otherwise
+the written line. A line the reading did not time — every line when there is
+no reading yet, or a line added after it — shares one cue across the whole
+shot, even when other lines are timed. The timing is `ShotView.dialogueTiming` (#1853), derived on
+read from the selected section and its speech's turns (`sectionLineTiming`,
+`getSelectedSectionsBySequence`) — never stored on the clip, so every reading
+ever cut is timed. Image failures fall back to the preview, then a
 placeholder, preserving the shot's timeline slot. Hard cuts have no
-cross-fades. Mixed previews bypass the cached exported MP4; export continues
-to require rendered videos. There is no separate animatic button, dialog, or
+cross-fades. There is no separate animatic button, dialog, or
 playback mode.
 
 While that player runs, the shot list marks the shot under the playhead and

@@ -11,15 +11,13 @@ import { DEFAULT_RESOLUTION, type Resolution } from '@/models/resolutions';
 import type { Database } from '@/platform/server/db/client';
 import { shotHierarchicalOrder } from '@/shots/server/db/shot-view-query';
 import {
-  characterBibleVersions,
-  characters,
   framePromptVersions,
   frames,
   frameVariants,
-  locationBibleVersions,
   renderSegments,
   scenes,
-  sequenceLocations,
+  sequenceCast,
+  sequenceLocationLinks,
   sequenceMusicPromptVersions,
   sequenceMusicVariants,
   sequenceStyleVersions,
@@ -56,13 +54,29 @@ import {
   getPrimaryImageByFrameIds,
 } from '@/stills/server/db/frame-variants';
 import { getPrimaryVideoByShotIds } from '@/motion/server/db/video-variants';
+import { describeSettingsChange } from '@/sequences/model-label';
 import {
   buildEventInsert,
+  buildEventInsertIfPresent,
+  buildEventInsertOnce,
   SETTINGS_CHANGED_EVENT,
-  SETTINGS_CHANGED_LABELS,
 } from './sequence-events';
+import type { RecordEventInput } from './sequence-events';
 import { ValidationError } from '@/platform/errors';
-import { demoteSequenceSheetClaims } from '@/cast/server/db/sheet-claims';
+import {
+  deleteLocationLinksStatements,
+  deleteLocationsStatements,
+  locationsOnlyIn,
+} from '@/cast/server/db/locations';
+import {
+  assertVoicesReleased,
+  deleteCharactersStatements,
+  voiceIdsHeldOnlyBy,
+} from '@/cast/server/db/characters';
+import {
+  charactersOnlyIn,
+  deleteCastStatements,
+} from '@/cast/server/db/sequence-cast';
 
 /**
  * {@link ShotReadiness} plus the scalars a production status derives from: which
@@ -627,7 +641,6 @@ export function createSequencesMethods(
       draftMotion?: boolean;
       /** Film length asked for (#1593); absent / null = auto. */
       targetDurationSeconds?: number | null;
-      suggestedTalentIds?: string[];
       suggestedLocationIds?: string[];
     }): Promise<Sequence> => {
       const styleConfig = params.deferStyleSnapshot
@@ -658,7 +671,6 @@ export function createSequencesMethods(
         generateStartFrames: params.generateStartFrames ?? false,
         generateVoices: params.generateVoices ?? false,
         targetDurationSeconds: params.targetDurationSeconds ?? null,
-        suggestedTalentIds: params.suggestedTalentIds ?? null,
         suggestedLocationIds: params.suggestedLocationIds ?? null,
         status: 'draft',
       };
@@ -700,20 +712,45 @@ export function createSequencesMethods(
       id: string;
       expectedRunId: string | null;
       claimId: string;
+      /** The start line, committed with the claim. Null writes none. */
+      activity: { summary: string } | null;
     }): Promise<boolean> => {
-      const claimed = await db
+      const where = and(
+        eq(sequences.id, params.id),
+        eq(sequences.teamId, teamId),
+        params.expectedRunId === null
+          ? isNull(sequences.workflowRunId)
+          : eq(sequences.workflowRunId, params.expectedRunId)
+      );
+      const claim = db
         .update(sequences)
         .set({ workflowRunId: params.claimId, updatedAt: new Date() })
-        .where(
+        .where(where)
+        .returning({ id: sequences.id });
+      if (!params.activity) {
+        const claimed = await claim;
+        return claimed.length > 0;
+      }
+      const [claimed] = await db.batch([
+        claim,
+        buildEventInsertIfPresent(
+          db,
+          {
+            id: generateId(),
+            sequenceId: params.id,
+            actorId: userId,
+            kind: 'storyboard.started',
+            targetType: 'sequence',
+            targetId: params.id,
+            summary: params.activity.summary,
+          },
+          sequences,
           and(
             eq(sequences.id, params.id),
-            eq(sequences.teamId, teamId),
-            params.expectedRunId === null
-              ? isNull(sequences.workflowRunId)
-              : eq(sequences.workflowRunId, params.expectedRunId)
+            eq(sequences.workflowRunId, params.claimId)
           )
-        )
-        .returning({ id: sequences.id });
+        ),
+      ]);
       return claimed.length > 0;
     },
 
@@ -783,6 +820,35 @@ export function createSequencesMethods(
           ? await snapshotConfigForStyleId(db, params.styleId)
           : undefined;
       const scoped = and(eq(sequences.id, id), eq(sequences.teamId, teamId));
+      const [before] = await db
+        .select({
+          styleId: sequences.styleId,
+          aspectRatio: sequences.aspectRatio,
+          imageModel: sequences.imageModel,
+          videoModel: sequences.videoModel,
+          musicModel: sequences.musicModel,
+          analysisModel: sequences.analysisModel,
+          generationStopAt: sequences.generationStopAt,
+        })
+        .from(sequences)
+        .where(scoped);
+      const settingsChange = before
+        ? describeSettingsChange(before, values)
+        : null;
+      const settingsInsert = settingsChange
+        ? buildEventInsert(db, {
+            sequenceId: id,
+            actorId: userId,
+            kind: SETTINGS_CHANGED_EVENT,
+            targetType: 'sequence',
+            targetId: id,
+            summary: settingsChange.summary,
+            data: {
+              fields: settingsChange.fields,
+              changes: settingsChange.changes,
+            },
+          })
+        : null;
       if (styleConfig !== undefined && params.styleId !== undefined) {
         const [owned] = await db
           .select({ id: sequences.id })
@@ -791,9 +857,9 @@ export function createSequencesMethods(
         if (!owned) {
           throw new ValidationError('Sequence not found');
         }
-        // A style switch is a new snapshot (#1600): its version row, the
-        // pointer, and — since the style feeds every sheet in the sequence —
-        // the revoked sheet claims (#1113), in one batch.
+        // A style switch is a new snapshot (#1600): its version row and the
+        // pointer, in one batch. No sheet claim is revoked: a character or
+        // location sheet reads no style, only its bible's `rendering`.
         const styleVersionId = generateId();
         await db.batch([
           insertStyleVersion(db, {
@@ -808,8 +874,20 @@ export function createSequencesMethods(
             .update(sequences)
             .set({ ...values, selectedStyleVersionId: styleVersionId })
             .where(scoped),
-          ...demoteSequenceSheetClaims(db, id),
+          ...(settingsInsert ? [settingsInsert] : []),
         ]);
+      } else if (settingsInsert) {
+        const [updated] = await db.batch([
+          db
+            .update(sequences)
+            .set(values)
+            .where(scoped)
+            .returning({ id: sequences.id }),
+          settingsInsert,
+        ]);
+        if (updated.length === 0) {
+          throw new ValidationError('Sequence not found');
+        }
       } else {
         const [updated] = await db
           .update(sequences)
@@ -823,22 +901,6 @@ export function createSequencesMethods(
       const [data] = await selectSequencesFrom(db).where(scoped);
       if (!data) {
         throw new ValidationError('Sequence not found');
-      }
-
-      // Date hash-bearing setting changes so staleness can name them (#1194);
-      // style is a snapshot, so no row timestamp says when it moved.
-      const fields = Object.keys(SETTINGS_CHANGED_LABELS).filter(
-        (f) => f in values
-      );
-      if (fields.length > 0) {
-        await buildEventInsert(db, {
-          sequenceId: id,
-          actorId: userId,
-          kind: SETTINGS_CHANGED_EVENT,
-          targetType: 'sequence',
-          targetId: id,
-          data: { fields },
-        });
       }
 
       return data;
@@ -867,6 +929,7 @@ export function createSequencesMethods(
       // The derived recipe is a snapshot like any other (#1600). The pointer
       // moves only while the sequence still points at this style; a pick that
       // lands between the read and the batch leaves the row as history.
+      // Like a style switch, it revokes no sheet claim: a sheet reads no style.
       const styleVersionId = generateId();
       const [, rows] = await db.batch([
         insertStyleVersion(db, {
@@ -889,36 +952,59 @@ export function createSequencesMethods(
       return rows.length > 0;
     },
 
-    delete: async (sequenceId: string): Promise<void> => {
-      // The #1600 version tables RESTRICT their parents' delete (the #612
-      // rebuild trap), so they go first, in the same batch as the cascade.
+    /**
+     * The saved voices a hard delete of this sequence would strand: release
+     * each, then pass them to `delete`. `get` prefix on purpose: it is a
+     * read, so the workflow surface strips it.
+     */
+    getVoiceIdsToReleaseOnDelete: async (
+      sequenceId: string
+    ): Promise<string[]> =>
+      await voiceIdsHeldOnlyBy(
+        db,
+        await charactersOnlyIn(db, teamId, sequenceId)
+      ),
+
+    /**
+     * Hard-delete one of the team's sequences. Every statement names the
+     * team's sequence, so another team's id deletes nothing. Refused while a
+     * saved voice would be stranded: `releasedVoiceIds` are the ids from
+     * `getVoiceIdsToReleaseOnDelete` the caller has run through
+     * `releaseVoiceIfUnreferenced`.
+     */
+    delete: async (
+      sequenceId: string,
+      opts: { releasedVoiceIds: readonly string[] }
+    ): Promise<void> => {
+      const mine = db
+        .select({ id: sequences.id })
+        .from(sequences)
+        .where(and(eq(sequences.id, sequenceId), eq(sequences.teamId, teamId)));
+      // A character belongs to the team (#2017): the sequence's cast links
+      // go, and with them only the characters nothing else holds. Nothing
+      // cascades from the sequence to a character, or from a character to
+      // its rows, so all of it is deleted here, children first, in one batch.
+      const [own] = await mine;
+      const theirs = own
+        ? await charactersOnlyIn(db, teamId, sequenceId)
+        : sql`0`;
+      // A location is the team's too (#1695), by the same rule.
+      const theirLocations = own
+        ? await locationsOnlyIn(db, teamId, sequenceId)
+        : sql`0`;
+      await assertVoicesReleased(db, theirs, opts.releasedVoiceIds);
       await db.batch([
         db
           .delete(sequenceStyleVersions)
-          .where(eq(sequenceStyleVersions.sequenceId, sequenceId)),
-        db
-          .delete(characterBibleVersions)
-          .where(
-            inArray(
-              characterBibleVersions.characterId,
-              db
-                .select({ id: characters.id })
-                .from(characters)
-                .where(eq(characters.sequenceId, sequenceId))
-            )
-          ),
-        db
-          .delete(locationBibleVersions)
-          .where(
-            inArray(
-              locationBibleVersions.locationId,
-              db
-                .select({ id: sequenceLocations.id })
-                .from(sequenceLocations)
-                .where(eq(sequenceLocations.sequenceId, sequenceId))
-            )
-          ),
-        db.delete(sequences).where(eq(sequences.id, sequenceId)),
+          .where(inArray(sequenceStyleVersions.sequenceId, mine)),
+        ...deleteCastStatements(db, inArray(sequenceCast.sequenceId, mine)),
+        ...deleteCharactersStatements(db, theirs),
+        ...deleteLocationLinksStatements(
+          db,
+          inArray(sequenceLocationLinks.sequenceId, mine)
+        ),
+        ...deleteLocationsStatements(db, theirLocations),
+        db.delete(sequences).where(inArray(sequences.id, mine)),
       ]);
       // An automatic style has no FK to its sequence (#1213); drop it here.
       await db
@@ -959,11 +1045,20 @@ export function createSequencesMethods(
 
 export function createSequenceMethods(db: Database, sequenceId: string) {
   return {
-    updateStatus: async (status: SequenceStatus, error?: string | null) => {
-      await db
+    updateStatus: async (
+      status: SequenceStatus,
+      error?: string | null,
+      event?: RecordEventInput & { id: string }
+    ) => {
+      const write = db
         .update(sequences)
         .set({ status, statusError: error ?? null, updatedAt: new Date() })
         .where(eq(sequences.id, sequenceId));
+      if (!event) {
+        await write;
+        return;
+      }
+      await db.batch([write, buildEventInsertOnce(db, event)]);
     },
   };
 }

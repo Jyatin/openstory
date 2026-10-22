@@ -29,10 +29,9 @@ import type { GenerationStage } from '@/sequences/pipeline';
 import type { musicDesignResultSchema } from '@/sequences/response-schemas';
 import type {
   CharacterSheetInputHash,
-  LibraryLocationReferenceInputHash,
+  LegacyStylingParts,
   LocationSheetInputHash,
   ShotImageInputHash,
-  TalentSheetInputHash,
 } from '@/shots/input-hash';
 import type {
   DialogueTakeBase,
@@ -106,6 +105,21 @@ export interface UserWorkflowContext {
 export interface SequenceWorkflowContext extends UserWorkflowContext {
   sequenceId?: string;
 }
+
+/**
+ * One cast character as the trigger found it (#2050): the bible entry as
+ * the sequence casts her (`charactersToBible`, look ids are `character_looks`
+ * ids), frozen for the whole run. `shared` says the library or another
+ * sequence holds her too: analysis then links to her and adds looks, and
+ * never rewrites her bible or looks. A character only this sequence holds is
+ * still this sequence's to rewrite on re-analysis.
+ */
+export type AttachedCastSnapshot = {
+  /** `characters.id`. */
+  id: string;
+  shared: boolean;
+  entry: CharacterBibleEntry;
+};
 /**
  * Image generation workflow input
  */
@@ -280,6 +294,8 @@ export interface StoryboardWorkflowInput extends SequenceWorkflowContext {
    * late and are read live; which elements exist must not.
    */
   elementIds: string[];
+  /** The sequence's live cast at the trigger (#2050); see {@link AttachedCastSnapshot}. */
+  cast: AttachedCastSnapshot[];
   /**
    * Provenance for the music prompt this run may write, snapshotted from the
    * sequence row by `triggerStoryboard`. Threaded down analyze-script →
@@ -317,12 +333,8 @@ export interface StoryboardWorkflowInput extends SequenceWorkflowContext {
   musicModel?: keyof typeof AUDIO_MODELS;
   /** Multiple audio models for variant generation (first is primary) */
   audioModels?: (keyof typeof AUDIO_MODELS)[];
-  /** Talent IDs suggested by user for AI-assisted casting */
-  suggestedTalentIds?: string[];
   /** Location IDs suggested by user for visual consistency */
   suggestedLocationIds?: string[];
-  /** @see TalentMatchingWorkflowInput.suggestedTalent — resolved by the launcher. */
-  suggestedTalent?: SuggestedTalentSnapshot[];
   /** @see LocationMatchingWorkflowInput.suggestedLocations — resolved by the launcher. */
   suggestedLocations?: SuggestedLocationSnapshot[];
   /**
@@ -385,8 +397,8 @@ export type StoryboardTriggerInput = Omit<
   | 'imageModel'
   | 'videoModel'
   | 'elementIds'
+  | 'cast'
   | 'musicPromptSource'
-  | 'suggestedTalent'
   | 'suggestedLocations'
   | 'ownerEmail'
   | 'sequenceUrl'
@@ -415,6 +427,8 @@ export interface AnalyzeScriptWorkflowInput extends SequenceWorkflowContext {
   imageModel: TextToImageModel;
   /** @see StoryboardWorkflowInput.elementIds — passed straight through. */
   elementIds: string[];
+  /** @see StoryboardWorkflowInput.cast — passed straight through. */
+  cast: AttachedCastSnapshot[];
   /** @see StoryboardWorkflowInput.musicPromptSource — passed straight through. */
   musicPromptSource: 'ai-generated' | 'regenerated';
   /** Multiple image models for variant generation (first is primary) */
@@ -428,12 +442,8 @@ export interface AnalyzeScriptWorkflowInput extends SequenceWorkflowContext {
   musicModel?: keyof typeof AUDIO_MODELS;
   /** Multiple audio models for variant generation (first is primary) */
   audioModels?: (keyof typeof AUDIO_MODELS)[];
-  /** Talent IDs suggested by user for AI-assisted casting */
-  suggestedTalentIds?: string[];
   /** Location IDs suggested by user for visual consistency */
   suggestedLocationIds?: string[];
-  /** @see TalentMatchingWorkflowInput.suggestedTalent — passed straight through. */
-  suggestedTalent?: SuggestedTalentSnapshot[];
   /** @see LocationMatchingWorkflowInput.suggestedLocations — passed straight through. */
   suggestedLocations?: SuggestedLocationSnapshot[];
   /**
@@ -465,6 +475,8 @@ export type SceneSplitWorkflowInput = SequenceWorkflowContext & {
   userCountry?: string;
   /** User-uploaded elements to make the model aware of uppercase tokens */
   elements?: SequenceElementMinimal[];
+  /** @see StoryboardWorkflowInput.cast — the `<CAST>` block the bibles call reads. */
+  cast: AttachedCastSnapshot[];
   /**
    * Clip grid for the shot-list pass (#1593): caps how many shots a scene's
    * label can hold and spreads the label over them. Absent → no cap, an even
@@ -485,6 +497,13 @@ export type SceneSplitWorkflowResult = {
   title: string;
   shotMapping: ShotMapping;
   characterBible: CharacterBibleEntry[];
+  /**
+   * The look each scene dresses a character in, where it is not the default
+   * (#2015): scene id → (character tag → look id). The look ids are the bible
+   * entries' slugs; analyze-script swaps them for `character_looks.id` once
+   * the cast is persisted and writes them onto the scenes.
+   */
+  sceneLooks: Record<string, Record<string, string>>;
   locationBible: LocationBibleEntry[];
   elementBible: ElementBibleEntry[];
   /**
@@ -644,6 +663,15 @@ export interface MotionWorkflowInput
    * credits were reserved.
    */
   referenceOnly: boolean;
+  /**
+   * The trigger's edit decision (#2036): whole seconds of the longest
+   * attached clip when it held credits for a Seedance 2.5 edit
+   * (`seedanceEditSeconds`), null when it did not. The submit sends
+   * `duration: -1` only when this is set, so an edit never goes out on a hold
+   * sized for the shot. Required: a trigger that forgot it would send every
+   * edit at the shot's length.
+   */
+  seedanceEditSeconds: number | null;
   prompt: string;
   model?: keyof typeof IMAGE_TO_VIDEO_MODELS;
   duration?: number;
@@ -774,47 +802,66 @@ type PackedMotionCoveredShot = {
 /**
  * Character sheet generation workflow input
  */
-export interface CharacterSheetWorkflowInput extends SequenceWorkflowContext {
+export interface CharacterSheetWorkflowInput extends Omit<
+  SequenceWorkflowContext,
+  'sequenceId'
+> {
+  /**
+   * The sequence the sheet was asked from, for its events and the run's
+   * storage path; null from the Characters page (#2017), where the run
+   * reports on the character's own channel (`castChannelId`).
+   */
+  sequenceId: string | null;
   /** sequence_characters.id */
   characterDbId: string;
+  /**
+   * The look this sheet draws (#2015) — one run makes one look's sheet. A run
+   * without one is failed on arrival (`assertQueuedWithLooks`).
+   */
+  lookId: string;
+  /**
+   * The `character_look_versions` row the look was read from, snapshotted at
+   * the trigger and stamped on the sheet's version row. The claim is taken
+   * only while the look still points at it.
+   */
+  lookVersionId: string;
+  /**
+   * The look's hair / makeup / injury notes as `effectiveStyling` resolves
+   * them (#2065); null when it has none.
+   */
+  lookStyling: string | null;
+  /**
+   * Set only by the payload seam (`foldLegacyFeaturesInPayload`), on a run
+   * queued before #2065: the look's styling and the bible's features as
+   * they were queued, which is what its `snapshotInputHash` was stamped
+   * from. Optional because no trigger writes it. Delete with
+   * `LEGACY_HASH_UNTIL`.
+   */
+  queuedLegacyStyling?: LegacyStylingParts;
+  /**
+   * The default look's selected sheet, which a look other than the default
+   * is drawn from, and only from. Null exactly when this look IS the
+   * default: a non-default look with no face is refused at the trigger.
+   * Snapshotted at the trigger, or (a look whose default sheet the same run
+   * makes) from that run's landed sheet. `versionId` is the selected
+   * version, or the look's id when the pointer is still null (the #1419
+   * row); it joins the sheet hash.
+   */
+  face: { url: string; versionId: string } | null;
   /** Character name for logging */
   characterName: string;
-  /** Character metadata from script analysis */
+  /**
+   * The character's bible at the trigger. `standardClothing` is the LOOK's
+   * clothing (#2015), not a field of the bible.
+   */
   characterMetadata: CharacterBibleEntry;
   /** Image model to use (defaults to nano_banana_2) */
   imageModel?: TextToImageModel;
-  /** Reference image URL (e.g., from talent sheet) for recasting */
-  referenceImageUrl?: string;
-  /** Talent metadata from talent sheet (for appearance overrides when recasting) */
-  talentMetadata?: CharacterBibleEntry;
-  /** Talent description to include in prompt */
-  talentDescription?: string;
-  /**
-   * When true, copy `referenceImageUrl` onto the character instead of
-   * generating a costumed sheet. Snapshotted at trigger time from
-   * `shouldReuseTalentSheet`.
-   */
-  reuseTalentSheet?: boolean;
-  /** Sequence style config to apply to the character sheet */
-  styleConfig?: StyleConfig;
-  /**
-   * Snapshot of the upstream talent sheet's `input_hash` at trigger time.
-   * `null` when the character has no talent assignment, or when the talent
-   * sheet predates hash tracking. Snapshot pattern only — see
-   * docs/architecture/workflow-snapshots-and-content-hash-staleness.md.
-   */
-  talentSheetInputHash?: string | null;
-  /**
-   * The cast talent's own `description` (#1785), hashed in place of
-   * `talentDescription`, which each path words differently for the prompt.
-   * `null` when not cast or blank. Snapshot pattern only.
-   */
-  castTalentDescription: string | null;
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
   snapshotInputHash: CharacterSheetInputHash;
   /**
    * The sheet claim (#1113): the id this run's version row will carry, taken at the trigger
-   * (`characters.claimSheet`). The run lands only while the claim still names it,
+   * (`characterLooks.claimSheet`). The run lands only while the claim still names it,
    * else it parks as divergent. Absent only on a run queued before #1113,
    * which lands unconditionally.
    */
@@ -940,135 +987,12 @@ export interface RegenerateShotsWorkflowInput extends SequenceWorkflowContext {
   snapshotInputHash: string;
 }
 
-/**
- * Recast character workflow input
- * Orchestrates character sheet generation + shot regeneration for recast
- */
-export interface RecastCharacterWorkflowInput extends SequenceWorkflowContext {
-  /** Character database ID */
-  characterDbId: string;
-  /** Character name for logging */
-  characterName: string;
-  /** Character metadata from script analysis */
-  characterMetadata: CharacterBibleEntry;
-  /** Image model to use */
-  imageModel?: TextToImageModel;
-  /** Reference image URL from talent sheet */
-  referenceImageUrl?: string;
-  /** Talent metadata for appearance overrides */
-  talentMetadata?: CharacterBibleEntry;
-  /** Talent description */
-  talentDescription?: string;
-  /**
-   * Copy the talent sheet onto the character instead of generating a
-   * costumed sheet. Threaded through to the character-sheet child.
-   */
-  reuseTalentSheet?: boolean;
-  /**
-   * The upstream talent sheet's `input_hash`, resolved at trigger time. The
-   * workflow used to re-derive this two DB reads deep, minutes later — a
-   * different talent identity than the one the user recast to.
-   */
-  talentSheetInputHash: string | null;
-  /** The cast talent's own description; see `CharacterSheetWorkflowInput`. */
-  castTalentDescription: string | null;
-  /** The sheet claim for the child; see `CharacterSheetWorkflowInput`. */
-  sheetVersionId: string;
-  /** See `CharacterSheetWorkflowInput.bibleVersionId`. */
-  bibleVersionId: string | null;
-  /** Sequence style config to apply to the character sheet */
-  styleConfig?: StyleConfig;
-  /** Aspect ratio (frozen at trigger time, replaces a live sequence read). */
-  aspectRatio: AspectRatio;
-  resolution?: Resolution;
-  /**
-   * Per-shot regenerate-shots snapshots for the shots this character appears
-   * in, resolved at trigger time. The scope of the regeneration IS this list —
-   * there is no separate `affectedShotIds`. The recast character's own sheet
-   * enters as a sentinel (see `recast-snapshot.ts`) because the awaited child
-   * has not generated it yet; the workflow substitutes it in memory.
-   */
-  shotSnapshots: RegenerateShotSnapshot[];
-  /** Batch hash over `shotSnapshots` as sent (payload tamper check). */
-  snapshotInputHash: string;
-}
-
-/**
- * Talent-to-character match result from AI casting
- */
-export type TalentCharacterMatch = {
-  /** Character ID from CharacterBibleEntry.characterId */
-  characterId: string;
-  /** Talent database ID */
-  talentId: string;
-  /** Talent name for logging/display */
-  talentName: string;
-  /** Talent's default sheet image URL for reference */
-  sheetImageUrl: string;
-  /** Talent sheet metadata for appearance blending */
-  sheetMetadata?: CharacterBibleEntry;
-  /** Talent library description, snapshotted at match time for reuse checks. */
-  talentDescription?: string;
-  // Talent performance (#1561) from the trigger-time snapshot; `''` = library
-  // has none, use the script's (`||` in buildCastingAttributes, which also
-  // tolerates pre-#1561 checkpoints that lack the keys).
-  personality: string;
-  movement: string;
-  // Talent voice (#1553), copied onto the character at cast. `null` = the
-  // library has none (pre-#1553 checkpoints lack the keys: `?? null`).
-  voiceId: string | null;
-  voiceDescription: string | null;
-  /**
-   * Signed real-person portrait (`talent.isHuman`). Stamps character
-   * `isPerson: true` at insert (#1682). Absent on pre-stamp checkpoints.
-   */
-  hasSignedRelease?: boolean;
-  /**
-   * The matched default sheet's `input_hash`, so a pipeline character sheet
-   * is stamped with the same hash a regenerate would (#1113). Absent on
-   * pre-#1113 checkpoints.
-   */
-  sheetInputHash?: string | null;
-};
-
-/**
- * Talent matching workflow input
- */
-export interface TalentMatchingWorkflowInput extends SequenceWorkflowContext {
-  analysisModelId: AnalysisModelId;
-  suggestedTalentIds?: string[];
-  /**
-   * Name/description/performance per suggested talent, snapshotted at the
-   * trigger. The workflow re-reads the talent rows only for `defaultSheet.imageUrl`, which
-   * genuinely arrives late (fire-and-forget `/library-talent-sheet`); the
-   * casting identity itself must not drift mid-run.
-   */
-  suggestedTalent?: SuggestedTalentSnapshot[];
-  /** Pre-extracted character bible from scene splitting. Skips extraction LLM call when provided. */
-  characterBible: CharacterBibleEntry[];
-}
-
-/** @see TalentMatchingWorkflowInput.suggestedTalent */
-type SuggestedTalentSnapshot = {
-  talentId: string;
-  name: string;
-  description: string | null;
-  personality: string;
-  movement: string;
-  voiceId: string | null;
-  voiceDescription: string | null;
-};
-
 /** @see LocationMatchingWorkflowInput.suggestedLocations */
 type SuggestedLocationSnapshot = {
   locationId: string;
   name: string;
   description: string | null;
 };
-
-export interface TalentMatchingWorkflowOutput {
-  matches: TalentCharacterMatch[];
-}
 
 /**
  * Character sheet generation workflow input
@@ -1079,9 +1003,6 @@ export interface CharacterBibleWorkflowInput extends SequenceWorkflowContext {
 
   /** Image model to use (defaults to nano_banana_2) */
   imageModel?: TextToImageModel;
-
-  /** Matched talent data for characters that should use talent references */
-  talentMatches?: TalentCharacterMatch[];
 
   /** Sequence style config to apply to character sheets */
   styleConfig?: StyleConfig;
@@ -1106,8 +1027,12 @@ export interface CharacterBibleWorkflowInput extends SequenceWorkflowContext {
  * the bible workflow and triggered directly by "Generate voice" on the
  * character card.
  */
-export interface CharacterVoiceWorkflowInput extends SequenceWorkflowContext {
-  sequenceId: string;
+export interface CharacterVoiceWorkflowInput extends Omit<
+  SequenceWorkflowContext,
+  'sequenceId'
+> {
+  /** As on {@link CharacterSheetWorkflowInput}: null from the Characters page. */
+  sequenceId: string | null;
   characterDbId: string;
   characterBible: CharacterBibleEntry;
   /** The stored description; empty = draft one from the bible first. */
@@ -1206,6 +1131,8 @@ export interface MotionWorkflowResult {
 export interface CharacterSheetWorkflowResult {
   sheetImageUrl: string;
   characterDbId?: string;
+  /** The look the sheet is of (#2015). */
+  lookId: string;
   sheetImagePath?: string;
   /**
    * The live `character_sheet_variants` row selected on a convergent write.
@@ -1275,80 +1202,34 @@ export interface UpscaleShotVariantWorkflowResult {
 }
 
 /**
- * Library talent sheet generation workflow input
- * Generates a talent sheet from reference media uploaded by the user
+ * Location sheet generation workflow input. `sequenceId` is null for a run
+ * started from the Locations page (#1695): it stores under the team and
+ * reports on the location's own channel.
  */
-export interface LibraryTalentSheetWorkflowInput extends UserWorkflowContext {
-  /** Talent ID from the library */
-  talentId: string;
-  /** Talent name for the prompt */
-  talentName: string;
-  /** Talent description for the prompt */
-  talentDescription?: string;
-  /** Reference media URLs to use as input (optional - if not provided, generates from name/description) */
-  referenceImageUrls?: string[];
-  /** Image model to use */
-  imageModel?: TextToImageModel;
-  /** Name for the generated sheet */
-  sheetName?: string;
-  /**
-   * Existing character/talent sheet the user uploaded. When set, the
-   * workflow stores this image as the sheet instead of generating a new
-   * 4-panel, then crops the close-up panel as the portrait.
-   */
-  uploadedSheetUrl?: string;
-  /** Appearance metadata extracted from the uploaded sheet, when available. */
-  uploadedSheetMetadata?: CharacterBibleEntry;
-  /** Hash over the inlined DTO; validated by the snapshot middleware. */
-  snapshotInputHash: TalentSheetInputHash;
-  /**
-   * The sheet claim (#1113): the id of the `talent_sheets` row this run writes, taken at the trigger
-   * (`talent.claimSheet`). The run lands only while the claim still names it,
-   * else it parks as divergent. Absent only on a run queued before #1113,
-   * which lands unconditionally.
-   */
-  sheetId: string;
-}
-
-export interface LibraryTalentSheetWorkflowResult {
-  sheetId: string;
-  sheetImageUrl: string;
-  sheetImagePath?: string;
-  headshotImageUrl?: string;
-  headshotImagePath?: string;
-}
-
-/**
- * Location sheet generation workflow input
- */
-export interface LocationSheetWorkflowInput extends SequenceWorkflowContext {
+export interface LocationSheetWorkflowInput extends Omit<
+  SequenceWorkflowContext,
+  'sequenceId'
+> {
+  sequenceId: string | null;
   /** locations.id */
   locationDbId: string;
   /** Location name for logging */
   locationName: string;
-  /** Location metadata from script analysis */
+  /** The location's bible, `rendering` included. */
   locationMetadata: LocationBibleEntry;
   /** Image model to use */
   imageModel?: TextToImageModel;
-  /** Reference image URL (e.g., from library location) for overrides */
-  referenceImageUrl?: string;
-  /** Library location description for overrides */
-  libraryLocationDescription?: string;
-  /** Sequence style config to apply to the location sheet */
-  styleConfig?: StyleConfig;
   /**
-   * Snapshot of the parent library location's `reference_input_hash` at
-   * trigger time. `null` when the sheet has no library-location reference,
-   * or when the library row predates hash tracking.
+   * The photos uploaded as input for this location, snapshotted at the
+   * trigger. `[]` when it has none and the sheet is drawn from the bible.
    */
-  libraryLocationReferenceHash?: string | null;
+  referencePhotoUrls: string[];
   /** Hash over the inlined DTO; validated by the snapshot middleware. */
   snapshotInputHash: LocationSheetInputHash;
   /**
    * The reference claim (#1113): the id this run's version row will carry, taken at the trigger
-   * (`sequenceLocations.claimReference`). The run lands only while the claim still names it,
-   * else it parks as divergent. Absent only on a run queued before #1113,
-   * which lands unconditionally.
+   * (`locations.claimReference`). The run lands only while the claim still names it,
+   * else it parks as divergent.
    */
   referenceVersionId: string;
   /**
@@ -1373,51 +1254,6 @@ export interface LocationSheetWorkflowResult {
 }
 
 /**
- * Library location sheet generation workflow input
- * Generates a 3x3 grid reference sheet from user-uploaded reference images
- */
-export interface LibraryLocationSheetWorkflowInput extends UserWorkflowContext {
-  /** locations.id */
-  locationDbId: string;
-  /** Location name for prompt */
-  locationName: string;
-  /** Location description for prompt */
-  locationDescription?: string;
-  /** Reference image URLs (user uploads) */
-  referenceImageUrls: string[];
-  /** Sequence ID (library sequence) for storage path */
-  sequenceId: string;
-  /** Image model to use */
-  imageModel?: TextToImageModel;
-  /**
-   * Hash over the inlined DTO at trigger time. The final reference write is
-   * gated on it: if the location was renamed/re-described mid-run the sheet is
-   * parked as a divergent variant instead of becoming the live reference.
-   */
-  snapshotInputHash: LibraryLocationReferenceInputHash;
-  /**
-   * The reference claim (#1113): the id this run holds until it publishes, taken at the trigger
-   * (`locations.claimReference`). The run lands only while the claim still names it,
-   * else it parks as divergent. Absent only on a run queued before #1113,
-   * which lands unconditionally.
-   */
-  referenceClaimId: string;
-}
-
-export interface LibraryLocationSheetWorkflowResult {
-  /** Generated sheet image URL */
-  sheetImageUrl: string;
-  /** Storage path */
-  sheetImagePath?: string;
-  /** Generated preview image URL */
-  previewImageUrl?: string;
-  /** Preview storage path */
-  previewImagePath?: string;
-  /** Location ID */
-  locationDbId: string;
-}
-
-/**
  * Location bible generation workflow input
  * Generates reference sheets for all locations in a sequence
  */
@@ -1427,32 +1263,26 @@ export interface LocationBibleWorkflowInput extends UserWorkflowContext {
   locationBible: LocationBibleEntry[];
   /** Image model to use */
   imageModel?: TextToImageModel;
-  /** Library location matches for locations that should use library references */
-  libraryLocationMatches?: LibraryLocationMatch[];
-  /** Sequence style config to apply to location sheets */
-  styleConfig?: StyleConfig;
+  /**
+   * Script locations matching bound to a team location: the sequence links
+   * to that location and no sheet is drawn here (#1695).
+   */
+  libraryLocationMatches: LibraryLocationMatch[];
 }
 
 /**
- * Library location match result
+ * A script location matching bound to one of the team's locations the writer
+ * picked (#1695). The sequence links to that location: nothing is copied and
+ * no sheet is drawn.
  */
 export type LibraryLocationMatch = {
   /** Location ID from LocationBibleEntry.locationId */
   locationId: string;
-  /** Library location database ID */
+  /** The team location's id (`locations.id`). */
   libraryLocationId: string;
-  /** Library location name */
   libraryLocationName: string;
-  /** Library location reference image URL */
-  referenceImageUrl: string;
-  /** Library location description for prompt enhancement */
-  description?: string;
-  /**
-   * The library location's `reference_input_hash`, so a pipeline location
-   * sheet is stamped with the same hash a regenerate would (#1113). Absent on
-   * pre-#1113 checkpoints.
-   */
-  referenceInputHash?: string | null;
+  /** That location's sheet, for the progress stream; null while none has landed. */
+  referenceImageUrl: string | null;
 };
 
 /**
@@ -1463,8 +1293,7 @@ export interface LocationMatchingWorkflowInput extends SequenceWorkflowContext {
   suggestedLocationIds?: string[];
   /**
    * Name/description per suggested library location, snapshotted at the
-   * trigger. @see TalentMatchingWorkflowInput.suggestedTalent — only
-   * `referenceImageUrl` is read live.
+   * trigger. Only `referenceImageUrl` is read live.
    */
   suggestedLocations?: SuggestedLocationSnapshot[];
   /** Pre-extracted location bible from scene splitting. Skips extraction LLM call when provided. */
@@ -1475,45 +1304,24 @@ export interface LocationMatchingWorkflowOutput {
   matches: LibraryLocationMatch[];
 }
 /**
- * Recast location workflow input
- * Orchestrates location sheet generation + shot regeneration for recast
+ * Recast location workflow input. A recast re-points the sequence's link at
+ * another of the team's locations (done at the trigger, #1695); this run
+ * re-renders the shots set there. No sheet is drawn.
  */
 export interface RecastLocationWorkflowInput extends SequenceWorkflowContext {
-  /** Location database ID */
+  /** The location the sequence now uses (`locations.id`). */
   locationDbId: string;
   /** Location name for logging */
   locationName: string;
-  /** Location metadata from script analysis */
-  locationMetadata: LocationBibleEntry;
   /** Image model to use */
   imageModel?: TextToImageModel;
-  /** Reference image URL from library location */
-  referenceImageUrl?: string;
-  /** Library location description */
-  libraryLocationDescription?: string;
-  /** The library location this recast binds the sequence location to. */
-  libraryLocationId: string;
-  /**
-   * That library location's `reference_input_hash`, resolved at trigger time.
-   * The workflow used to re-derive it two DB reads deep, minutes later.
-   */
-  libraryLocationReferenceHash: string | null;
-  /** The reference claim for the child; see `LocationSheetWorkflowInput`. */
-  referenceVersionId: string;
-  /** See `LocationSheetWorkflowInput.bibleVersionId`. */
-  bibleVersionId: string | null;
-  /** Sequence style config to apply to the location sheet */
-  styleConfig?: StyleConfig;
   /** Aspect ratio (frozen at trigger time, replaces a live sequence read). */
   aspectRatio: AspectRatio;
   resolution?: Resolution;
   /**
    * Per-shot regenerate-shots snapshots for the shots this location appears
-   * in, resolved at trigger time. The scope of the regeneration IS this list —
-   * there is no separate `affectedShotIds`. The recast location's own
-   * reference enters as a sentinel (see `recast-snapshot.ts`) because the
-   * awaited child has not generated it yet; the workflow substitutes it in
-   * memory.
+   * in, resolved at trigger time, after the link moved. The scope of the
+   * regeneration IS this list — there is no separate `affectedShotIds`.
    */
   shotSnapshots: RegenerateShotSnapshot[];
   /** Batch hash over `shotSnapshots` as sent (payload tamper check). */
@@ -1649,6 +1457,8 @@ export interface BatchMotionMusicWorkflowInput extends SequenceWorkflowContext {
     imageUrl?: string;
     /** See `MotionWorkflowInput.referenceOnly`. Required for the same reason. */
     referenceOnly: boolean;
+    /** See `MotionWorkflowInput.seedanceEditSeconds`. Decided for `model`. */
+    seedanceEditSeconds: number | null;
     /** See `MotionWorkflowInput.frameVersionId`. */
     frameVersionId?: string | null;
     /** See `MotionWorkflowInput.motionPromptVersionId`. */
@@ -1890,6 +1700,29 @@ export interface ElementVisionWorkflowInput extends SequenceWorkflowContext {
   token: string;
 }
 
+/**
+ * Sheet portrait workflow input: the square portrait of a sheet version that
+ * was saved without one (an upload). Everything the run needs is here; it
+ * reads nothing.
+ */
+export interface SheetPortraitWorkflowInput extends SequenceWorkflowContext {
+  /** Whose sheet it is, for the prompt, the row and the event. */
+  subject:
+    | { kind: 'character'; characterId: string; lookId: string }
+    | { kind: 'location'; locationId: string };
+  /** The sheet version row the portrait is written on. */
+  versionId: string;
+  sheetUrl: string;
+  /** The folder the sheet is stored under; the portrait goes beside it. */
+  storageDir: string;
+}
+
+export interface SheetPortraitWorkflowResult {
+  versionId: string;
+  /** Null when the draw failed: the tile keeps cropping the sheet. */
+  portraitUrl: string | null;
+}
+
 export interface ElementVisionWorkflowResult {
   elementId: string;
   description: string;
@@ -2000,9 +1833,10 @@ export interface StudioGenerationWorkflowInput extends UserWorkflowContext {
    */
   finalFromDraftTaskId?: string;
   /**
-   * Reference images the likeness ledger cleared as showing no person,
-   * snapshotted at the trigger. BytePlus sends these as plain URLs instead
-   * of spending a CreateAsset on them (`arkStillsForStudio`, #1674).
+   * Reference images and clips the likeness ledger cleared as showing no
+   * person, snapshotted at the trigger. BytePlus sends these as plain URLs
+   * instead of spending a CreateAsset on them (`arkStillsForStudio`, #1674,
+   * #1930). The name predates clips; it rides in-flight payloads.
    */
   noPersonImages: string[];
 }

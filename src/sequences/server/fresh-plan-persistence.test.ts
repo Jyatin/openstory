@@ -55,12 +55,13 @@ const character: CharacterBibleEntry = {
   ethnicity: '',
   physicalDescription: 'dark hair',
   standardClothing: 'yellow coat',
-  distinguishingFeatures: '',
+  looks: [],
   personality: '',
   movement: '',
   voiceDescription: '',
   voiceOnly: false,
   isPerson: true,
+  rendering: 'Photoreal live action',
   consistencyTag: 'maya',
 };
 const location: LocationBibleEntry = {
@@ -71,6 +72,7 @@ const location: LocationBibleEntry = {
   architecturalStyle: 'gothic',
   keyFeatures: 'stone arches',
   ambiance: 'quiet',
+  rendering: 'Photoreal live action',
   consistencyTag: 'hall',
   firstMention: { sceneId: 'analysis-scene', text: 'Hall', lineNumber: 1 },
 };
@@ -182,10 +184,10 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
   }
   await createCastRecords(toWorkflowScopedDb(scopedDb), {
     sequenceId,
+    cast: [],
     characterBible: [character],
     locationBible: [location],
     elementBible: [],
-    talentMatches: [],
     locationMatches: [],
     existingElements: [],
   });
@@ -282,7 +284,7 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
   expect(plan.promptContext?.characterBible).toHaveLength(1);
   expect(plan.promptContext?.locationBible).toHaveLength(1);
   const cast = await scopedDb.characters.list(sequenceId);
-  const places = await scopedDb.sequenceLocations.list(sequenceId);
+  const places = await scopedDb.locations.list(sequenceId);
   expect(plan.targets[0]?.referenceIds).toHaveLength(2);
   expect(plan.targets[0]?.referenceIds).toEqual(
     expect.arrayContaining([cast[0]?.id, places[0]?.id])
@@ -292,10 +294,10 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
   ).toBe(true);
   await createCastRecords(toWorkflowScopedDb(scopedDb), {
     sequenceId,
+    cast: [],
     characterBible: [{ ...character, standardClothing: 'red armor' }],
     locationBible: [location],
     elementBible: [],
-    talentMatches: [],
     locationMatches: [],
     existingElements: [],
   });
@@ -308,10 +310,10 @@ it('keeps persisted derived prompts current before sheets exist, while retaining
   // Restore the bible first so the following assertion isolates a style edit.
   await createCastRecords(toWorkflowScopedDb(scopedDb), {
     sequenceId,
+    cast: [],
     characterBible: [character],
     locationBible: [location],
     elementBible: [],
-    talentMatches: [],
     locationMatches: [],
     existingElements: [],
   });

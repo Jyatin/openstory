@@ -135,6 +135,31 @@ describe('arkStillsForMotion', () => {
     ]);
   });
 
+  it('registers every reference clip as a Video asset, and no audio (#1930)', () => {
+    expect(
+      arkStillsForMotion({
+        referenceImages: [
+          {
+            referenceImageUrl: 'https://cdn/walk.mp4',
+            description: 'WALK',
+            role: 'element',
+            kind: 'video',
+            token: 'WALK',
+          },
+          {
+            referenceImageUrl: 'https://cdn/line.mp3',
+            description: 'LINE',
+            role: 'element',
+            kind: 'audio',
+            token: 'LINE',
+          },
+        ],
+      })
+    ).toEqual([
+      { storedUrl: 'https://cdn/walk.mp4', slot: 'library', kind: 'Video' },
+    ]);
+  });
+
   it('treats a missing isPerson as a face, including in-flight payloads', () => {
     expect(
       arkStillsForMotion({
@@ -217,6 +242,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -251,6 +277,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'Dynamic action sequence',
@@ -277,6 +304,7 @@ describe('Motion Service', () => {
 
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/image.jpg',
           prompt: 'Test prompt',
@@ -292,6 +320,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'Smooth camera movement',
@@ -317,6 +346,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-job-id' });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'Dynamic action sequence',
@@ -334,6 +364,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-draft' });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'Dynamic action sequence',
@@ -358,6 +389,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-full' });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'Dynamic action sequence',
@@ -377,6 +409,7 @@ describe('Motion Service', () => {
     it('refuses a draft when Seedance 2.5 is routed to fal — never a quiet full render', async () => {
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/image.jpg',
           prompt: 'Dynamic action sequence',
@@ -393,6 +426,7 @@ describe('Motion Service', () => {
       mockSubmitFinalRender.mockClear();
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: {},
         prompt: 'Dynamic action sequence',
         model: 'seedance_v2_5',
@@ -424,6 +458,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-plain' });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: {
           'https://example.com/still.jpg': 'asset://still.jpg',
           'https://example.com/robot.png': 'https://example.com/robot.png',
@@ -468,6 +503,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-assets' });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'SCARLETT waves the LOGO',
@@ -522,6 +558,7 @@ describe('Motion Service', () => {
       mockGenerateVideo.mockResolvedValue({ jobId: 'ark-audio' });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         // Only the start frame is registered — audio clips are never
         // ingested by `ingestArkAssets`, so a still-registered check on the
         // audio ref would throw before this fix (unlike `registeredAssets`,
@@ -564,6 +601,7 @@ describe('Motion Service', () => {
 
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: {},
           imageUrl: 'https://example.com/still.jpg',
           prompt: 'Dynamic action sequence',
@@ -584,6 +622,7 @@ describe('Motion Service', () => {
 
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/image.jpg',
           prompt: 'Dynamic action sequence',
@@ -604,6 +643,7 @@ describe('Motion Service', () => {
 
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/image.jpg',
           prompt: 'Dynamic action sequence',
@@ -625,6 +665,7 @@ describe('Motion Service', () => {
 
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/image.jpg',
           prompt: 'Dynamic action sequence',
@@ -642,6 +683,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -659,6 +701,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'SCARLETT waves',
@@ -688,6 +731,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'A person walking',
@@ -808,6 +852,7 @@ describe('Motion Service', () => {
     it('refuses rather than silently dropping the clip', async () => {
       await expect(
         submitMotionJob({
+          heldSeedanceEditSeconds: null,
           arkAssets: registeredAssets,
           imageUrl: 'https://example.com/still.jpg',
           prompt: 'Move like LONG_TAKE',
@@ -836,6 +881,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'Move like SHORT_TAKE',
@@ -863,6 +909,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'Move like MYSTERY',
@@ -893,6 +940,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -912,6 +960,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -931,6 +980,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -960,6 +1010,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'SCARLETT lifts the CORAL_LIPSTICK',
@@ -1024,6 +1075,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -1043,6 +1095,7 @@ describe('Motion Service', () => {
       });
 
       const result = await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -1062,6 +1115,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/image.jpg',
         prompt: 'A person walking',
@@ -1101,6 +1155,7 @@ describe('Motion Service', () => {
       });
 
       await submitMotionJob({
+        heldSeedanceEditSeconds: null,
         arkAssets: registeredAssets,
         imageUrl: 'https://example.com/still.jpg',
         prompt: 'SCARLETT lifts the CORAL_LIPSTICK',

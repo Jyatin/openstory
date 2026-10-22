@@ -17,74 +17,62 @@ import { generateId } from '@/platform/id';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type {
   NewCharacter,
-  NewSequenceLocation,
+  ReferenceStatus,
   SequenceElementMinimal,
   SheetStatus,
 } from '@/platform/server/db/schema';
-import type { ReferenceStatus } from '@/platform/server/db/schema/sequence-locations';
-import { buildCastingAttributes } from '@/cast/character-prompt';
-import { isPersonFromTalentCast } from '@/cast/likeness';
+import type { AnalysedLocation } from '@/cast/server/db/locations';
+import { withBibleLooks } from '@/cast/bible-looks';
 import type {
+  AttachedCastSnapshot,
   ElementSheetEntry,
   LibraryLocationMatch,
-  TalentCharacterMatch,
 } from '@/platform/server/workflow/types';
 
 export function buildCharacterInsert(args: {
   sequenceId: string;
   character: CharacterBibleEntry;
-  talentMatch: TalentCharacterMatch | undefined;
   sheetStatus: SheetStatus;
 }): NewCharacter {
-  const { sequenceId, character, talentMatch, sheetStatus } = args;
-  const castingAttrs = talentMatch
-    ? buildCastingAttributes(character, {
-        sheetMetadata: talentMatch.sheetMetadata,
-        talentName: talentMatch.talentName,
-        personality: talentMatch.personality,
-        movement: talentMatch.movement,
-      })
-    : null;
+  const { sequenceId, character, sheetStatus } = args;
   return {
     id: generateId(),
     sequenceId,
     characterId: character.characterId,
     name: character.name,
-    age: castingAttrs?.age ?? character.age,
-    gender: castingAttrs?.gender ?? character.gender,
-    ethnicity: castingAttrs?.ethnicity ?? character.ethnicity,
-    physicalDescription:
-      castingAttrs?.physicalDescription ?? character.physicalDescription,
+    age: character.age,
+    gender: character.gender,
+    ethnicity: character.ethnicity,
+    physicalDescription: character.physicalDescription,
     standardClothing: character.standardClothing,
-    distinguishingFeatures: character.distinguishingFeatures,
-    personality: castingAttrs?.personality ?? character.personality,
-    movement: castingAttrs?.movement ?? character.movement,
+    personality: character.personality,
+    movement: character.movement,
     voiceOnly: character.voiceOnly,
-    isPerson: isPersonFromTalentCast(
-      character.isPerson,
-      talentMatch?.hasSignedRelease
-    ),
-    consistencyTag: castingAttrs?.consistencyTag ?? character.consistencyTag,
-    // Cast copies the talent's voice (#1553); the upsert keeps a voice the
-    // row already holds.
-    voiceId: talentMatch?.voiceId ?? null,
-    voiceDescription:
-      talentMatch?.voiceDescription ??
-      (character.voiceDescription.trim() || null),
+    rendering: character.voiceOnly ? null : character.rendering,
+    // What the script says. For a character that already exists the write
+    // keeps a person a person whatever this says (`characters.create`, #2065).
+    isPerson: character.isPerson,
+    consistencyTag: character.consistencyTag,
+    voiceId: null,
+    voiceDescription: character.voiceDescription.trim() || null,
     firstMentionSceneId: null,
     firstMentionText: null,
     firstMentionLine: null,
     sheetStatus,
-    talentId: talentMatch?.talentId ?? null,
   };
 }
 
+/**
+ * One analysed location. A script location matching bound to one of the
+ * team's (`libraryMatch`, #1695) is linked to it (`boundTo`): no location is
+ * made and the bible analysis wrote for it is dropped.
+ */
 export function buildLocationInsert(args: {
   sequenceId: string;
   location: LocationBibleEntry;
   libraryMatch: LibraryLocationMatch | undefined;
   referenceStatus: ReferenceStatus;
-}): NewSequenceLocation {
+}): AnalysedLocation {
   const { sequenceId, location, libraryMatch, referenceStatus } = args;
   return {
     id: generateId(),
@@ -101,6 +89,7 @@ export function buildLocationInsert(args: {
     keyFeatures: location.keyFeatures ?? null,
     // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard
     ambiance: location.ambiance ?? null,
+    rendering: location.rendering,
     // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard
     consistencyTag: location.consistencyTag ?? null,
     // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard
@@ -110,7 +99,7 @@ export function buildLocationInsert(args: {
     // oxlint-disable-next-line typescript-eslint/no-unnecessary-condition -- runtime guard
     firstMentionLine: location.firstMention?.lineNumber ?? null,
     referenceStatus,
-    libraryLocationId: libraryMatch?.libraryLocationId ?? null,
+    boundTo: libraryMatch?.libraryLocationId ?? null,
   };
 }
 
@@ -156,8 +145,9 @@ export async function createCastRecords(
   scopedDb: WorkflowScopedDb,
   args: {
     sequenceId: string;
+    /** The trigger's cast snapshot (#2050): which entries are shared characters. */
+    cast: readonly AttachedCastSnapshot[];
     characterBible: CharacterBibleEntry[];
-    talentMatches: TalentCharacterMatch[];
     locationBible: LocationBibleEntry[];
     locationMatches: LibraryLocationMatch[];
     elementBible: ElementBibleEntry[];
@@ -165,27 +155,57 @@ export async function createCastRecords(
       Pick<SequenceElementMinimal, 'id' | 'token' | 'imageUrl'>
     >;
   }
-): Promise<{ elements: SequenceElementMinimal[] }> {
+): Promise<{
+  elements: SequenceElementMinimal[];
+  /** Each bible look id → the `character_looks.id` it landed on (#2015). */
+  lookIds: Record<string, string>;
+}> {
   const { sequenceId } = args;
-  const talentByCharacter = new Map(
-    args.talentMatches.map((m) => [m.characterId, m])
+  const sharedById = new Map(
+    args.cast.filter((c) => c.shared).map((c) => [c.entry.characterId, c.id])
   );
+  const lookIds: Record<string, string> = {};
   for (const character of args.characterBible) {
-    await scopedDb.characters.create(
+    // A character the library or another sequence holds (#2050) is linked,
+    // never rewritten: no bible version, no look edit, no look removed. Her
+    // looks are matched by name and a new one is added for a name she lacks.
+    const sharedId = sharedById.get(character.characterId);
+    if (sharedId) {
+      if (character.voiceOnly) continue;
+      Object.assign(
+        lookIds,
+        await scopedDb.characterLooks.linkFromAnalysis(
+          sequenceId,
+          sharedId,
+          withBibleLooks(character).looks
+        )
+      );
+      continue;
+    }
+    const created = await scopedDb.characters.create(
       buildCharacterInsert({
         sequenceId,
         character,
-        talentMatch: talentByCharacter.get(character.characterId),
         sheetStatus: 'pending',
       }),
       { source: 'analysis', createdBy: null }
+    );
+    // A voice-only character is never seen, so it wears nothing to track.
+    if (character.voiceOnly) continue;
+    Object.assign(
+      lookIds,
+      await scopedDb.characterLooks.syncFromAnalysis(
+        sequenceId,
+        created.id,
+        withBibleLooks(character).looks
+      )
     );
   }
 
   const libraryByLocation = new Map(
     args.locationMatches.map((m) => [m.locationId, m])
   );
-  await scopedDb.sequenceLocations.createBulk(
+  await scopedDb.locations.createBulk(
     args.locationBible.map((location) =>
       buildLocationInsert({
         sequenceId,
@@ -234,5 +254,5 @@ export async function createCastRecords(
       durationSeconds: row.durationSeconds,
     });
   }
-  return { elements };
+  return { elements, lookIds };
 }

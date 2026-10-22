@@ -16,13 +16,13 @@ import { index, integer, snakeCase, text } from 'drizzle-orm/sqlite-core';
 import { generateId } from '@/platform/id';
 import { user } from './auth';
 import { characters } from './characters';
-import { sequenceLocations } from './sequence-locations';
+import { locations } from './locations';
 
 /**
  * Why a bible row exists. `backfill` is the #1600 migration's snapshot of a
  * row as it stood; `analysis` is script analysis or re-analysis; `edit` is a
- * person (the form, the API, MCP); `recast` is casting a talent, which copies
- * the talent's appearance into the bible.
+ * person (the form, the API, MCP); `recast` is a historical source from when
+ * casting copied a talent's appearance into the bible (#2135).
  */
 const BIBLE_VERSION_SOURCES = [
   'backfill',
@@ -41,18 +41,36 @@ export const characterBibleVersions = snakeCase.table(
       .notNull(),
     characterId: text()
       .notNull()
-      .references(() => characters.id, { onDelete: 'restrict' }),
+      // NO ACTION, not cascade or restrict (#2017): a rebuild of `characters`
+      // under D1 runs with foreign key checks deferred, where a cascade would
+      // delete these rows and a restrict would not stop it. Deletes remove
+      // them in app code first (`deleteCharactersStatements`).
+      .references(() => characters.id, { onDelete: 'no action' }),
     name: text({ length: 255 }).notNull(),
     age: text(),
     gender: text(),
     ethnicity: text(),
     physicalDescription: text(),
-    standardClothing: text(),
-    distinguishingFeatures: text(),
+    // LEGACY (#2015): clothing belongs to the character's looks
+    // (`character_look_versions.clothing`). Read only as the fallback for a
+    // character with no look, and to say what a sheet made before looks was
+    // drawn in; never written.
+    legacyStandardClothing: text('standard_clothing'),
+    // LEGACY (#2065): the default look's styling owns this text. Read only
+    // by `effectiveStyling` (the default look's styling is its own joined
+    // with this) and by the digests stamped before #2065; nulled by the
+    // first edit of the default look's styling, otherwise carried forward
+    // unchanged. Backfilled and dropped after `LEGACY_HASH_UNTIL`.
+    legacyDistinguishingFeatures: text('distinguishing_features'),
     personality: text(),
     movement: text(),
     voiceOnly: integer({ mode: 'boolean' }).notNull(),
     isPerson: integer({ mode: 'boolean' }).notNull(),
+    // What the character is rendered as (#2017): "Photoreal live action",
+    // "3D animated, Pixar-like". The one thing a sheet takes from a style.
+    // Null exactly when `voiceOnly` (`renderingFor`, `src/cast/rendering.ts`);
+    // a CHECK would need a table rebuild, so the writers enforce it.
+    rendering: text(),
     consistencyTag: text(),
     source: text({ enum: BIBLE_VERSION_SOURCES }).notNull(),
     createdAt: integer({ mode: 'timestamp' })
@@ -78,13 +96,17 @@ export const locationBibleVersions = snakeCase.table(
       .notNull(),
     locationId: text()
       .notNull()
-      .references(() => sequenceLocations.id, { onDelete: 'restrict' }),
+      .references(() => locations.id, { onDelete: 'restrict' }),
     name: text({ length: 255 }).notNull(),
     type: text(),
     description: text(),
     architecturalStyle: text(),
     keyFeatures: text(),
     ambiance: text(),
+    // What the place is rendered as (#1695): the character twin's `rendering`.
+    // The one thing a sheet takes from a style. Every writer sets it
+    // (`renderingForLocation`); a NOT NULL would need a table rebuild.
+    rendering: text(),
     consistencyTag: text(),
     source: text({ enum: BIBLE_VERSION_SOURCES }).notNull(),
     createdAt: integer({ mode: 'timestamp' })
@@ -114,12 +136,11 @@ export const CHARACTER_BIBLE_FIELDS = [
   'gender',
   'ethnicity',
   'physicalDescription',
-  'standardClothing',
-  'distinguishingFeatures',
   'personality',
   'movement',
   'voiceOnly',
   'isPerson',
+  'rendering',
   'consistencyTag',
 ] as const satisfies readonly (keyof CharacterBibleVersion)[];
 
@@ -131,6 +152,7 @@ export const LOCATION_BIBLE_FIELDS = [
   'architecturalStyle',
   'keyFeatures',
   'ambiance',
+  'rendering',
   'consistencyTag',
 ] as const satisfies readonly (keyof LocationBibleVersion)[];
 

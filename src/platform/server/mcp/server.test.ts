@@ -46,6 +46,8 @@ const toolsListResult = z.object({
   tools: z.array(
     z.object({
       name: z.string(),
+      // Claude's connector directory rejects a tool without a title.
+      title: z.string().min(1),
       description: z.string(),
       inputSchema: z.object({ type: z.literal('object') }).passthrough(),
       outputSchema: z.object({ type: z.literal('object') }),
@@ -168,12 +170,11 @@ describe('tools/list and whoami', () => {
       'openstory.get_reference_staleness',
       'openstory.get_render_segment_staleness',
       'openstory.get_music_staleness',
-      'openstory.list_talent',
-      'openstory.get_talent',
-      'openstory.list_library_locations',
-      'openstory.get_library_location',
       'openstory.list_styles',
       'openstory.get_style',
+      'openstory.list_library_locations',
+      'openstory.get_library_location',
+      'openstory.list_library_characters',
       'openstory.list_library_resources',
       'openstory.get_library_resource',
       'openstory.list_gallery_samples',
@@ -213,6 +214,7 @@ describe('tools/list and whoami', () => {
       'openstory.list_character_voices',
       'openstory.list_deleted_cast',
       'openstory.create_character',
+      'openstory.add_character_to_sequence',
       'openstory.update_character',
       'openstory.delete_character',
       'openstory.restore_character',
@@ -221,7 +223,14 @@ describe('tools/list and whoami', () => {
       'openstory.select_character_sheet_version',
       'openstory.discard_character_sheet_version',
       'openstory.undiscard_character_sheet_version',
+      'openstory.list_character_look_versions',
+      'openstory.create_character_look',
+      'openstory.update_character_look',
+      'openstory.remove_character_look',
+      'openstory.restore_character_look',
+      'openstory.select_character_look_version',
       'openstory.create_location',
+      'openstory.add_location_to_sequence',
       'openstory.update_location',
       'openstory.delete_location',
       'openstory.restore_location',
@@ -257,7 +266,6 @@ describe('tools/list and whoami', () => {
       'openstory.add_element',
       'openstory.replace_element',
       'openstory.regenerate_character_sheet',
-      'openstory.recast_character',
       'openstory.generate_character_voice',
       'openstory.cancel_character_voice',
       'openstory.regenerate_location_sheet',
@@ -281,6 +289,7 @@ describe('tools/list and whoami', () => {
       'openstory.retry_failed_work',
       'openstory.plan_export',
       'openstory.start_export',
+      'openstory.create_stitch',
     ]);
     expect(tools[0]?.description).toMatch(/user and team/i);
     const batch = tools.find(
@@ -319,6 +328,7 @@ describe('tools/list and whoami', () => {
       'openstory.select_shot_image_version',
       'openstory.select_shot_video_version',
       'openstory.create_character',
+      'openstory.add_character_to_sequence',
       'openstory.update_character',
       'openstory.delete_character',
       'openstory.restore_character',
@@ -327,7 +337,13 @@ describe('tools/list and whoami', () => {
       'openstory.select_character_sheet_version',
       'openstory.discard_character_sheet_version',
       'openstory.undiscard_character_sheet_version',
+      'openstory.create_character_look',
+      'openstory.update_character_look',
+      'openstory.remove_character_look',
+      'openstory.restore_character_look',
+      'openstory.select_character_look_version',
       'openstory.create_location',
+      'openstory.add_location_to_sequence',
       'openstory.update_location',
       'openstory.delete_location',
       'openstory.restore_location',
@@ -361,7 +377,6 @@ describe('tools/list and whoami', () => {
       'openstory.add_element',
       'openstory.replace_element',
       'openstory.regenerate_character_sheet',
-      'openstory.recast_character',
       'openstory.generate_character_voice',
       'openstory.cancel_character_voice',
       'openstory.regenerate_location_sheet',
@@ -381,6 +396,7 @@ describe('tools/list and whoami', () => {
       'openstory.execute_generation',
       'openstory.retry_failed_work',
       'openstory.start_export',
+      'openstory.create_stitch',
     ]);
     const destructive = new Set([
       'openstory.archive_sequence',
@@ -389,6 +405,7 @@ describe('tools/list and whoami', () => {
       'openstory.discard_shot_dialogue_reading',
       'openstory.delete_character',
       'openstory.discard_character_sheet_version',
+      'openstory.remove_character_look',
       'openstory.delete_location',
       'openstory.discard_location_sheet_version',
       'openstory.delete_element',
@@ -418,7 +435,7 @@ describe('tools/list and whoami', () => {
         })
         .parse(tools.find((tool) => tool.name === name)?.inputSchema);
       expect(libraryResourceSchema.properties.kind.enum).toEqual(
-        expect.arrayContaining(['talent_sheet', 'audio', 'vfx'])
+        expect.arrayContaining(['location_sheet', 'audio', 'vfx'])
       );
       expect(libraryResourceSchema.required).not.toContain('parentId');
     }
@@ -458,6 +475,21 @@ describe('tools/list and whoami', () => {
       name: MCP_SERVER_NAME,
       version: MCP_SERVER_VERSION,
     });
+    // #2084: the icon is declared, not left to the client's favicon guess.
+    expect(JSON.stringify(body.result)).toContain('/icon-512.png');
+  });
+
+  // #2035: the SDK's listen stream never ends, so Cloudflare cancels it.
+  it('refuses subscriptions/listen at once and does not advertise listChanged', async () => {
+    const listen = await rpc('subscriptions/listen', {
+      notifications: { toolsListChanged: true },
+    });
+    expect(listen.status).toBe(404);
+    expect(listen.body.error?.code).toBe(-32601);
+
+    const { body } = await rpc('server/discover');
+    expect(body.error).toBeUndefined();
+    expect(JSON.stringify(body.result)).not.toContain('listChanged');
   });
 
   describe('a 2025-era client (sessions: stateless)', () => {
@@ -505,6 +537,17 @@ describe('tools/list and whoami', () => {
         z.object({ protocolVersion: z.string() }).parse(body.result)
           .protocolVersion
       ).toBe('2025-11-25');
+      // #2084
+      expect(
+        z
+          .object({
+            serverInfo: z.object({
+              icons: z.array(z.object({ src: z.string() })),
+            }),
+          })
+          .parse(body.result)
+          .serverInfo.icons.map((icon) => new URL(icon.src).pathname)
+      ).toEqual(['/icon-512.png', '/icon.svg']);
     });
 
     it('calls a tool with no session, on any isolate', async () => {
@@ -609,7 +652,6 @@ describe('production tool authorization', () => {
 
   it.each([
     'list_sequences',
-    'list_talent',
     'list_library_locations',
     'list_styles',
     'list_gallery_samples',
@@ -696,12 +738,20 @@ describe('structure edit authorization', () => {
     ],
     ['create_character', { sequenceId: ids.sequenceId, name: 'Ada' }],
     [
+      'add_character_to_sequence',
+      { sequenceId: ids.sequenceId, characterId: ids.sceneId },
+    ],
+    [
       'delete_character',
       { sequenceId: ids.sequenceId, characterId: ids.sceneId },
     ],
     [
       'set_character_voice_enabled',
       { sequenceId: ids.sequenceId, characterId: ids.sceneId, enabled: false },
+    ],
+    [
+      'add_location_to_sequence',
+      { sequenceId: ids.sequenceId, locationId: ids.sceneId },
     ],
     [
       'update_location',
@@ -782,10 +832,6 @@ describe('generation and upload tool authorization (#1979)', () => {
       { sequenceId, elementId: otherId, upload, name: 'Logo' },
     ],
     ['regenerate_character_sheet', { sequenceId, characterId: otherId }],
-    [
-      'recast_character',
-      { sequenceId, characterId: otherId, talentId: otherId },
-    ],
     ['generate_character_voice', { sequenceId, characterId: otherId }],
     ['regenerate_location_sheet', { sequenceId, locationId: otherId }],
     [

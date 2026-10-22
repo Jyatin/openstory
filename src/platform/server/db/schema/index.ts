@@ -46,11 +46,11 @@ import { frameVariants } from './frame-variants';
 import { framePromptVersions } from './frame-prompt-versions';
 import { sequenceEvents } from './sequence-events';
 
+import { characterLooks, characterLookVersions } from './character-looks';
+import { sequenceCast } from './sequence-cast';
 import { characterSheetVariants } from './character-sheet-variants';
 
 import { locationSheetVariants } from './location-sheet-variants';
-
-import { talentSheetVariants } from './talent-sheet-variants';
 
 import { shotPromptVersions } from './shot-prompt-versions';
 
@@ -58,6 +58,7 @@ import { sequenceMusicPromptVersions } from './sequence-music-prompt-versions';
 
 import { sequenceMusicVariants } from './sequence-music-variants';
 import { sequenceExports } from './sequence-exports';
+import { stitches } from './stitches';
 import { sequenceStyleVersions } from './sequence-style-versions';
 
 import { characters } from './characters';
@@ -72,18 +73,15 @@ import { dialogueSpeeches } from './dialogue-speeches';
 import { shotDialogueSections } from './shot-dialogue-sections';
 import { shotDialogueClaims } from './shot-dialogue-claims';
 
-// Location Library (team-level templates)
-import { locationLibrary } from './location-library';
-
-// Sequence Locations (script-extracted)
-import { sequenceLocations } from './sequence-locations';
-
-import { locationSheets } from './location-sheets';
+// Locations (the team's places) and the links sequences hold to them
+import {
+  locationReferencePhotos,
+  locations,
+  sequenceLocationLinks,
+} from './locations';
 
 // Sequence Elements (user-uploaded reference images)
 import { sequenceElements } from './sequence-elements';
-
-import { talent, talentMedia, talentSheets } from './talent';
 
 import { audio, StyleSampleVideoSchema, styles, vfx } from './libraries';
 
@@ -267,7 +265,7 @@ export type {
   SequenceEventData,
 } from './sequence-events';
 
-// Sheet Variants (Stage 2: divergent character/location/talent sheet outputs)
+// Sheet Variants (divergent character/location sheet outputs)
 export { characterSheetVariants };
 
 export type {
@@ -279,16 +277,8 @@ export { locationSheetVariants };
 
 export type {
   LocationSheetVariant,
-  LocationSheetVariantParentType,
   NewLocationSheetVariant,
 } from './location-sheet-variants';
-
-export { talentSheetVariants };
-
-export type {
-  NewTalentSheetVariant,
-  TalentSheetVariant,
-} from './talent-sheet-variants';
 
 // Shot Prompt Versions (visual/motion prompt history; renamed from
 // shot_prompt_variants in #988)
@@ -321,6 +311,10 @@ export type {
 // Sequence exports (container-rendered MP4 snapshots)
 export { sequenceExports };
 
+// Shared stitches from the stitch CLI (#2127)
+export { stitches };
+export type { Stitch } from './stitches';
+
 // Sequence style history (#1600)
 export { sequenceStyleVersions };
 
@@ -336,6 +330,22 @@ export { characters, characterVoiceVersions };
 
 // Bible history (#1600)
 export { characterBibleVersions, locationBibleVersions };
+
+// Character looks (#2015)
+export { characterLooks, characterLookVersions };
+export { DEFAULT_LOOK_NAME, LOOK_FIELDS } from './character-looks';
+export type {
+  CharacterLook,
+  CharacterLookMinimal,
+  CharacterLookRow,
+  CharacterLookVersion,
+  LookDefinition,
+  LookVersionSource,
+} from './character-looks';
+
+// Sequence cast (#2017)
+export { sequenceCast };
+export type { SequenceCastRow } from './sequence-cast';
 
 export {
   CHARACTER_BIBLE_FIELDS,
@@ -361,36 +371,37 @@ export type {
   CharacterRow,
   CharacterVoice,
   LegacyCharacterBibleColumn,
+  LegacyCharacterSheetColumn,
+  CharacterCast,
+  CharacterLink,
+  CastCharacter,
+  CastCharacterWithSheet,
+  CharacterWornLook,
   CharacterMinimal,
-  CharacterWithTalent,
   VoicePreview,
   VoicePreviewUnusable,
   NewCharacter,
   SheetStatus,
 } from './characters';
 
-// Location Library (team-level templates)
-export { locationLibrary };
-
-export type { LibraryLocation, NewLibraryLocation } from './location-library';
-
-// Sequence Locations (extracted from script)
-export { sequenceLocations };
+// Locations (the team's places) and the links sequences hold to them
+export { locations, sequenceLocationLinks, locationReferencePhotos };
 
 export type {
-  NewSequenceLocation,
-  ReferenceStatus,
-  SequenceLocationWithReference,
-  SequenceLocation,
-  SequenceLocationRow,
   LegacyLocationBibleColumn,
+  Location,
+  LocationLink,
+  LocationReferencePhoto,
+  LocationRow,
+  LocationWithReference,
+  NewSequenceLocation,
+  NewTeamLocation,
+  ReferenceStatus,
+  SequenceLocation,
+  SequenceLocationLinkRow,
   SequenceLocationMinimal,
-} from './sequence-locations';
-
-// Location Sheets (location-specific variations for library locations)
-export { locationSheets };
-
-export type { LocationSheet, NewLocationSheet } from './location-sheets';
+  SequenceLocationWithReference,
+} from './locations';
 
 // Sequence Elements (per-sequence uploaded reference images)
 export { sequenceElements };
@@ -401,19 +412,6 @@ export type {
   SequenceElement,
   SequenceElementMinimal,
 } from './sequence-elements';
-
-// Talent Library
-export { talent, talentMedia, talentSheets };
-
-export type {
-  NewTalent,
-  NewTalentMedia,
-  NewTalentSheet,
-  Talent,
-  TalentMediaRecord,
-  TalentSheet,
-  TalentWithSheets,
-} from './talent';
 
 // Library Resources
 export { audio, StyleSampleVideoSchema, styles, vfx };
@@ -546,35 +544,29 @@ export const schema = {
   sequenceEvents,
   characterSheetVariants,
   locationSheetVariants,
-  talentSheetVariants,
   shotPromptVersions,
   sequenceMusicPromptVersions,
   sequenceMusicVariants,
   sequenceExports,
   sequenceStyleVersions,
+  stitches,
 
   // Characters (scripted roles extracted from script)
   characters,
   characterVoiceVersions,
   characterBibleVersions,
   locationBibleVersions,
+  characterLooks,
+  characterLookVersions,
+  sequenceCast,
 
-  // Location Library (team-level templates)
-  locationLibrary,
-
-  // Sequence Locations (extracted from script)
-  sequenceLocations,
-
-  // Location Sheets (location-specific variations for library locations)
-  locationSheets,
+  // Locations and the links sequences hold to them
+  locations,
+  sequenceLocationLinks,
+  locationReferencePhotos,
 
   // Sequence Elements (user-uploaded reference images)
   sequenceElements,
-
-  // Talent Library
-  talent,
-  talentSheets,
-  talentMedia,
 
   // Libraries
   styles,

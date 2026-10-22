@@ -19,7 +19,6 @@ import { narrowShotPromptContext } from '@/shots/server/prompt-context';
 import { shotSpecForItem, shotWorkItems } from '@/shots/server/shot-work-items';
 import { storedShotSpec } from '@/shots/shot-list.schema';
 import type { CharacterBibleEntry, Scene } from '@/shots/scene-analysis.schema';
-import { buildCastCharacterBible } from '@/cast/character-prompt';
 import type {
   WorkflowEvent,
   WorkflowStep,
@@ -42,7 +41,7 @@ vi.doMock('@/billing/server/fal-pricing-live', () => ({
   getEffectiveFalPricing: vi.fn(async () => ({})),
 }));
 
-const createCastRecords = vi.fn(async () => ({ elements: [] }));
+const createCastRecords = vi.fn(async () => ({ elements: [], lookIds: {} }));
 vi.doMock('@/cast/server/workflows/cast-records', () => ({
   ...realCastRecords,
   createCastRecords,
@@ -66,11 +65,12 @@ const SPLIT: SceneSplitWorkflowResult = {
   title: 'Derived',
   shotMapping: [{ analysisSceneId: 'as_1', shotId: 'sh_1', frameId: 'fr_1' }],
   characterBible: [],
+  sceneLooks: {},
   locationBible: [],
   elementBible: [],
   dialogueVersionIdByShotId: {},
 };
-/** Script-side entry; casting replaces the hashed appearance fields. */
+/** The analysed bible, which is also what the cast row stores. */
 const RAW_ADA: CharacterBibleEntry = {
   characterId: 'c1',
   name: 'Ada',
@@ -79,23 +79,14 @@ const RAW_ADA: CharacterBibleEntry = {
   ethnicity: 'unspecified',
   physicalDescription: 'as written in the script',
   standardClothing: 'lab coat',
-  distinguishingFeatures: '',
+  looks: [],
   personality: '',
   movement: '',
   voiceDescription: '',
   voiceOnly: false,
   isPerson: true,
+  rendering: 'Photoreal live action',
   consistencyTag: '',
-};
-const TALENT_MATCH = {
-  characterId: 'c1',
-  talentId: 'tal_1',
-  talentName: 'Ada',
-  personality: '',
-  movement: '',
-  voiceId: null,
-  voiceDescription: null,
-  sheetImageUrl: '/r2/ada.png',
 };
 const LOCATION_MATCH = {
   locationId: 'l1',
@@ -106,7 +97,6 @@ const LOCATION_MATCH = {
 /** One plausible result per child, keyed by its spawn step. */
 const CHILD_RESULTS: Record<string, unknown> = {
   'spawn-scene-split': SPLIT,
-  'spawn-talent-matching': { matches: [TALENT_MATCH] },
   'spawn-location-matching': { matches: [LOCATION_MATCH] },
 };
 const defaultSpawn = async (
@@ -232,6 +222,7 @@ function makeEvent(
     imageModel: DEFAULT_IMAGE_MODEL,
     videoModel: DEFAULT_VIDEO_MODEL,
     elementIds: [],
+    cast: [],
     musicPromptSource: 'ai-generated',
     referenceOnly: false,
     // An automatic style whose recipe this run is meant to derive (#1213).
@@ -290,11 +281,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
       makeScopedDb(update)
     );
 
-    expect(spawned()).toEqual([
-      'spawn-scene-split',
-      'spawn-talent-matching',
-      'spawn-location-matching',
-    ]);
+    expect(spawned()).toEqual(['spawn-scene-split', 'spawn-location-matching']);
     expect(childPayload('spawn-scene-split')).toMatchObject({
       userCountry: 'AU',
     });
@@ -311,7 +298,6 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
       );
       expect(spawned()).toEqual([
         'spawn-scene-split',
-        'spawn-talent-matching',
         'spawn-location-matching',
       ]);
       expect(createCastRecords).toHaveBeenCalledTimes(1);
@@ -415,11 +401,9 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
       const spec = shotSpecForItem(item);
       if (!spec) throw new Error(`missing spec at ${index}`);
       expect(written.frameId).toBe(item.mapping.frameId);
-      // Verify reads the CAST row out of D1, so the stamp must be taken over
-      // the cast bible (#867). Stamping the raw pre-cast bible — which the
-      // derived path did until #1517's call site was fixed — left every
-      // multi-shot scene's image prompt stale the moment the run finished.
-      // The digest narrows its bibles by the text it was written with (#2012).
+      // Verify reads the cast row out of D1. The analysed bible is that row
+      // (#867). The digest narrows its bibles by the text it was written
+      // with (#2012).
       const hashWith = (characterBible: CharacterBibleEntry[]) =>
         hashVisualPromptInput(
           narrowShotPromptContext(
@@ -437,10 +421,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
             { channel: 'visual', prompt: written.text ?? null }
           )
         );
-      const verifyHash = await hashWith(
-        buildCastCharacterBible([RAW_ADA], [TALENT_MATCH])
-      );
-      expect(verifyHash).not.toBe(await hashWith([RAW_ADA]));
+      const verifyHash = await hashWith([RAW_ADA]);
       const textDigest = await sha256Hex({
         kind: 'derived-shot-visual',
         shotId: item.mapping.shotId,
@@ -465,10 +446,7 @@ describe('AnalyzeScriptWorkflow (a fresh run)', () => {
             {
               scene: item.scene,
               styleConfig: event.payload.styleConfig,
-              characterBible: buildCastCharacterBible(
-                [RAW_ADA],
-                [TALENT_MATCH]
-              ),
+              characterBible: [RAW_ADA],
               locationBible: SPLIT.locationBible,
               elementBible: SPLIT.elementBible,
               aspectRatio: event.payload.aspectRatio,

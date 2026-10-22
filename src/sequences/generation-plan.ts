@@ -114,7 +114,8 @@ export type PlanShot = {
   usesStartFrame: boolean;
   /** Entities the shot's still (or reference-only clip) is rendered from. */
   references: {
-    characterIds: readonly string[];
+    /** The look each character wears in the shot's scene (#2015). */
+    lookIds: readonly string[];
     locationIds: readonly string[];
     elementIds: readonly string[];
   };
@@ -135,8 +136,18 @@ export type PlanInput = {
   processing: boolean;
   /** The stop of the run in flight — its kinds read `running`. */
   runStopAt: GenerationStage;
-  /** Characters that need a sheet (voice-only ones never do). */
-  characterSheets: ReadonlyArray<{ id: string; sheet: ArtifactVerdict }>;
+  /**
+   * The looks that need a sheet (#2015), by look id: each character's
+   * default, and every other look some scene picks. Voice-only characters
+   * never do. `characterId` is the look's character; it equals `id` on the
+   * default look, whose id is the character's. Any other look is drawn from
+   * the default look's sheet, so that sheet is its upstream.
+   */
+  characterSheets: ReadonlyArray<{
+    id: string;
+    sheet: ArtifactVerdict;
+    characterId: string;
+  }>;
   locationSheets: ReadonlyArray<{ id: string; sheet: ArtifactVerdict }>;
   elementRefs: ReadonlyArray<{ id: string; ref: ArtifactVerdict }>;
   /** Speaking characters that use a voice. */
@@ -151,7 +162,7 @@ const ref = (kind: PlanUnitKind, id: string): PlanUnitRef => ({ kind, id });
 
 /** The sheets and element refs a shot is rendered from. */
 const sheetRefs = (shot: PlanShot): PlanUnitRef[] => [
-  ...shot.references.characterIds.map((id) => ref('sheet:character', id)),
+  ...shot.references.lookIds.map((id) => ref('sheet:character', id)),
   ...shot.references.locationIds.map((id) => ref('sheet:location', id)),
   ...shot.references.elementIds.map((id) => ref('ref:element', id)),
 ];
@@ -228,14 +239,29 @@ const rootUnit = (
  * - An upstream that is `running` elsewhere or `blocked` turns a unit that
  *   still has work (`missing` / `stale`) `blocked`: making it now would read
  *   inputs that are about to move. A `done` unit keeps its artifact.
+ * - A look that is not the default is drawn from its character's default
+ *   sheet, its upstream: the same two rules. A default sheet this run makes
+ *   puts the other looks in the same run, drawn after it lands (the second
+ *   references wave, `PlanReferences.lookSheetsAfterDefault`); a default
+ *   sheet running elsewhere holds them.
  * - While the storyboard run holds the sequence, every unit with work up to
  *   that run's stop is `running`.
  */
 export function planUnits(input: PlanInput, sequenceId: string): PlanUnit[] {
+  const characterSheetUnits = input.characterSheets
+    .map((sheet) => ({
+      kind: 'sheet:character' as const,
+      id: sheet.id,
+      verdict: sheet.sheet,
+      upstream:
+        sheet.characterId === sheet.id
+          ? []
+          : [ref('sheet:character', sheet.characterId)],
+    }))
+    // The default sheet has to settle before the looks that wait on it.
+    .sort((a, b) => a.upstream.length - b.upstream.length);
   const base: BaseUnit[] = [
-    ...input.characterSheets.map((c) =>
-      rootUnit('sheet:character', c.id, c.sheet)
-    ),
+    ...characterSheetUnits,
     ...input.locationSheets.map((l) =>
       rootUnit('sheet:location', l.id, l.sheet)
     ),
@@ -401,8 +427,12 @@ export function planWorkSummary(units: readonly PlanUnitRef[]): string {
 export function planWorkLine(work: readonly PlanUnit[]): string {
   const fresh = work.filter((u) => u.state !== 'stale');
   const redo = work.filter((u) => u.state === 'stale');
-  if (fresh.length === 0 || redo.length === 0) return planWorkSummary(work);
-  return `${planWorkSummary(fresh)} · redo ${planWorkSummary(redo)}`;
+  const line =
+    fresh.length === 0 || redo.length === 0
+      ? planWorkSummary(work)
+      : `${planWorkSummary(fresh)} · redo ${planWorkSummary(redo)}`;
+  // A sheet found finished elsewhere is pointed at, not drawn (#2017).
+  return line;
 }
 
 /**

@@ -155,7 +155,6 @@ function makeSequence(overrides: Partial<Sequence> = {}): Sequence {
     generateVoices: false,
     draftMotion: false,
     targetDurationSeconds: null,
-    suggestedTalentIds: null,
     suggestedLocationIds: null,
     ...overrides,
   };
@@ -437,7 +436,7 @@ function makeContext(
     },
     characters: { listWithSheets, list: listCharacters },
     sequenceElements: { list: vi.fn(async () => []) },
-    sequenceLocations: { listWithReferences: vi.fn(async () => []) },
+    locations: { listWithReferences: vi.fn(async () => []) },
     // No shot dialogue rows: the retry reads the motion row's mirror (#1657).
     shotDialogue: { getSelectedBySequence: vi.fn(async () => []) },
     shotPromptVersions: { getSelectedMotionByShots },
@@ -749,6 +748,10 @@ describe('executeSmartRetry — partial retry status reset', () => {
           sheetStatus: 'completed',
           sheetInputHash: 'hash',
           selectedSheetVersionId: 'sheet-1',
+          // Wearing its default look (#2015).
+          lookId: 'default-look',
+          lookName: 'Default',
+          looks: [],
           physicalDescription: 'Short dark hair',
           voiceOnly: false,
           isPerson: true,

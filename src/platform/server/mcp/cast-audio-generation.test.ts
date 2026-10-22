@@ -23,15 +23,17 @@ import { getDb } from '#db-client';
 import type { Database } from '@/platform/server/db/client';
 // oxlint-disable-next-line boundaries/no-scoped-factory -- exercise real team-scoped repositories, not mocked authorization
 import { createScopedDb } from '@/platform/server/db/scoped';
+import type { NewCharacter } from '@/platform/server/db/schema';
 import { generateId } from '@/platform/id';
 import { relations } from '@/platform/server/db/schema/relations';
 import {
-  characters,
+  characterBibleVersions,
   frames,
   frameVariants,
-  locationLibrary,
+  locations,
+  locationSheetVariants,
   scenes,
-  sequenceLocations,
+  sequenceLocationLinks,
   sequenceMusicVariants,
   sequences,
   shots,
@@ -41,6 +43,15 @@ import {
 } from '@/platform/server/db/schema';
 import { dbSceneId } from '@/shots/scene-id';
 import { triggerWorkflow } from '@/platform/server/workflow/client';
+import {
+  selectCharacterSheetVersion,
+  updateCharacter,
+  updateCharacterLook,
+  updateTeamCharacterLook,
+} from '@/cast/server/cast-edit';
+import { PORTRAIT_RIGHTS_V1 } from '@/platform/compliance/attestations';
+import { sha256Hex } from '@/platform/compliance/hash';
+import { USER_UPLOAD_MODEL } from '@/shots/user-upload-model';
 
 vi.mock('#db-client', () => ({ getDb: vi.fn() }));
 vi.mock('@/platform/server/workflow/client', () => ({
@@ -67,6 +78,12 @@ let shotId: string;
 let frameId: string;
 let actorId: string;
 let scopedDb: ReturnType<typeof createScopedDb>;
+/** A character as analysis writes it: bible version, cast link, default look. */
+const castCharacter = (character: NewCharacter) =>
+  createScopedDb(teamId, actorId).characters.create(character, {
+    source: 'analysis',
+    createdBy: null,
+  });
 
 async function call(name: string, args: Record<string, unknown>) {
   const response = await server.handle(
@@ -279,47 +296,49 @@ describe('shot dialogue and pending artifacts', () => {
 describe('cast', () => {
   it('cancels no voice when none is generating', async () => {
     const characterId = generateId();
-    await db.insert(characters).values({
+    await castCharacter({
+      rendering: 'Photoreal live action',
       id: characterId,
       sequenceId,
       characterId: 'char_001',
-      legacyName: 'Ada',
+      name: 'Ada',
     });
     expect(
       await data('cancel_character_voice', { sequenceId, characterId })
     ).toEqual({ cancelled: false });
   });
 
-  it('refuses to recast a voice-only character', async () => {
-    const characterId = generateId();
-    await db.insert(characters).values({
-      id: characterId,
-      sequenceId,
-      characterId: 'char_001',
-      legacyName: 'Narrator',
-      legacyVoiceOnly: true,
+  /** One of the team's locations, with a completed sheet when `sheet`. */
+  async function teamLocation(name: string, sheet: boolean) {
+    const id = generateId();
+    await db.insert(locations).values({
+      id,
+      teamId,
+      legacyName: name,
+      referenceStatus: sheet ? 'completed' : 'pending',
     });
-    expect(
-      await call('recast_character', {
-        sequenceId,
-        characterId,
-        talentId: generateId(),
-      })
-    ).toMatchObject(refused('VALIDATION_ERROR'));
-  });
+    if (sheet)
+      await db.insert(locationSheetVariants).values({
+        id,
+        locationId: id,
+        model: 'nano_banana_2',
+        status: 'completed',
+        url: `/r2/${id}.png`,
+      });
+    return id;
+  }
+  const use = (locationId: string, scriptLocationId: string) =>
+    db.insert(sequenceLocationLinks).values({
+      sequenceId,
+      locationId,
+      scriptLocationId,
+      attached: false,
+    });
 
-  it('refuses a library location with no reference image', async () => {
-    const locationId = generateId();
-    const libraryLocationId = generateId();
-    await db.insert(sequenceLocations).values({
-      id: locationId,
-      sequenceId,
-      locationId: 'loc_001',
-      legacyName: 'Office',
-    });
-    await db
-      .insert(locationLibrary)
-      .values({ id: libraryLocationId, teamId, name: 'Office' });
+  it('refuses to switch to a team location with no reference image', async () => {
+    const locationId = await teamLocation('Office', true);
+    await use(locationId, 'loc_001');
+    const libraryLocationId = await teamLocation('Bare office', false);
     expect(
       await call('recast_location', {
         sequenceId,
@@ -327,6 +346,63 @@ describe('cast', () => {
         libraryLocationId,
       })
     ).toMatchObject(refused('VALIDATION_ERROR'));
+    expect(triggerWorkflow).not.toHaveBeenCalled();
+    expect(await scopedDb.locations.getById(sequenceId, locationId)).not.toBe(
+      null
+    );
+  });
+
+  it('recast_location re-points the sequence at another team location and draws no sheet (#1695)', async () => {
+    const locationId = await teamLocation('Office', true);
+    await use(locationId, 'loc_001');
+    const libraryLocationId = await teamLocation('Loft', true);
+    expect(
+      await data('recast_location', {
+        sequenceId,
+        locationId,
+        libraryLocationId,
+      })
+    ).toEqual({
+      locationId: libraryLocationId,
+      workflowRunId: 'run-1',
+      affectedShotIds: [],
+    });
+    // Only the shots re-render: no sheet run, and no claim on either sheet.
+    expect(vi.mocked(triggerWorkflow).mock.calls.map(([path]) => path)).toEqual(
+      ['/recast-location']
+    );
+    // The link moved and kept its script id; the old location is the team's.
+    expect(
+      await scopedDb.locations.getById(sequenceId, libraryLocationId)
+    ).toMatchObject({ name: 'Loft', locationId: 'loc_001', attached: true });
+    expect(await scopedDb.locations.getById(sequenceId, locationId)).toBe(null);
+    expect(
+      (await scopedDb.locations.listTeam()).map((location) => location.id)
+    ).toEqual(expect.arrayContaining([locationId, libraryLocationId]));
+    expect(await scopedDb.locations.getCurrent(locationId)).toMatchObject({
+      referenceStatus: 'completed',
+      selectedReferenceVersionId: null,
+    });
+  });
+
+  it('does not switch to another team\u2019s location', async () => {
+    const locationId = await teamLocation('Office', true);
+    await use(locationId, 'loc_001');
+    const foreignTeam = generateId();
+    await db
+      .insert(teams)
+      .values({ id: foreignTeam, name: 'Foreign', slug: foreignTeam });
+    const foreign = generateId();
+    await db
+      .insert(locations)
+      .values({ id: foreign, teamId: foreignTeam, legacyName: 'Vault' });
+    expect(
+      await call('recast_location', {
+        sequenceId,
+        locationId,
+        libraryLocationId: foreign,
+      })
+    ).toMatchObject(refused('NOT_FOUND'));
     expect(triggerWorkflow).not.toHaveBeenCalled();
   });
 
@@ -337,5 +413,146 @@ describe('cast', () => {
         characterId: generateId(),
       })
     ).toMatchObject(refused('NOT_FOUND'));
+  });
+});
+
+describe('a character that must be a person is stored as one, on every path (#2065)', () => {
+  const actor = () => ({ userId: actorId });
+  const sequence = async (title: string) => {
+    const id = generateId();
+    const [seq] = await db
+      .select({ styleId: sequences.styleId })
+      .from(sequences)
+      .where(eq(sequences.id, sequenceId));
+    if (!seq) throw new Error('seed sequence missing');
+    await db.insert(sequences).values({
+      id,
+      teamId,
+      styleId: seq.styleId,
+      title,
+      status: 'completed',
+    });
+    return id;
+  };
+  /** Cast in A (the seed sequence) and B, both pinning one bible version. */
+  const castInTwo = async (isPerson: boolean) => {
+    const created = await castCharacter({
+      rendering: 'Photoreal live action',
+      id: generateId(),
+      sequenceId,
+      characterId: 'char_001',
+      name: 'Xan',
+      age: '30s',
+      isPerson,
+    });
+    const b = await sequence('B');
+    await scopedDb.characters.attach(b, created.id, { actorId });
+    return { id: created.id, b };
+  };
+  /**
+   * An uploaded photo the ledger saw a real person in, selected as the
+   * default look's sheet. The sheet only: the upload path's
+   * own bible write is the caller's to make or leave out.
+   */
+  const uploadRealPhoto = async (characterId: string) => {
+    const url = `/r2/characters/${teamId}/uploads/${generateId()}.png`;
+    const { version } = await scopedDb.characterSheetVariants.applyConvergent({
+      lookId: characterId,
+      url,
+      storagePath: url.slice('/r2/'.length),
+      inputHash: null,
+      model: USER_UPLOAD_MODEL,
+    });
+    await scopedDb.compliance.attestations.record({
+      subjectType: 'uploaded_image',
+      subjectId: await sha256Hex(url),
+      statementVersion: PORTRAIT_RIGHTS_V1.version,
+      statementSha256: 'x'.repeat(64),
+      depictsRealPerson: true,
+    });
+    return version.id;
+  };
+  /** What the upload path writes when the ledger says a real person. */
+  const markPerson = (inSequence: string, characterId: string) =>
+    scopedDb.characters.updateBible(
+      inSequence,
+      characterId,
+      { isPerson: true },
+      { actorId, source: 'edit' }
+    );
+  const isPersonIn = async (inSequence: string, characterId: string) =>
+    (await scopedDb.characters.getById(inSequence, characterId))?.isPerson;
+  const isPersonNow = async (characterId: string) =>
+    (await scopedDb.characters.getCurrent(characterId))?.isPerson;
+
+  it('C2: the features move of a default look’s styling edit does not carry a stale not-a-person forward', async () => {
+    const { id, b } = await castInTwo(false);
+    // Before #2065: the features still sit on her bible version.
+    await db
+      .update(characterBibleVersions)
+      .set({ legacyDistinguishingFeatures: 'scar' })
+      .where(eq(characterBibleVersions.characterId, id));
+    await uploadRealPhoto(id);
+    await markPerson(b, id);
+
+    // A, still pinning the not-a-person version, edits the styling: the
+    // move copies A's pinned version forward and makes it current.
+    await updateCharacterLook(scopedDb, actor(), sequenceId, id, id, {
+      styling: 'hair down',
+    });
+    expect(await scopedDb.characters.getCurrent(id)).toMatchObject({
+      isPerson: true,
+      rendering: 'Photoreal live action',
+      legacyDistinguishingFeatures: null,
+    });
+    expect(await isPersonIn(sequenceId, id)).toBe(true);
+  });
+
+  it('C2: the same from the Characters page, for a row stored wrong', async () => {
+    const { id } = await castInTwo(true);
+    await uploadRealPhoto(id);
+    await db
+      .update(characterBibleVersions)
+      .set({ isPerson: false, legacyDistinguishingFeatures: 'scar' })
+      .where(eq(characterBibleVersions.characterId, id));
+    await updateTeamCharacterLook(scopedDb, actor(), id, id, {
+      styling: 'hair down',
+    });
+    expect(await scopedDb.characters.getCurrent(id)).toMatchObject({
+      isPerson: true,
+      rendering: 'Photoreal live action',
+      legacyDistinguishingFeatures: null,
+    });
+  });
+
+  it('C4: selecting an uploaded photo of a real person again makes the character a person', async () => {
+    const created = await castCharacter({
+      id: generateId(),
+      sequenceId,
+      characterId: 'char_001',
+      name: 'Xan',
+      isPerson: false,
+      rendering: 'Photoreal live action',
+    });
+    const { id } = created;
+    const photo = await uploadRealPhoto(id);
+    await markPerson(sequenceId, id);
+    // Regenerated: a drawn sheet is selected, and the lock lifts.
+    await scopedDb.characterSheetVariants.applyConvergent({
+      lookId: id,
+      url: '/r2/drawn.png',
+      storagePath: 'drawn.png',
+      inputHash: null,
+      model: 'nano_banana_2',
+    });
+    await updateCharacter(scopedDb, actor(), sequenceId, id, {
+      isPerson: false,
+      rendering: 'Photoreal live action',
+    });
+    expect(await isPersonIn(sequenceId, id)).toBe(false);
+
+    await selectCharacterSheetVersion(scopedDb, actor(), sequenceId, id, photo);
+    expect(await isPersonIn(sequenceId, id)).toBe(true);
+    expect(await isPersonNow(id)).toBe(true);
   });
 });

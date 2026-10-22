@@ -1,7 +1,7 @@
 /**
  * MCP tools that generate or cancel cast, music, dialogue and prompt work
- * (#1979): regenerate a character or location sheet, recast with library
- * talent or a library location, design a character voice, generate music or
+ * (#1979): regenerate a character or location sheet, recast with another
+ * of the team's locations, design a character voice, generate music or
  * rewrite its prompt, record a shot's dialogue again, and cancel what is in
  * flight. Each calls the function the editor's server fn calls; MCP adds only
  * the parent-chain check.
@@ -10,7 +10,6 @@ import { z } from 'zod';
 import {
   cancelCharacterVoice,
   generateCharacterVoice,
-  recastCharacter,
   recastLocation,
   regenerateCharacterSheet,
   regenerateLocationSheet,
@@ -48,7 +47,7 @@ const characterId = ulidSchema.describe(
   'Database character ID (list_characters / get_character), not the char_* token.'
 );
 const locationId = ulidSchema.describe(
-  'Database location ID (list_locations / get_location), not the loc_* token.'
+  'Database location ID (list_locations / get_location; the same id list_library_locations gives), not the loc_* token.'
 );
 const shotInput = z.strictObject({
   sequenceId,
@@ -72,10 +71,13 @@ const cancelResult = z.object({ cancelled: z.boolean() });
 const regenerateCharacterSheetTool = openstoryTool({
   name: 'regenerate_character_sheet',
   description:
-    'Generate a new reference sheet for a character from its current bible (spends credits). Talent and shots are unchanged; stills that use the character go stale once the sheet lands. Poll get_character for sheet status.',
+    'Generate a new reference sheet for one look of a character, from its current bible and that look’s clothing and styling (spends credits). lookId picks the look (get_character looks[].id); omit it for the default look. A look other than the default is drawn from the default look’s completed sheet and is refused until that sheet exists. Shots are unchanged; stills of the scenes that wear the look go stale once the sheet lands. Poll get_character for sheet status.',
   scope: 'generate',
   annotations: generateAnnotations,
-  inputSchema: characterInput.extend({ imageModel }),
+  inputSchema: characterInput.extend({
+    lookId: ulidSchema.optional().describe('Look ID; default look if omitted.'),
+    imageModel,
+  }),
   outputSchema: runResult.extend({ characterId: z.string() }),
   run: async (input, { scopedDb, userId }) => {
     const sequence = await productionAccess(scopedDb).sequence(
@@ -89,48 +91,16 @@ const regenerateCharacterSheetTool = openstoryTool({
       scopedDb,
       { userId },
       sequence,
-      { characterId: character.id, imageModel: input.imageModel }
+      {
+        characterId: character.id,
+        // No look named: the default look, whose id is the character's.
+        lookId: input.lookId ?? character.id,
+        imageModel: input.imageModel,
+      }
     );
     return {
       data: result,
       summary: `Generating a sheet for ${character.name}.`,
-    };
-  },
-});
-
-const recastCharacterTool = openstoryTool({
-  name: 'recast_character',
-  description:
-    'Cast library talent (list_talent / get_talent: team or public) as a character: its look and voice replace the character’s, a new sheet is generated and every shot with the character is regenerated (spends credits). Refused for a voice-only character.',
-  scope: 'generate',
-  annotations: generateAnnotations,
-  inputSchema: characterInput.extend({
-    talentId: ulidSchema.describe('Library talent ID (list_talent).'),
-  }),
-  outputSchema: z.object({
-    characterId: z.string(),
-    talentId: z.string(),
-    sheetWorkflowRunId: z.string(),
-    affectedShotIds: z.array(z.string()),
-  }),
-  run: async (input, { scopedDb, userId }) => {
-    const character = await productionAccess(scopedDb).character(
-      input.sequenceId,
-      input.characterId
-    );
-    const result = await recastCharacter(
-      scopedDb,
-      { userId },
-      { characterId: character.id, talentId: input.talentId }
-    );
-    return {
-      data: {
-        characterId: result.character.id,
-        talentId: result.talentId,
-        sheetWorkflowRunId: result.sheetWorkflowRunId,
-        affectedShotIds: result.affectedShotIds,
-      },
-      summary: `Recasting ${character.name}; ${result.affectedShotIds.length} shots will regenerate.`,
     };
   },
 });
@@ -209,7 +179,7 @@ const cancelCharacterVoiceTool = openstoryTool({
 const regenerateLocationSheetTool = openstoryTool({
   name: 'regenerate_location_sheet',
   description:
-    'Generate a new reference sheet for a location from its current bible (spends credits). Stills set there go stale once it lands. Poll get_location for status.',
+    'Generate a new reference sheet for a location from its current bible and its uploaded photos (spends credits). The location is the team’s: the new sheet is the sheet in every sequence that uses it, and stills set there go stale in each once it lands. It reads no sequence style, only the bible’s rendering line. Poll get_location for status.',
   scope: 'generate',
   annotations: generateAnnotations,
   inputSchema: locationInput.extend({ imageModel }),
@@ -241,17 +211,17 @@ const regenerateLocationSheetTool = openstoryTool({
 const recastLocationTool = openstoryTool({
   name: 'recast_location',
   description:
-    'Set a location from a library location (list_library_locations: team or public): its reference image and description drive a new sheet, and every shot at the location is regenerated (spends credits). Refused when the library location has no reference image.',
+    'Switch a sequence’s location to another of the team’s locations (list_library_locations). The sequence’s link is re-pointed: nothing is copied and no sheet is drawn, the scenes set there now read the other location’s bible and sheet as they are, and the shots set there are rendered again (spends credits). The old location stays the team’s, unchanged, and other sequences that use it are not touched. locationId in the result is the location the sequence now uses. Refused when the other location has no completed reference sheet, or when the sequence already uses it.',
   scope: 'generate',
   annotations: generateAnnotations,
   inputSchema: locationInput.extend({
     libraryLocationId: ulidSchema.describe(
-      'Library location ID (list_library_locations).'
+      'The team location to switch to (list_library_locations).'
     ),
   }),
   outputSchema: z.object({
     locationId: z.string(),
-    referenceWorkflowRunId: z.string(),
+    workflowRunId: z.string(),
     affectedShotIds: z.array(z.string()),
   }),
   run: async (input, { scopedDb, userId }) => {
@@ -262,11 +232,15 @@ const recastLocationTool = openstoryTool({
     const result = await recastLocation(
       scopedDb,
       { userId },
-      { locationId: location.id, libraryLocationId: input.libraryLocationId }
+      {
+        sequenceId: location.sequenceId,
+        locationId: location.id,
+        withLocationId: input.libraryLocationId,
+      }
     );
     return {
       data: result,
-      summary: `Recasting ${location.name}; ${result.affectedShotIds.length} shots will regenerate.`,
+      summary: `Switched ${location.name}; ${result.affectedShotIds.length} shots will regenerate.`,
     };
   },
 });
@@ -424,7 +398,6 @@ const cancelPendingShotArtifactTool = openstoryTool({
 
 export const castAudioGenerationTools = [
   regenerateCharacterSheetTool,
-  recastCharacterTool,
   generateCharacterVoiceTool,
   cancelCharacterVoiceTool,
   regenerateLocationSheetTool,

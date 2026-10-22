@@ -44,6 +44,7 @@ import {
   loadShotPromptDialogue,
   type ShotPromptDialogue,
 } from './shot-dialogue';
+import { redrawShotPreview } from './shot-preview';
 
 type RegenerateContext = Pick<
   ShotEditContext,
@@ -192,6 +193,7 @@ export async function regenerateShotPrompt(
                 voiceHistory,
                 visualSelected?.createdAt ?? new Date(0)
               ),
+              legacyStyling: ctx.legacyStyling,
               acceptLegacy:
                 (visualSelected?.specVersionId ?? null) === selectedSpec.id,
             }
@@ -208,6 +210,7 @@ export async function regenerateShotPrompt(
                 voiceHistory,
                 motionSelected?.createdAt ?? new Date(0)
               ),
+              legacyStyling: ctx.legacyStyling,
               acceptLegacy:
                 (motionSelected?.specVersionId ?? null) === selectedSpec.id,
             }
@@ -239,6 +242,7 @@ export async function regenerateShotPrompt(
         analysisModel,
         createdBy: user.id,
       });
+      await redrawShotPreview({ ...context, scene }, motion.text);
     }
     return result({ rebuilt: true });
   }

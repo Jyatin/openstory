@@ -241,7 +241,7 @@ function buildScopedDb(
     characters: {
       list: () => Promise.resolve([]),
     },
-    sequenceLocations: {
+    locations: {
       list: () => Promise.resolve([]),
       listWithReferences: () => Promise.resolve([]),
     },
@@ -514,7 +514,12 @@ describe('claimTargets (#1085)', () => {
       staleVideoVersionId: null,
       referenceIds: [],
       attachSceneHeader: false,
-      motionRender: { packedScene: {}, description: '', selectedModel: null },
+      motionRender: {
+        packedScene: {},
+        description: '',
+        selectedModel: null,
+        characterLooks: null,
+      },
       dialogue: { presence: false, lines: [] },
       dialogueContext: [],
       ...overrides,
@@ -566,6 +571,7 @@ describe('claimTargets (#1085)', () => {
   it('creates one pending row per artifact and chains the image onto the visual claim', async () => {
     const { db, created } = buildClaimDb({});
     const result = await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [
         makeTarget({ regenVisual: true, regenMotion: true, regenImage: true }),
@@ -593,6 +599,7 @@ describe('claimTargets (#1085)', () => {
   it('direct image regen (prompt fresh) claims with the image live hash', async () => {
     const { db, created } = buildClaimDb({});
     await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [makeTarget({ regenImage: true })],
       sequenceId: 'seq-1',
@@ -609,6 +616,7 @@ describe('claimTargets (#1085)', () => {
       existingVisual: { id: 'fpv-prior', workflowRunId: 'run-1' },
     });
     const result = await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [makeTarget({ regenVisual: true })],
       sequenceId: 'seq-1',
@@ -624,6 +632,7 @@ describe('claimTargets (#1085)', () => {
       existingVisual: { id: 'fpv-foreign', workflowRunId: 'other-run' },
     });
     const result = await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [makeTarget({ regenVisual: true, regenImage: true })],
       sequenceId: 'seq-1',
@@ -668,6 +677,7 @@ describe('claimTargets (#1085)', () => {
     });
 
     const result = await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [makeTarget({ regenVisual: true })],
       sequenceId: 'seq-1',
@@ -698,6 +708,7 @@ describe('claimTargets (#1085)', () => {
 
     await expect(
       claimTargets({
+        actorId: 'user_1',
         scopedDb: db,
         targets: [makeTarget({ regenVisual: true })],
         sequenceId: 'seq-1',
@@ -728,6 +739,7 @@ describe('claimTargets (#1085)', () => {
     });
 
     const result = await claimTargets({
+      actorId: 'user_1',
       scopedDb: db,
       targets: [makeTarget({ regenVisual: true, regenMotion: true })],
       sequenceId: 'seq-1',

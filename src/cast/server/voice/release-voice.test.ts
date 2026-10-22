@@ -38,6 +38,8 @@ function makeScopedDb(referenceCount: number) {
   const scopedDb = asStub<ScopedDb>({
     characters: {
       getVoiceReferenceCount: vi.fn(async () => referenceCount),
+      // The character's own pointer and pin: what its release drops.
+      getOwnVoiceHolds: vi.fn(async () => Math.min(referenceCount, 1)),
       markVoiceReleased,
       updateVoice,
     },
@@ -160,7 +162,8 @@ describe('releaseCharacterVoice', () => {
       { voiceId: null },
       'removed',
       // Who dropped the voice rides onto the history row.
-      'user-1'
+      'user-1',
+      null
     );
     expect(mockDelete.mock.invocationCallOrder[0]).toBeLessThan(
       updateVoice.mock.invocationCallOrder[0] ?? 0

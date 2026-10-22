@@ -40,6 +40,7 @@ import { simpleHash } from '@/platform/hash';
 import { generateIdAt } from '@/platform/id';
 import { OpenStoryWorkflowEntrypoint } from '@/platform/server/workflow/base-workflow';
 import { WorkflowValidationError } from '@/platform/server/workflow/errors';
+import type { WorkflowFailureActivity } from '@/platform/server/workflow/errors';
 import type { ImageWorkflowInput } from '@/platform/server/workflow/types';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { computeImageWorkflowHashFromDto } from './image-workflow-snapshot';
@@ -77,6 +78,16 @@ type PrepResult = {
 };
 
 export class ImageWorkflow extends OpenStoryWorkflowEntrypoint<ImageWorkflowInput> {
+  protected override readonly failureLabel = 'Image generation';
+
+  protected override failureActivity(
+    payload: ImageWorkflowInput
+  ): WorkflowFailureActivity {
+    return payload.skipStorage
+      ? { kind: 'run.failed', summary: 'Preview failed' }
+      : super.failureActivity(payload);
+  }
+
   /**
    * The frame this run writes to: the trigger's `frameId`, re-read only to
    * confirm it still exists (deleted mid-run is a stand-down). Every spawner
@@ -556,13 +567,13 @@ export class ImageWorkflow extends OpenStoryWorkflowEntrypoint<ImageWorkflowInpu
           return;
         }
 
-        // A preview is a render of the caller's shot-spec prompt (#1642),
-        // not of the frame's visual prompt (#1101). It lands as its own
+        // A preview is a render of the caller's shot-spec or motion prompt
+        // (#1642, #2111), not of the frame's visual prompt (#1101). It lands as its own
         // `kind: 'preview'` row: keyed by that prompt's hash, never paired
         // with a prompt version, never selectable or promotable.
         // `skipStorage` names that (no version row, no status flip); the
         // bytes are still copied into R2 above.
-        await scopedDb.frameVariants.recordPreview({
+        const preview = await scopedDb.frameVariants.recordPreview({
           frameId: anchor.id,
           sequenceId: anchor.sequenceId,
           model: generation.params.model,
@@ -574,7 +585,11 @@ export class ImageWorkflow extends OpenStoryWorkflowEntrypoint<ImageWorkflowInpu
 
         await getGenerationChannel(sequenceId).emit(
           'generation.image:progress',
-          { shotId, previewThumbnailUrl: upload.url }
+          {
+            shotId,
+            previewThumbnailUrl: upload.url,
+            previewCreatedAt: preview.createdAt.toISOString(),
+          }
         );
       });
     }

@@ -73,7 +73,7 @@ const settingsOf = (row: Sequence) => ({
 const createSequenceTool = openstoryTool({
   name: 'create_sequence',
   description:
-    'Create a sequence from a script and start its storyboard (script analysis, then generation up to the stop-at implied by motion/music). Spends credits. Same input as POST /api/v1/sequences: style by id or name, cast and locations by library id/name or inline with hosted reference image URLs, elements by image URL. Short scripts are enhanced unless enhance is "off". Poll get_sequence_status with each returned id; give the user each appUrl.',
+    'Create a sequence from a script and start its storyboard (script analysis, then generation up to stopAt; omitted, it stops at dialogue unless motion is true). No stills are made unless startFrames is true: shots render straight to video. Spends credits. Same input as POST /api/v1/sequences: style by id or name, cast by team character id/name, locations by team location id/name (list_library_locations), either inline with hosted reference image URLs (an inline character or location becomes a team character or location), elements by image URL. Short scripts are enhanced unless enhance is "off". Poll get_sequence_status with each returned id; give the user each appUrl.',
   scope: 'generate',
   annotations: { ...writeAnnotations, openWorldHint: true },
   inputSchema: apiCreateSequenceSchema,
@@ -269,7 +269,7 @@ const narrative = sceneNarrativeFieldsSchema.shape;
 const createSceneTool = openstoryTool({
   name: 'create_scene',
   description:
-    'Add a scene at the end of a sequence, with its first shot unless withShot is false. Optionally write its script text and continuity tags in the same call. Starts no generation; plan_generation picks the new shots up.',
+    'Add a scene at the end of a sequence, with its first shot unless withShot is false. Optionally write its script text and continuity tags in the same call (every character starts in its default look; update_scene continuity.characterLooks picks another). Starts no generation; plan_generation picks the new shots up.',
   scope: 'sequences:write',
   annotations: writeAnnotations,
   inputSchema: z.strictObject({
@@ -283,7 +283,13 @@ const createSceneTool = openstoryTool({
       .max(20000)
       .optional()
       .describe('The scene’s script text.'),
-    continuity: z.strictObject(narrative.continuity.unwrap().shape).optional(),
+    // A new scene has everyone in their default look; pick another with
+    // update_scene (#2015).
+    continuity: z
+      .strictObject(
+        narrative.continuity.unwrap().omit({ characterLooks: true }).shape
+      )
+      .optional(),
     withShot: z.boolean().default(true),
   }),
   outputSchema: z.object({

@@ -11,10 +11,9 @@ import {
 } from '@tanstack/react-query';
 import {
   createSequenceCharacterFn,
+  getCharacterFn,
   getCharacterSheetStalenessFn,
-  getShotIdsForCharacterFn,
   getSequenceCharactersFn,
-  recastCharacterFn,
   regenerateCharacterSheetFn,
   assignCharacterVoiceFn,
   chooseCharacterVoiceTakeFn,
@@ -28,81 +27,80 @@ import {
   updateSequenceCharacterFn,
 } from '@/cast/sequence-characters.fn';
 import type { SheetStaleness } from '@/cast/server/sheets/sheet-staleness';
-import { addCharacterToLibraryFn } from '@/cast/talent.fn';
 import { shotStalenessNamespace } from '@/shots/ui/use-shot-staleness';
 import { segmentKeys } from '@/shots/ui/use-segments';
 import { shotKeys } from '@/shots/ui/use-shots';
 import { elevenLabsVoiceKeys } from '@/cast/ui/use-elevenlabs-voices';
-import type { CharacterWithTalent } from '@/platform/server/db/schema';
+import type {
+  CharacterDetail,
+  SequenceCharacter,
+} from '@/cast/sequence-characters.fn';
+
+/**
+ * A character's own keys take the sequence it is read through, or null from
+ * the Characters page (#2017), where the same sheets and voice are shown.
+ */
+const scope = (sequenceId: string | null) => sequenceId ?? 'team';
 
 export const sequenceCharacterKeys = {
   all: ['sequence-characters'] as const,
   list: (sequenceId: string) =>
     [...sequenceCharacterKeys.all, 'list', sequenceId] as const,
-  shotsForCharacter: (sequenceId: string, characterId: string) =>
-    [...sequenceCharacterKeys.all, 'shots', sequenceId, characterId] as const,
-  voiceVersions: (sequenceId: string, characterId: string) =>
+  detail: (sequenceId: string | null, characterId: string) =>
+    [
+      ...sequenceCharacterKeys.all,
+      'detail',
+      scope(sequenceId),
+      characterId,
+    ] as const,
+  voiceVersions: (sequenceId: string | null, characterId: string) =>
     [
       ...sequenceCharacterKeys.all,
       'voice-versions',
-      sequenceId,
+      scope(sequenceId),
       characterId,
     ] as const,
-  sheetStaleness: (sequenceId: string, characterId: string) =>
+  sheetStaleness: (sequenceId: string | null, characterId: string) =>
     [
       ...sequenceCharacterKeys.all,
       'sheet-staleness',
-      sequenceId,
+      scope(sequenceId),
       characterId,
     ] as const,
 };
 
+/**
+ * One character as its detail page reads it (#2017): through a sequence,
+ * or from none. Under the cast keys, so every cast invalidation refreshes it.
+ */
+export function useCharacter(sequenceId: string | null, characterId: string) {
+  return useQuery<CharacterDetail | null>({
+    queryKey: sequenceCharacterKeys.detail(sequenceId, characterId),
+    queryFn: () => getCharacterFn({ data: { sequenceId, characterId } }),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    // A sheet is the character's, so a run started from another sequence (or
+    // the Characters page) reports on a channel this view does not hear
+    // (#2017). Poll while a look reads generating so it cannot stick.
+    refetchInterval: (query) =>
+      query.state.data?.looks.some((look) => look.sheetStatus === 'generating')
+        ? 3000
+        : false,
+  });
+}
+
 export function useSequenceCharacters(sequenceId: string) {
-  return useQuery<CharacterWithTalent[]>({
+  return useQuery<SequenceCharacter[]>({
     queryKey: sequenceCharacterKeys.list(sequenceId),
     queryFn: async () => {
       return getSequenceCharactersFn({ data: { sequenceId } });
     },
-    // Sheets, voices and recasts live on the row, and realtime is the only
+    // Sheets and voices live on the row, and realtime is the only
     // other refresh — one dropped event held a stale cast for minutes (#1822).
     // Same freshness as the shot list.
     staleTime: 30_000,
     refetchOnWindowFocus: true,
     enabled: !!sequenceId,
-  });
-}
-
-/**
- * Hook for adding a sequence character to the team's talent library
- */
-export function useAddCharacterToLibrary() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    meta: { globalError: true },
-    mutationFn: (characterId: string) =>
-      addCharacterToLibraryFn({ data: { characterId } }),
-    onSuccess: () => {
-      // Invalidate talent queries to refresh library
-      void queryClient.invalidateQueries({ queryKey: ['talent'] });
-    },
-  });
-}
-
-/**
- * Hook to get the count of shots containing a character
- * Used to show affected shots before recasting
- */
-export function useShotIdsForCharacter(
-  sequenceId: string,
-  characterId: string
-) {
-  return useQuery({
-    queryKey: sequenceCharacterKeys.shotsForCharacter(sequenceId, characterId),
-    queryFn: () =>
-      getShotIdsForCharacterFn({ data: { sequenceId, characterId } }),
-    enabled: !!sequenceId && !!characterId,
-    staleTime: 60 * 1000, // 1 minute
   });
 }
 
@@ -113,7 +111,6 @@ type CharacterBibleInput = {
   ethnicity?: string;
   physicalDescription?: string;
   standardClothing?: string;
-  distinguishingFeatures?: string;
   personality?: string;
   movement?: string;
   voiceDescription?: string;
@@ -126,18 +123,19 @@ type CharacterBibleInput = {
  */
 function invalidateAfterVoiceChange(
   queryClient: QueryClient,
-  sequenceId: string
+  sequenceId: string | null
 ): void {
-  void queryClient.invalidateQueries({
-    queryKey: sequenceCharacterKeys.list(sequenceId),
-  });
+  // Every cast read of the character, in every sequence (#2017).
+  void queryClient.invalidateQueries({ queryKey: sequenceCharacterKeys.all });
   void queryClient.invalidateQueries({
     queryKey: shotKeys.dialogueSectionsAll(),
   });
   // The video's "Stale" chip is a segment verdict, not a shot one.
-  void queryClient.invalidateQueries({
-    queryKey: segmentKeys.list(sequenceId),
-  });
+  if (sequenceId !== null) {
+    void queryClient.invalidateQueries({
+      queryKey: segmentKeys.list(sequenceId),
+    });
+  }
   void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
 }
 
@@ -145,12 +143,12 @@ function invalidateAfterVoiceChange(
 export function useCancelCharacterVoice() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (data: { sequenceId: string; characterId: string }) =>
+    mutationFn: (data: { sequenceId: string | null; characterId: string }) =>
       cancelCharacterVoiceFn({ data }),
     onSuccess: (_result, { sequenceId, characterId }) =>
       Promise.all([
         queryClient.invalidateQueries({
-          queryKey: sequenceCharacterKeys.list(sequenceId),
+          queryKey: sequenceCharacterKeys.all,
         }),
         queryClient.invalidateQueries({
           queryKey: sequenceCharacterKeys.voiceVersions(
@@ -169,7 +167,7 @@ export function useGenerateCharacterVoice() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
       takes: number;
     }) => generateCharacterVoiceFn({ data }),
@@ -180,7 +178,7 @@ export function useGenerateCharacterVoice() {
       invalidateAfterVoiceChange(queryClient, sequenceId);
       return Promise.all([
         queryClient.invalidateQueries({
-          queryKey: sequenceCharacterKeys.list(sequenceId),
+          queryKey: sequenceCharacterKeys.all,
         }),
         queryClient.invalidateQueries({
           queryKey: sequenceCharacterKeys.voiceVersions(
@@ -197,7 +195,7 @@ export function useSetCharacterVoiceEnabled() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
       enabled: boolean;
     }) => setCharacterVoiceEnabledFn({ data }),
@@ -206,7 +204,7 @@ export function useSetCharacterVoiceEnabled() {
     onSuccess: (_result, { sequenceId }) => {
       invalidateAfterVoiceChange(queryClient, sequenceId);
       return queryClient.invalidateQueries({
-        queryKey: sequenceCharacterKeys.list(sequenceId),
+        queryKey: sequenceCharacterKeys.all,
       });
     },
   });
@@ -216,7 +214,7 @@ export function useChooseCharacterVoiceTake() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
       generatedVoiceId: string;
     }) => chooseCharacterVoiceTakeFn({ data }),
@@ -233,7 +231,7 @@ export function useAssignCharacterVoice() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
       source: 'premade' | 'library';
       voiceId: string;
@@ -255,7 +253,7 @@ export function useAssignCharacterVoice() {
  * until the versions arrive, so the voice section never waits on it.
  */
 export function useCharacterVoiceVersions(
-  sequenceId: string,
+  sequenceId: string | null,
   characterId: string
 ) {
   return useQuery({
@@ -283,7 +281,7 @@ export function useSelectCharacterVoiceVersion() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
       versionId: string;
     }) => selectCharacterVoiceVersionFn({ data }),
@@ -299,7 +297,7 @@ export function useSelectCharacterVoiceVersion() {
   });
 }
 
-/** Manual character create (#1108 Phase 2) — sheet-less until recast. */
+/** Manual character create (#1108 Phase 2) — sheet-less until its sheet is generated. */
 export function useCreateSequenceCharacter() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -342,15 +340,22 @@ export function useUpdateSequenceCharacter() {
   });
 }
 
+/** One look's sheet staleness (#2015); the default look's when `lookId` is omitted. */
 export function useCharacterSheetStaleness(
-  sequenceId: string,
-  characterId: string
+  sequenceId: string | null,
+  characterId: string,
+  lookId?: string
 ) {
   return useQuery<SheetStaleness>({
-    queryKey: sequenceCharacterKeys.sheetStaleness(sequenceId, characterId),
+    queryKey: [
+      ...sequenceCharacterKeys.sheetStaleness(sequenceId, characterId),
+      lookId ?? 'default',
+    ],
     queryFn: () =>
-      getCharacterSheetStalenessFn({ data: { sequenceId, characterId } }),
-    enabled: !!sequenceId && !!characterId,
+      getCharacterSheetStalenessFn({
+        data: { sequenceId, characterId, lookId },
+      }),
+    enabled: !!characterId,
     staleTime: 15_000,
   });
 }
@@ -359,18 +364,22 @@ export function useRegenerateCharacterSheet() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: {
-      sequenceId: string;
+      sequenceId: string | null;
       characterId: string;
+      /** A look other than the default (#2015). */
+      lookId?: string;
       imageModel?: string;
     }) => regenerateCharacterSheetFn({ data }),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: sequenceCharacterKeys.all,
-      });
-      void queryClient.invalidateQueries({
         queryKey: ['character-sheet-variants'],
       });
       void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
+      // Returned, so the mutation stays pending until the character is
+      // re-read as `generating`: the button never shows idle in between.
+      return queryClient.invalidateQueries({
+        queryKey: sequenceCharacterKeys.all,
+      });
     },
   });
 }
@@ -413,25 +422,4 @@ function invalidateCastMembership(
   });
   void queryClient.invalidateQueries({ queryKey: ['scene-facets'] });
   void queryClient.invalidateQueries({ queryKey: shotStalenessNamespace });
-}
-
-/**
- * Hook for recasting a character with a talent from the library
- */
-export function useRecastCharacter() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    meta: { globalError: true },
-    mutationFn: (data: { characterId: string; talentId: string }) =>
-      recastCharacterFn({ data }),
-    onSuccess: () => {
-      // Invalidate sequence characters to refresh the list
-      void queryClient.invalidateQueries({
-        queryKey: sequenceCharacterKeys.all,
-      });
-      // Invalidate shots that contain this character
-      void queryClient.invalidateQueries({ queryKey: ['shots'] });
-    },
-  });
 }

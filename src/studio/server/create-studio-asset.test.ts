@@ -8,6 +8,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { micros } from '@/billing/money';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
@@ -30,6 +31,7 @@ const mockTriggerWorkflow = vi.fn();
 const mockRequireGenerationAllowed = vi.fn();
 const mockGetEffectiveFalPricing = vi.fn();
 const mockCaptureProductEvent = vi.fn();
+const mockMeasureStoredMediaDuration = vi.fn();
 
 vi.doMock('#db-client', () => ({ getDb: () => db }));
 vi.doMock('@/billing/server/preflight', async (importOriginal) => {
@@ -55,6 +57,9 @@ vi.doMock('@/platform/server/compliance/generation-gate', () => ({
 }));
 vi.doMock('@/platform/server/observability/product-events', () => ({
   captureProductEvent: mockCaptureProductEvent,
+}));
+vi.doMock('@/cast/server/sequence-elements/media-duration', () => ({
+  measureOwnMediaDuration: mockMeasureStoredMediaDuration,
 }));
 vi.doMock('@/billing/server/fal-pricing-live', () => ({
   getEffectiveFalPricing: mockGetEffectiveFalPricing,
@@ -97,6 +102,7 @@ beforeEach(async () => {
   mockTriggerWorkflow.mockResolvedValue('wf-studio-1');
   mockRequireGenerationAllowed.mockResolvedValue(undefined);
   mockGetEffectiveFalPricing.mockResolvedValue({});
+  mockMeasureStoredMediaDuration.mockResolvedValue(null);
 });
 
 describe('studioCreateInputSchema', () => {
@@ -492,6 +498,155 @@ describe('createStudioAssets', () => {
     expect(favorites.assets.map((row) => row.id)).toEqual([firstId]);
   });
 
+  it('keeps a short Seedance 2.5 reference clip when the prompt does not say edit (#2036)', async () => {
+    bytePlusLive = true;
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['/r2/uploads/short.mp4'],
+      'other',
+      {}
+    );
+
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'the fox turns toward camera',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['/r2/uploads/short.mp4'],
+      referenceAudio: [],
+    });
+
+    expect(mockMeasureStoredMediaDuration).not.toHaveBeenCalled();
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        input: expect.objectContaining({ duration: 5 }),
+      }),
+      expect.anything()
+    );
+  });
+
+  it('refuses a Seedance 2.5 edit outside 4–30s before any hold (#2036)', async () => {
+    bytePlusLive = true;
+    // The length comes from the stored file, not the request.
+    mockMeasureStoredMediaDuration.mockResolvedValue(2);
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'video',
+        prompt: 'edit the fox turn',
+        videoModel: 'seedance_v2_5',
+        aspectRatio: '16:9',
+        resolution: '720p',
+        duration: 5,
+        count: 1,
+        mode: 'reference',
+        referenceImages: [],
+        referenceVideos: ['/r2/uploads/short.mp4'],
+        referenceAudio: [],
+      })
+    ).rejects.toThrow(/between 4 and 30 seconds/);
+    expect(mockMeasureStoredMediaDuration).toHaveBeenCalledWith(
+      'uploads/short.mp4'
+    );
+
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+    expect(await db.select().from(generatedAssets)).toEqual([]);
+  });
+
+  it('refuses when our own reference video cannot be read (#2036)', async () => {
+    bytePlusLive = true;
+    mockMeasureStoredMediaDuration.mockRejectedValue(new Error('R2 is down'));
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        activity: 'video',
+        prompt: 'edit the fox turn',
+        videoModel: 'seedance_v2_5',
+        aspectRatio: '16:9',
+        resolution: '720p',
+        duration: 5,
+        count: 1,
+        mode: 'reference',
+        referenceImages: [],
+        referenceVideos: ['/r2/uploads/clip.mp4'],
+        referenceAudio: [],
+      })
+    ).rejects.toThrow(/Couldn't read that reference video/);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('prices a Seedance 2.5 edit as auto length (#2036)', async () => {
+    bytePlusLive = true;
+    const rate = { unitPrice: micros(10_000), unit: 'units' };
+    mockGetEffectiveFalPricing.mockResolvedValue({
+      'bytedance/seedance-2.5/image-to-video': rate,
+      'bytedance/seedance-2.5/reference-to-video': rate,
+      'bytedance/seedance-2.5/text-to-video': rate,
+    });
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['https://example.com/walk.mp4'],
+      'other',
+      {}
+    );
+
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'edit the fox turn',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['https://example.com/walk.mp4'],
+      referenceAudio: [],
+    });
+
+    expect(mockTriggerWorkflow).toHaveBeenCalledWith(
+      '/studio',
+      expect.objectContaining({
+        input: expect.objectContaining({ duration: 'auto' }),
+      }),
+      expect.anything()
+    );
+
+    // The hold covers the longest clip, not the 5s that was picked.
+    const editHold = mockReserveRunCredits.mock.calls[0]?.[1];
+    mockReserveRunCredits.mockClear();
+    await createStudioAssets(scopedDb, {
+      activity: 'video',
+      prompt: 'the fox turns',
+      videoModel: 'seedance_v2_5',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      count: 1,
+      mode: 'reference',
+      referenceImages: [],
+      referenceVideos: ['https://example.com/walk.mp4'],
+      referenceAudio: [],
+    });
+    const referenceHold = mockReserveRunCredits.mock.calls[0]?.[1];
+    expect(Number(editHold)).toBeGreaterThan(Number(referenceHold));
+  });
+
   it('reserves a video row against the T2V endpoint with no image model', async () => {
     const scopedDb = createScopedDb(TEAM_ID, USER_ID);
     const result = await createStudioAssets(scopedDb, {
@@ -746,7 +901,112 @@ describe('upload rights gate (#1581)', () => {
         startImageUrl: uploadUrl,
       })
     ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // An uploaded reference clip is checked like a still (#1930).
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01WALK.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
     expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Studio clip whose chain began at an unchecked upload (#1930)', async () => {
+    const { AttestationRequiredError, ValidationError } =
+      await import('@/platform/errors');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const oldId = generateId();
+    const oldClip = `/r2/teams/${TEAM_ID}/studio/${oldId}/video.mp4`;
+    const old = await scopedDb.generatedAssets.insert({
+      id: oldId,
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: {
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01OLD.mp4`],
+      },
+      status: 'completed',
+      outputs: [{ url: oldClip, contentType: 'video/mp4' }],
+    });
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/video.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // Any other stored clip, ours or not, needs its own ledger row.
+    for (const clip of [
+      `/r2/teams/${generateId()}/studio/${old.id}/video.mp4`,
+      `/r2/elements/${TEAM_ID}/seq-1/01COPY.mp4`,
+    ]) {
+      await expect(
+        createStudioAssets(scopedDb, {
+          ...video,
+          mode: 'reference',
+          referenceVideos: [clip],
+        })
+      ).rejects.toBeInstanceOf(AttestationRequiredError);
+    }
+    // A clip stored as a still was judged as a still.
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/image.png`],
+      })
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dot-segment URL under a passing clip’s prefix (#2153)', async () => {
+    const { AttestationRequiredError, ValidationError } =
+      await import('@/platform/errors');
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const clip = `/r2/teams/${TEAM_ID}/studio/${generateId()}/video.mp4`;
+    const passed = await scopedDb.generatedAssets.insert({
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: { mode: 'reference', referenceVideos: [] },
+      status: 'completed',
+      outputs: [{ url: clip, contentType: 'video/mp4' }],
+    });
+    // The stored output itself has nothing behind it to check.
+    await recordLikenessFinding(scopedDb, [clip], 'other', request);
+    const prefix = `/r2/teams/${TEAM_ID}/studio/${passed.id}`;
+    for (const forged of [
+      `${prefix}/video.mp4/../../unchecked.mp4`,
+      `${prefix}/%2e%2e/unchecked.mp4`,
+      `${prefix}/video.mp4?download`,
+      `${prefix}/video.mp4#clip`,
+    ]) {
+      await expect(
+        createStudioAssets(scopedDb, {
+          ...video,
+          mode: 'reference',
+          referenceVideos: [forged],
+        })
+      ).rejects.toBeInstanceOf(ValidationError);
+    }
+    // Same id, different file: not that clip's stored output.
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`${prefix}/other.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    expect(mockTriggerWorkflow).not.toHaveBeenCalled();
   });
 
   it('lets library stills through untouched', async () => {

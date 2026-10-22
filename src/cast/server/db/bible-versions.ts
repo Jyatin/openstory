@@ -18,7 +18,7 @@ import {
   characterBibleVersions as cbv,
   characters,
   locationBibleVersions as lbv,
-  sequenceLocations,
+  locations,
 } from '@/platform/server/db/schema';
 import type {
   CharacterBible,
@@ -45,12 +45,6 @@ export const characterBibleColumns = {
   physicalDescription: sql<
     string | null
   >`${live(cbv.id, cbv.physicalDescription, characters.legacyPhysicalDescription)}`,
-  standardClothing: sql<
-    string | null
-  >`${live(cbv.id, cbv.standardClothing, characters.legacyStandardClothing)}`,
-  distinguishingFeatures: sql<
-    string | null
-  >`${live(cbv.id, cbv.distinguishingFeatures, characters.legacyDistinguishingFeatures)}`,
   personality: sql<
     string | null
   >`${live(cbv.id, cbv.personality, characters.legacyPersonality)}`,
@@ -65,32 +59,54 @@ export const characterBibleColumns = {
     sql`${live(cbv.id, cbv.isPerson, characters.legacyIsPerson)}`.mapWith(
       Boolean
     ),
+  // No legacy column: a row with no version (older than #1600) reads null.
+  rendering: sql<
+    string | null
+  >`CASE WHEN ${cbv.id} IS NULL THEN NULL ELSE ${cbv.rendering} END`,
   consistencyTag: sql<
     string | null
   >`${live(cbv.id, cbv.consistencyTag, characters.legacyConsistencyTag)}`,
 };
 
+/**
+ * The clothing a character's bible held before looks owned it (#2015). Read
+ * only for a character with no look yet.
+ */
+export const legacyBibleClothing = sql<
+  string | null
+>`${live(cbv.id, cbv.legacyStandardClothing, characters.legacyStandardClothing)}`;
+
+/**
+ * The features text a character's bible still holds (#2065). The default
+ * look's styling owns it now: read it only to resolve that styling
+ * (`effectiveStyling`), to verify a digest stamped before #2065, and to carry
+ * it to the next bible version.
+ */
+export const legacyBibleFeatures = sql<
+  string | null
+>`${live(cbv.id, cbv.legacyDistinguishingFeatures, characters.legacyDistinguishingFeatures)}`;
+
 /** Select fields: a sequence location's bible, resolved. */
 export const locationBibleColumns = {
-  name: sql<string>`${live(lbv.id, lbv.name, sequenceLocations.legacyName)}`,
-  type: sql<
-    string | null
-  >`${live(lbv.id, lbv.type, sequenceLocations.legacyType)}`,
+  name: sql<string>`${live(lbv.id, lbv.name, locations.legacyName)}`,
+  type: sql<string | null>`${live(lbv.id, lbv.type, locations.legacyType)}`,
   description: sql<
     string | null
-  >`${live(lbv.id, lbv.description, sequenceLocations.legacyDescription)}`,
+  >`${live(lbv.id, lbv.description, locations.legacyDescription)}`,
   architecturalStyle: sql<
     string | null
-  >`${live(lbv.id, lbv.architecturalStyle, sequenceLocations.legacyArchitecturalStyle)}`,
+  >`${live(lbv.id, lbv.architecturalStyle, locations.legacyArchitecturalStyle)}`,
   keyFeatures: sql<
     string | null
-  >`${live(lbv.id, lbv.keyFeatures, sequenceLocations.legacyKeyFeatures)}`,
+  >`${live(lbv.id, lbv.keyFeatures, locations.legacyKeyFeatures)}`,
   ambiance: sql<
     string | null
-  >`${live(lbv.id, lbv.ambiance, sequenceLocations.legacyAmbiance)}`,
+  >`${live(lbv.id, lbv.ambiance, locations.legacyAmbiance)}`,
+  // No legacy column: every version has one since #1695.
+  rendering: lbv.rendering,
   consistencyTag: sql<
     string | null
-  >`${live(lbv.id, lbv.consistencyTag, sequenceLocations.legacyConsistencyTag)}`,
+  >`${live(lbv.id, lbv.consistencyTag, locations.legacyConsistencyTag)}`,
 };
 
 /** The character bible fields of any object that carries them. */
@@ -100,12 +116,11 @@ export const pickCharacterBible = (c: CharacterBible): CharacterBible => ({
   gender: c.gender,
   ethnicity: c.ethnicity,
   physicalDescription: c.physicalDescription,
-  standardClothing: c.standardClothing,
-  distinguishingFeatures: c.distinguishingFeatures,
   personality: c.personality,
   movement: c.movement,
   voiceOnly: c.voiceOnly,
   isPerson: c.isPerson,
+  rendering: c.rendering,
   consistencyTag: c.consistencyTag,
 });
 
@@ -117,6 +132,7 @@ export const pickLocationBible = (l: LocationBible): LocationBible => ({
   architecturalStyle: l.architecturalStyle,
   keyFeatures: l.keyFeatures,
   ambiance: l.ambiance,
+  rendering: l.rendering,
   consistencyTag: l.consistencyTag,
 });
 

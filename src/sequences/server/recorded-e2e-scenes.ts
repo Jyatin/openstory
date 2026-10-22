@@ -4,6 +4,7 @@
  * visual/motion/music aimock matchers in lockstep with slice-derived metadata.
  */
 
+import { PHOTOREAL_RENDERING } from '@/cast/rendering';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,7 @@ import {
 import { attachShotLists } from '@/shots/shot-list-pass';
 import { shotListPassResultSchema } from '@/shots/shot-list.schema';
 import type {
+  CharacterBibleEntry,
   ElementBibleEntry,
   LocationBibleEntry,
 } from '@/shots/scene-analysis.schema';
@@ -25,7 +27,7 @@ import {
   type SceneSplittingScene,
 } from './streaming-scene-parser';
 import { reconcileSceneTags } from '@/sequences/tag-reconcile';
-import { buildCastCharacterBible } from '@/cast/character-prompt';
+import { bibleFromWire } from '@/cast/bible-looks';
 
 const OPENROUTER_DIR = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -142,9 +144,9 @@ export function recordedSplitScenes(recording: Recording = 'original'): {
 export function replayRecordedE2eScenes(recording: Recording = 'original'): {
   script: string;
   scenes: SceneSplittingScene[];
-  characterBible: z.infer<
-    typeof sceneSplitBiblesResultSchema
-  >['characterBible'];
+  characterBible: CharacterBibleEntry[];
+  /** The bible before casting: what the split holds when it fires previews. */
+  splitCharacterBible: CharacterBibleEntry[];
   locationBible: LocationBibleEntry[];
   elementBible: ElementBibleEntry[];
 } {
@@ -156,7 +158,7 @@ export function replayRecordedE2eScenes(recording: Recording = 'original'): {
 
   const sceneIdForLine = (lineNumber: number): string =>
     assembled.scenes[
-      sceneIndexForLine(script, assembled.resolution.offsets, lineNumber)
+      sceneIndexForLine(script, assembled.sceneOffsets, lineNumber)
     ]?.sceneId ?? '';
 
   const locationBible: LocationBibleEntry[] = bibles.locationBible.map(
@@ -167,6 +169,7 @@ export function replayRecordedE2eScenes(recording: Recording = 'original'): {
         text: entry.firstMention.text,
         lineNumber: entry.firstMention.lineNumber,
       },
+      rendering: PHOTOREAL_RENDERING,
     })
   );
   const elementBible: ElementBibleEntry[] = bibles.elementBible.map(
@@ -180,8 +183,17 @@ export function replayRecordedE2eScenes(recording: Recording = 'original'): {
     })
   );
 
+  // The recording predates looks (#2015): every character parses to none
+  // and gets its default look here, as the live join does.
+  const analysed = bibleFromWire(
+    bibles.characterBible,
+    sceneIdForLine,
+    script.split('\n').length,
+    new Map(),
+    PHOTOREAL_RENDERING
+  );
   const { scenes: tagged } = reconcileSceneTags(assembled.scenes, {
-    characterBible: bibles.characterBible,
+    characterBible: analysed.characterBible,
     locationBible,
     elementBible,
   });
@@ -197,33 +209,15 @@ export function replayRecordedE2eScenes(recording: Recording = 'original'): {
     []
   );
 
-  // Analyze-script casts matched talent onto the bible BEFORE visual/motion
-  // prompts (#867). Replay the recorded Maisie → Sienna Blake match so
-  // CHARACTER_BIBLE JSON matches live, not the pre-cast split output.
-  const talentCast = z
-    .object({
-      matches: z.array(
-        z.object({
-          characterId: z.string(),
-          talentId: z.string(),
-        })
-      ),
-    })
-    .parse(parseJson(responseContent('talent-cast/talent-cast.json')));
-  const characterBible = buildCastCharacterBible(
-    bibles.characterBible,
-    talentCast.matches.map((match) => ({
-      characterId: match.characterId,
-      talentName: 'Sienna Blake',
-      personality: '',
-      movement: '',
-    }))
-  );
+  // The script's bible is the cast (#2135). Recorded prompts that were
+  // built after a talent match no longer match this replay until re-recorded.
+  const characterBible = analysed.characterBible;
 
   return {
     script,
     scenes,
     characterBible,
+    splitCharacterBible: analysed.characterBible,
     locationBible,
     elementBible,
   };

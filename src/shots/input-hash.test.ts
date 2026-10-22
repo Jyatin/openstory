@@ -12,15 +12,14 @@ import {
   computeCharacterSheetInputHash,
   computeCharacterSheetInputHashLegacy,
   computeShotImageInputHash,
-  computeLibraryLocationReferenceInputHash,
   computeLocationSheetInputHash,
+  computeLocationSheetInputHashLegacy,
+  locationSheetInputHashMatches,
   hashMotionPromptInput,
   computeMotionPromptInputHashV4,
   computeMusicPromptInputHash,
   LEGACY_HASH_UNTIL,
   computeSequenceMusicInputHash,
-  computeTalentSheetInputHash,
-  computeTalentSheetInputHashLegacy,
   assembleMotionPromptHashInput,
   hashVisualPromptInput,
   computeVisualPromptInputHashV4,
@@ -29,13 +28,14 @@ import {
   visualPromptInputHashMatches,
   voiceOnlyMovedSince,
   type CharacterSheetHashInput,
+  type LegacyStylingByCharacter,
+  type LegacyStylingParts,
   type MotionPromptHashInput,
   type MotionPromptInputHash,
   type ShotImageHashInput,
-  type LibraryLocationReferenceHashInput,
   type LocationSheetHashInput,
-  type TalentSheetHashInput,
 } from './input-hash';
+import { effectiveStyling } from '@/cast/character-looks';
 import { deriveShotDialogueLines, shotDialogue } from './shot-dialogue';
 import { sceneForShot } from './server/shot-work-items';
 import { asStub } from '@/test/as-stub';
@@ -59,7 +59,13 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 const incomplete = <T>(value: object): T => asStub<T>(value);
 
 /** No character's voice-only flag moved since the stamp. */
-const VOICE_STILL = { voiceOnlyMoved: false };
+/** No legacy features, no styling: the parts of the plain `c1` fixtures. */
+const BLANK_PARTS: LegacyStylingParts = {
+  distinguishingFeatures: null,
+  styling: null,
+};
+const BLANK_LEGACY: LegacyStylingByCharacter = { c1: BLANK_PARTS };
+const VOICE_STILL = { voiceOnlyMoved: false, legacyStyling: BLANK_LEGACY };
 
 describe('computeShotImageInputHash (thumbnail)', () => {
   it('produces a 64-char hex SHA-256 digest', async () => {
@@ -207,9 +213,11 @@ describe('computeCharacterSheetInputHash', () => {
       ethnicity: '',
       physicalDescription: 'tall, blonde, blue eyes',
       standardClothing: 'dark trench coat',
-      distinguishingFeatures: 'scar above right eye',
+      rendering: 'Photoreal live action',
       consistencyTag: 'sarah_blonde_30s',
     },
+    styling: null,
+    faceSheetVersionId: null,
     talentSheetHash: 'talent-sha',
     talent: null,
     styleConfigHash: 'style-sha',
@@ -234,27 +242,86 @@ describe('computeCharacterSheetInputHash', () => {
     expect(a).toBe(renamed);
     expect(a).not.toBe(look);
 
-    const named = await computeCharacterSheetInputHashLegacy(base);
+    const named = await computeCharacterSheetInputHashLegacy(base, BLANK_PARTS);
     expect(named).not.toBe(a);
-    expect(await characterSheetInputHashMatches(named, base)).toBe(true);
+    expect(await characterSheetInputHashMatches(named, base, BLANK_PARTS)).toBe(
+      true
+    );
     expect(
-      await characterSheetInputHashMatches(a, {
-        ...base,
-        characterBible: { ...base.characterBible, name: 'Detective Linda' },
-      })
+      await characterSheetInputHashMatches(
+        a,
+        {
+          ...base,
+          characterBible: { ...base.characterBible, name: 'Detective Linda' },
+        },
+        BLANK_PARTS
+      )
     ).toBe(true);
     expect(
-      await characterSheetInputHashMatches(named, {
-        ...base,
-        characterBible: {
-          ...base.characterBible,
-          physicalDescription: 'short, dark hair',
+      await characterSheetInputHashMatches(
+        named,
+        {
+          ...base,
+          characterBible: {
+            ...base.characterBible,
+            physicalDescription: 'short, dark hair',
+          },
         },
-      })
+        BLANK_PARTS
+      )
     ).toBe(false);
   });
 
-  it('reacts to talent hash, style config, and image model', async () => {
+  it('hashes the default look’s sheet version only once a look is drawn from it', async () => {
+    // The default look carries none, and neither did any digest before.
+    const plain = await computeCharacterSheetInputHash(base);
+
+    const faced = await computeCharacterSheetInputHash({
+      ...base,
+      faceSheetVersionId: 'sheet-v1',
+    });
+    const moved = await computeCharacterSheetInputHash({
+      ...base,
+      faceSheetVersionId: 'sheet-v2',
+    });
+    expect(faced).not.toBe(plain);
+    expect(moved).not.toBe(faced);
+    // Every digest shape carries the face, so a sheet stamped without it
+    // does not stay fresh once the default sheet exists.
+    expect(
+      await characterSheetInputHashMatches(
+        plain,
+        {
+          ...base,
+          faceSheetVersionId: 'sheet-v1',
+        },
+        BLANK_PARTS
+      )
+    ).toBe(false);
+    expect(
+      await characterSheetInputHashMatches(
+        faced,
+        {
+          ...base,
+          faceSheetVersionId: 'sheet-v1',
+        },
+        BLANK_PARTS
+      )
+    ).toBe(true);
+    const named = await computeCharacterSheetInputHashLegacy(base, BLANK_PARTS);
+    expect(
+      await characterSheetInputHashMatches(
+        named,
+        {
+          ...base,
+          faceSheetVersionId: 'sheet-v1',
+        },
+        BLANK_PARTS
+      )
+    ).toBe(false);
+  });
+
+  it('reacts to talent hash and image model, and not to the style (#2017)', async () => {
     const a = await computeCharacterSheetInputHash(base);
     const talent = await computeCharacterSheetInputHash({
       ...base,
@@ -268,7 +335,9 @@ describe('computeCharacterSheetInputHash', () => {
       ...base,
       imageModel: 'sdxl-v1',
     });
-    expect(new Set([a, talent, style, model]).size).toBe(4);
+    // The style is the sequence's; a sheet is the character's, shared.
+    expect(style).toBe(a);
+    expect(new Set([a, talent, model]).size).toBe(3);
   });
 
   it('a cast talent edit re-stales the sheet; pre-#1785 digests still verify (#1785)', async () => {
@@ -302,8 +371,14 @@ describe('computeCharacterSheetInputHash', () => {
     // Uncast digests do not move, and a sheet stamped before the talent
     // channel existed still verifies until LEGACY_HASH_UNTIL.
     expect(await computeCharacterSheetInputHash(base)).not.toBe(a);
-    const preTalent = await computeCharacterSheetInputHash(base);
-    expect(await characterSheetInputHashMatches(preTalent, cast)).toBe(true);
+    const preTalent = await computeCharacterSheetInputHashLegacy(
+      base,
+      BLANK_PARTS,
+      'pre-1785'
+    );
+    expect(
+      await characterSheetInputHashMatches(preTalent, cast, BLANK_PARTS)
+    ).toBe(true);
   });
 
   it('does not fold isPerson into the sheet hash (#1682)', async () => {
@@ -318,6 +393,182 @@ describe('computeCharacterSheetInputHash', () => {
     expect(flagged).toBe(a);
   });
 
+  describe('looks (#2015)', () => {
+    // What the pre-#2015 hasher stamped for `base` — the bible feeding
+    // `standardClothing` — uncast and cast. Computed from the hasher as it
+    // stood before looks; a sheet in production carries digests like these.
+    const STAMPED_UNCAST =
+      'dabf0070f773be94373d504301941eea66b1e8ec992b472901151f3d99a5c54c';
+    const STAMPED_CAST =
+      'fa5b8e2b4f453a14df6000d93f2ca9ddc31998542c57b55a5e1ca85616c8850f';
+    const castTalent = {
+      description: 'A weathered sailor',
+      sheetImageUrl: '/r2/talent/sheet.png',
+      sheetLook: {
+        age: '40s',
+        gender: 'female',
+        ethnicity: null,
+        physicalDescription: 'broad',
+      },
+    };
+
+    // `base` with the features text the bible held then (#2065).
+    const FEATURES = 'scar above right eye';
+
+    it('4a: a backfilled default look verifies against the digest its sheet was stamped with', async () => {
+      // The backfill copies the bible's clothing onto the look verbatim and
+      // leaves `styling` NULL; the look now feeds `standardClothing`, and
+      // its styling is its own joined with the bible's features.
+      const stored = { distinguishingFeatures: FEATURES, styling: null };
+      const fromLook: CharacterSheetHashInput = {
+        ...base,
+        characterBible: {
+          ...base.characterBible,
+          standardClothing: 'dark trench coat',
+          rendering: 'Photoreal live action',
+        },
+        styling: effectiveStyling(
+          stored.styling,
+          stored.distinguishingFeatures
+        ),
+      };
+      expect(
+        await computeCharacterSheetInputHashLegacy(fromLook, stored, 'pre-2065')
+      ).toBe(STAMPED_UNCAST);
+      expect(
+        await computeCharacterSheetInputHashLegacy(
+          { ...fromLook, talent: castTalent },
+          stored,
+          'pre-2065'
+        )
+      ).toBe(STAMPED_CAST);
+      expect(
+        await characterSheetInputHashMatches(STAMPED_UNCAST, fromLook, stored)
+      ).toBe(true);
+      expect(
+        await characterSheetInputHashMatches(
+          STAMPED_CAST,
+          { ...fromLook, talent: castTalent },
+          stored
+        )
+      ).toBe(true);
+      // 4b: a sheet drawn now is stamped in the new shape, and verifies.
+      const stamped = await computeCharacterSheetInputHash(fromLook);
+      expect(stamped).not.toBe(STAMPED_UNCAST);
+      expect(
+        await characterSheetInputHashMatches(stamped, fromLook, stored)
+      ).toBe(true);
+      // 4d: an edit to the age stales the old sheet, as it did.
+      expect(
+        await characterSheetInputHashMatches(
+          STAMPED_UNCAST,
+          {
+            ...fromLook,
+            characterBible: { ...fromLook.characterBible, age: '40s' },
+          },
+          stored
+        )
+      ).toBe(false);
+      // 4b: the styling edit that moves the text stales it too.
+      expect(
+        await characterSheetInputHashMatches(
+          STAMPED_UNCAST,
+          { ...fromLook, styling: 'hair down' },
+          { distinguishingFeatures: null, styling: 'hair down' }
+        )
+      ).toBe(false);
+    });
+
+    it('4a: a default look with styling, and another look, verify against their pre-#2065 digests', async () => {
+      // Stamped by the hasher as it stood before #2065.
+      const STAMPED_STYLED =
+        '071a67b13fca9a78c92c24352a7809c3f9d3d7b702a43de12855de4feb301167';
+      const STAMPED_OTHER_LOOK =
+        '847e3202220d032e9f70093c3060bc819d169c355d55fe72597a7d03b247e78c';
+      const styled = {
+        distinguishingFeatures: FEATURES,
+        styling: 'hair pinned up',
+      };
+      expect(
+        await characterSheetInputHashMatches(
+          STAMPED_STYLED,
+          {
+            ...base,
+            styling: effectiveStyling(
+              styled.styling,
+              styled.distinguishingFeatures
+            ),
+          },
+          styled
+        )
+      ).toBe(true);
+      // A look other than the default: its styling is its own, and the
+      // features it was stamped with are still on the bible version.
+      const other = { distinguishingFeatures: FEATURES, styling: 'split lip' };
+      const gala: CharacterSheetHashInput = {
+        ...base,
+        characterBible: {
+          ...base.characterBible,
+          standardClothing: 'gala gown',
+          rendering: 'Photoreal live action',
+        },
+        styling: 'split lip',
+        faceSheetVersionId: 'sheet-v1',
+      };
+      expect(
+        await characterSheetInputHashMatches(STAMPED_OTHER_LOOK, gala, other)
+      ).toBe(true);
+      // Its new stamp does not read the features at all.
+      expect(await computeCharacterSheetInputHash(gala)).toBe(
+        await computeCharacterSheetInputHash({ ...gala })
+      );
+      expect(
+        await characterSheetInputHashMatches(
+          await computeCharacterSheetInputHash(gala),
+          gala,
+          { distinguishingFeatures: null, styling: 'split lip' }
+        )
+      ).toBe(true);
+    });
+
+    it('adds styling to the digest only when it is set', async () => {
+      const none = await computeCharacterSheetInputHash(base);
+      for (const blank of ['', '   ']) {
+        expect(
+          await computeCharacterSheetInputHash({ ...base, styling: blank })
+        ).toBe(none);
+      }
+      const bruised = await computeCharacterSheetInputHash({
+        ...base,
+        styling: 'split lip, hair down',
+      });
+      expect(bruised).not.toBe(none);
+      expect(
+        await characterSheetInputHashMatches(
+          none,
+          {
+            ...base,
+            styling: 'split lip, hair down',
+          },
+          BLANK_PARTS
+        )
+      ).toBe(false);
+      // An edit to the styling moves it again.
+      expect(
+        await computeCharacterSheetInputHash({ ...base, styling: 'hair up' })
+      ).not.toBe(bruised);
+    });
+
+    it('moves with the clothing of the look', async () => {
+      expect(
+        await computeCharacterSheetInputHash({
+          ...base,
+          characterBible: { ...base.characterBible, standardClothing: 'gown' },
+        })
+      ).not.toBe(STAMPED_UNCAST);
+    });
+  });
+
   it('rejects omitted talentSheetHash; null is the explicit empty', async () => {
     const nullHash = await computeCharacterSheetInputHash({
       ...base,
@@ -327,6 +578,7 @@ describe('computeCharacterSheetInputHash', () => {
       computeCharacterSheetInputHash(
         incomplete<CharacterSheetHashInput>({
           characterBible: base.characterBible,
+          styling: null,
           styleConfigHash: base.styleConfigHash,
           imageModel: base.imageModel,
         })
@@ -345,13 +597,13 @@ describe('computeLocationSheetInputHash', () => {
       architecturalStyle: 'modernist',
       keyFeatures: 'standing desks',
       ambiance: 'busy',
+      rendering: 'Photoreal live action',
     },
-    libraryLocationReferenceHash: 'lib-sha',
-    styleConfigHash: 'style-sha',
+    referencePhotoHashes: ['photo-a', 'photo-b'],
     imageModel: 'flux-pro-v1.1',
   };
 
-  it('reacts to bible, library ref, style, and model', async () => {
+  it('reacts to bible, rendering, the photo set, and model', async () => {
     const a = await computeLocationSheetInputHash(base);
     const variants = await Promise.all([
       computeLocationSheetInputHash({
@@ -363,15 +615,43 @@ describe('computeLocationSheetInputHash', () => {
       }),
       computeLocationSheetInputHash({
         ...base,
-        libraryLocationReferenceHash: 'lib-sha-v2',
+        locationBible: {
+          ...base.locationBible,
+          rendering: '3D animated, Pixar-like',
+        },
       }),
       computeLocationSheetInputHash({
         ...base,
-        styleConfigHash: 'style-sha-v2',
+        referencePhotoHashes: ['photo-a', 'photo-b', 'photo-c'],
       }),
+      computeLocationSheetInputHash({
+        ...base,
+        referencePhotoHashes: ['photo-a'],
+      }),
+      computeLocationSheetInputHash({ ...base, referencePhotoHashes: [] }),
       computeLocationSheetInputHash({ ...base, imageModel: 'sdxl-v1' }),
     ]);
-    expect(new Set([a, ...variants]).size).toBe(5);
+    expect(new Set([a, ...variants]).size).toBe(7);
+  });
+
+  it('photo order does not move the hash', async () => {
+    expect(
+      await computeLocationSheetInputHash({
+        ...base,
+        referencePhotoHashes: ['photo-b', 'photo-a'],
+      })
+    ).toBe(await computeLocationSheetInputHash(base));
+  });
+
+  it('the photo set is required', () => {
+    expect(() =>
+      computeLocationSheetInputHash(
+        incomplete<LocationSheetHashInput>({
+          locationBible: base.locationBible,
+          imageModel: base.imageModel,
+        })
+      )
+    ).toThrow();
   });
 
   it('every bible field the sheet prompt reads re-stales it (#1785)', async () => {
@@ -402,89 +682,129 @@ describe('computeLocationSheetInputHash', () => {
     });
     expect(renamed).toBe(a);
   });
-});
 
-describe('computeLibraryLocationReferenceInputHash', () => {
-  const base: LibraryLocationReferenceHashInput = {
-    locationBible: { name: 'Office', description: 'Modern open-plan, glass' },
-    styleConfigHash: 'style-sha',
-    imageModel: 'flux-pro-v1.1',
-    referenceMediaHashes: [],
-  };
+  describe('digests stamped before #1695', () => {
+    // What the old rows read: the sequence style's digest and the library
+    // reference the sheet was drawn from.
+    const stamped = {
+      libraryLocationReferenceHash: 'lib-sha',
+      styleConfigHash: 'style-sha',
+      unstyledConfigHash: 'no-style-sha',
+    };
+    const styled = ['pre-1695', 'pre-1785', 'named'] as const;
 
-  it('is stable, distinct from sheet hash, and reacts to model', async () => {
-    const ref = await computeLibraryLocationReferenceInputHash(base);
-    const refSame = await computeLibraryLocationReferenceInputHash({ ...base });
-    const sheetEquivalent = await computeLocationSheetInputHash({
-      ...base,
-      locationBible: {
-        ...base.locationBible,
-        type: 'interior',
-        architecturalStyle: '',
-        keyFeatures: '',
-        ambiance: '',
-      },
-      libraryLocationReferenceHash: null,
+    it('the current digest verifies with no legacy parts', async () => {
+      expect(
+        await locationSheetInputHashMatches(
+          await computeLocationSheetInputHash(base),
+          base,
+          {
+            libraryLocationReferenceHash: null,
+            styleConfigHash: null,
+            unstyledConfigHash: 'no-style-sha',
+          }
+        )
+      ).toBe(true);
     });
-    const refModel = await computeLibraryLocationReferenceInputHash({
-      ...base,
-      imageModel: 'sdxl-v1',
-    });
-    expect(ref).toBe(refSame);
-    expect(ref).not.toBe(sheetEquivalent);
-    expect(ref).not.toBe(refModel);
-    expect(() =>
-      computeLibraryLocationReferenceInputHash(
-        incomplete<LibraryLocationReferenceHashInput>({
-          locationBible: base.locationBible,
-          styleConfigHash: base.styleConfigHash,
-          imageModel: base.imageModel,
+
+    it.each([...styled, 'library'] as const)(
+      'a %s digest still verifies when the legacy parts are supplied',
+      async (kind) => {
+        const stored = await computeLocationSheetInputHashLegacy(
+          base,
+          kind,
+          stamped
+        );
+        expect(stored).not.toBe(await computeLocationSheetInputHash(base));
+        expect(await locationSheetInputHashMatches(stored, base, stamped)).toBe(
+          true
+        );
+      }
+    );
+
+    it.each(styled)(
+      'a %s digest does not verify from no sequence (styleConfigHash null)',
+      async (kind) => {
+        const stored = await computeLocationSheetInputHashLegacy(
+          base,
+          kind,
+          stamped
+        );
+        expect(
+          await locationSheetInputHashMatches(stored, base, {
+            ...stamped,
+            styleConfigHash: null,
+          })
+        ).toBe(false);
+      }
+    );
+
+    it.each(styled)(
+      'a %s digest reads stale once the style or library reference it was stamped with moved',
+      async (kind) => {
+        const stored = await computeLocationSheetInputHashLegacy(
+          base,
+          kind,
+          stamped
+        );
+        expect(
+          await locationSheetInputHashMatches(stored, base, {
+            ...stamped,
+            styleConfigHash: 'style-sha-v2',
+          })
+        ).toBe(false);
+        expect(
+          await locationSheetInputHashMatches(stored, base, {
+            ...stamped,
+            libraryLocationReferenceHash: 'lib-sha-v2',
+          })
+        ).toBe(false);
+      }
+    );
+
+    it('a library digest reads no sequence style, and moves with its photos', async () => {
+      const stored = await computeLocationSheetInputHashLegacy(
+        base,
+        'library',
+        stamped
+      );
+      expect(
+        await locationSheetInputHashMatches(stored, base, {
+          ...stamped,
+          styleConfigHash: null,
         })
-      )
-    ).toThrow();
-  });
-});
-
-describe('computeTalentSheetInputHash', () => {
-  const base: TalentSheetHashInput = {
-    talent: { name: 'Talent Name', description: 'Headshot reference' },
-    referenceMediaHashes: ['m1', 'm2', 'm3'],
-    imageModel: 'flux-pro-v1.1',
-  };
-
-  it('is order-insensitive for reference media', async () => {
-    const a = await computeTalentSheetInputHash(base);
-    const b = await computeTalentSheetInputHash({
-      ...base,
-      referenceMediaHashes: ['m3', 'm1', 'm2'],
+      ).toBe(true);
+      expect(
+        await locationSheetInputHashMatches(
+          stored,
+          { ...base, referencePhotoHashes: ['photo-a'] },
+          stamped
+        )
+      ).toBe(false);
     });
-    expect(a).toBe(b);
-  });
 
-  it('reacts to description, media set, and image model, not a rename', async () => {
-    const a = await computeTalentSheetInputHash(base);
-    const renamed = await computeTalentSheetInputHash({
-      ...base,
-      talent: { ...base.talent, name: 'Other Talent' },
+    it('a legacy digest still reads stale after a bible edit', async () => {
+      const edited = {
+        ...base,
+        locationBible: { ...base.locationBible, description: 'Bare concrete' },
+      };
+      for (const kind of [...styled, 'library'] as const) {
+        const stored = await computeLocationSheetInputHashLegacy(
+          base,
+          kind,
+          stamped
+        );
+        expect(
+          await locationSheetInputHashMatches(stored, edited, stamped)
+        ).toBe(false);
+      }
     });
-    const variants = await Promise.all([
-      computeTalentSheetInputHash({
-        ...base,
-        talent: { ...base.talent, description: 'Full body reference' },
-      }),
-      computeTalentSheetInputHash({
-        ...base,
-        referenceMediaHashes: ['m1', 'm2', 'm4'],
-      }),
-      computeTalentSheetInputHash({ ...base, imageModel: 'sdxl-v1' }),
-    ]);
-    expect(renamed).toBe(a);
-    expect(new Set([a, ...variants]).size).toBe(4);
-  });
 
-  it('the pre-drop named talent digest differs from the current one', async () => {
-    const named = await computeTalentSheetInputHashLegacy(base);
-    expect(named).not.toBe(await computeTalentSheetInputHash(base));
+    it('no stored digest never matches', async () => {
+      expect(await locationSheetInputHashMatches(null, base, stamped)).toBe(
+        false
+      );
+    });
   });
 });
 
@@ -498,9 +818,11 @@ describe('canonical serialization', () => {
         ethnicity: '',
         physicalDescription: 'tall',
         standardClothing: 'jacket',
-        distinguishingFeatures: 'scar',
+        rendering: 'Photoreal live action',
         consistencyTag: 'alice_30s',
       },
+      styling: null,
+      faceSheetVersionId: null,
       talentSheetHash: 'talent',
       talent: null,
       styleConfigHash: 'style',
@@ -510,12 +832,14 @@ describe('canonical serialization', () => {
     const shuffled = await computeCharacterSheetInputHash({
       imageModel: 'flux-pro',
       styleConfigHash: 'style',
+      styling: null,
+      faceSheetVersionId: null,
       talentSheetHash: 'talent',
       talent: null,
       characterBible: {
         consistencyTag: 'alice_30s',
-        distinguishingFeatures: 'scar',
         standardClothing: 'jacket',
+        rendering: 'Photoreal live action',
         physicalDescription: 'tall',
         ethnicity: '',
         gender: 'female',
@@ -565,7 +889,8 @@ describe('prompt input hashes', () => {
     ethnicity: '',
     physicalDescription: '',
     standardClothing: '',
-    distinguishingFeatures: '',
+    rendering: 'Photoreal live action',
+    looks: [],
     personality: '',
     movement: '',
     voiceDescription: '',
@@ -573,6 +898,41 @@ describe('prompt input hashes', () => {
     isPerson: true,
     consistencyTag: '',
   };
+
+  it("reads the worn look's styling only when it is set, so a prompt stamped before looks stays fresh (#2015)", async () => {
+    const hashOf = (character: CharacterBibleEntry) =>
+      Promise.all([
+        hashVisualPromptInput({ ...sceneCtx, characterBible: [character] }),
+        hashMotionPromptInput({ ...sceneCtx, characterBible: [character] }),
+      ]);
+    const look = (styling: string, clothing = '') => ({
+      lookId: 'L1',
+      name: 'Default',
+      clothing,
+      styling,
+    });
+    // An entry stored before #2015 has no `looks` key at all.
+    const { looks: _looks, ...stored } = aliceCharacter;
+    const before = await hashOf(asStub<CharacterBibleEntry>(stored));
+    expect(await hashOf(aliceCharacter)).toEqual(before);
+    expect(await hashOf({ ...aliceCharacter, looks: [look('  ')] })).toEqual(
+      before
+    );
+    // Another look the character owns but is not wearing moves nothing.
+    expect(
+      await hashOf({
+        ...aliceCharacter,
+        looks: [look(''), { ...look('split lip', 'gown'), lookId: 'L2' }],
+      })
+    ).toEqual(before);
+
+    const styled = await hashOf({
+      ...aliceCharacter,
+      looks: [look('split lip')],
+    });
+    expect(styled[0]).not.toBe(before[0]);
+    expect(styled[1]).not.toBe(before[1]);
+  });
 
   const beachLocation: LocationBibleEntry = {
     locationId: 'l1',
@@ -582,6 +942,7 @@ describe('prompt input hashes', () => {
     architecturalStyle: '',
     keyFeatures: '',
     ambiance: '',
+    rendering: 'Photoreal live action',
     consistencyTag: '',
     firstMention: { sceneId: '', text: '', lineNumber: 0 },
   };
@@ -600,6 +961,181 @@ describe('prompt input hashes', () => {
   };
   /** A shot whose lines sit on its dialogue node. */
   const NODE = { legacyScriptDialogue: false, ...VOICE_STILL };
+
+  describe('the default look owns the features (#2065)', () => {
+    // What the hasher stamped before #2065 for Alice with the features text
+    // on her bible and each look's own styling. Computed from the hasher as
+    // it stood then; prompts in production carry digests like these.
+    const FEATURES = 'scar above right eye';
+    const office = (styling: string) => ({
+      lookId: 'L1',
+      name: 'Default',
+      clothing: 'coat',
+      styling,
+    });
+    const gala = {
+      lookId: 'L2',
+      name: 'Gala',
+      clothing: 'gown',
+      styling: 'split lip',
+    };
+    const cases = [
+      {
+        name: 'the default look, with styling of its own',
+        // As a look read resolves it now: its own, then the features.
+        worn: office(effectiveStyling('hair pinned up', FEATURES) ?? ''),
+        rest: [gala],
+        stored: { distinguishingFeatures: FEATURES, styling: 'hair pinned up' },
+        visual:
+          '7afe69f3535c17323ef3e8c3d111aa9bab3827fd7a27cfe0a9d15b594ee6a3ad',
+        motion:
+          '2aacf26222ea3c1cb2bae300bc72ba291de9872c1e61d5d1870c1099924f6e2e',
+      },
+      {
+        name: 'the default look, with no styling of its own',
+        worn: office(effectiveStyling('', FEATURES) ?? ''),
+        rest: [gala],
+        stored: { distinguishingFeatures: FEATURES, styling: '' },
+        visual:
+          'b3265d0b4d76720a24a2383fb0efb2cc0ac19821658413a9930d6b49461bfda8',
+        motion:
+          '6a87f51fe0e087969fba157d1ab090854f6c3750a2091192f0c982b5f1f89be2',
+      },
+      {
+        name: 'another look, which no longer reads the features',
+        worn: gala,
+        rest: [office('hair pinned up')],
+        stored: { distinguishingFeatures: FEATURES, styling: 'split lip' },
+        visual:
+          'bb1afc567b398c736f33614425fc01d909a55de62cc6d33d311efa93acb0b659',
+        motion:
+          'f3894cc088b68c2862038d709236af661b0106677991fcb513ec43eef8c7aad8',
+      },
+    ];
+
+    it('joins the features to the default look’s own styling, once', () => {
+      expect(effectiveStyling('hair pinned up', FEATURES)).toBe(
+        `hair pinned up\n${FEATURES}`
+      );
+      expect(effectiveStyling(null, FEATURES)).toBe(FEATURES);
+      expect(effectiveStyling('hair pinned up', null)).toBe('hair pinned up');
+      expect(effectiveStyling(null, '  ')).toBeNull();
+      // A look version already written from the effective text, read beside
+      // a bible version that still holds the features.
+      expect(effectiveStyling(`hair pinned up\n${FEATURES}`, FEATURES)).toBe(
+        `hair pinned up\n${FEATURES}`
+      );
+      expect(effectiveStyling(` ${FEATURES} `, FEATURES)).toBe(` ${FEATURES} `);
+      // Held means the whole text, not a substring of another word.
+      expect(effectiveStyling('red scarf', 'scar')).toBe('red scarf\nscar');
+      expect(effectiveStyling('scar tissue', 'scar')).toBe('scar tissue\nscar');
+      expect(effectiveStyling('red scarf\nscar', 'scar')).toBe(
+        'red scarf\nscar'
+      );
+    });
+
+    it.each(cases)(
+      '4a: a prompt stamped before #2065 verifies as fresh — $name',
+      async ({ worn, rest, stored, visual, motion }) => {
+        const ctx = {
+          ...sceneCtx,
+          characterBible: [
+            {
+              ...aliceCharacter,
+              standardClothing: worn.clothing,
+              rendering: 'Photoreal live action',
+              looks: [worn, ...rest],
+            },
+          ],
+        };
+        const legacyStyling = { c1: stored };
+        // Whatever else moved since: this shape reads the voice-only flag
+        // and the spec, as the current one does.
+        for (const voiceOnlyMoved of [false, true]) {
+          for (const acceptLegacy of [true, false]) {
+            const opts = { voiceOnlyMoved, acceptLegacy, legacyStyling };
+            expect(await visualPromptInputHashMatches(visual, ctx, opts)).toBe(
+              true
+            );
+            expect(
+              await motionPromptInputHashMatches(motion, ctx, {
+                ...opts,
+                legacyScriptDialogue: false,
+              })
+            ).toBe(true);
+          }
+        }
+        // 4b: a stamp made now is the new shape, and verifies.
+        const stamped = await hashVisualPromptInput(ctx);
+        expect(stamped).not.toBe(visual);
+        expect(
+          await visualPromptInputHashMatches(stamped, ctx, {
+            voiceOnlyMoved: false,
+            legacyStyling,
+          })
+        ).toBe(true);
+        // 4d: an unrelated bible edit stales the old stamp, as it did.
+        const aged = {
+          ...ctx,
+          characterBible: ctx.characterBible.map((c) => ({ ...c, age: '31' })),
+        };
+        expect(
+          await visualPromptInputHashMatches(visual, aged, {
+            voiceOnlyMoved: false,
+            legacyStyling,
+          })
+        ).toBe(false);
+      }
+    );
+
+    it('4b: the default look’s styling edit moves the text, and the old stamp goes stale', async () => {
+      const [first] = cases;
+      if (!first) throw new Error('fixture');
+      // The save wrote the submitted styling to the look and nulled the
+      // bible's features: stored and effective are now the same text.
+      const edited = office('hair down');
+      const ctx = {
+        ...sceneCtx,
+        characterBible: [
+          {
+            ...aliceCharacter,
+            standardClothing: 'coat',
+            rendering: 'Photoreal live action',
+            looks: [edited, gala],
+          },
+        ],
+      };
+      const legacyStyling = {
+        c1: { distinguishingFeatures: null, styling: 'hair down' },
+      };
+      const opts = { voiceOnlyMoved: false, legacyStyling };
+      expect(await visualPromptInputHashMatches(first.visual, ctx, opts)).toBe(
+        false
+      );
+      expect(
+        await motionPromptInputHashMatches(first.motion, ctx, {
+          ...opts,
+          legacyScriptDialogue: false,
+        })
+      ).toBe(false);
+      expect(
+        await visualPromptInputHashMatches(
+          await hashVisualPromptInput(ctx),
+          ctx,
+          opts
+        )
+      ).toBe(true);
+    });
+
+    it('a verify with no stored parts for a character fails loudly, not as stale', async () => {
+      await expect(
+        visualPromptInputHashMatches('0'.repeat(64), sceneCtx, {
+          voiceOnlyMoved: false,
+          legacyStyling: {},
+        })
+      ).rejects.toThrow('no legacy styling parts for character c1');
+    });
+  });
 
   it('visual and motion prompt hashes are namespaced by artifact and differ', async () => {
     const visual = await hashVisualPromptInput(sceneCtx);
@@ -623,11 +1159,14 @@ describe('prompt input hashes', () => {
     expect(withReRenderedImage).toBe(withImage);
     // A legacy stamp still carries the URL, so an old LLM prompt goes stale
     // once when its still changes.
-    const v4 = await computeMotionPromptInputHashV4(sceneCtx);
-    const v4Image = await computeMotionPromptInputHashV4({
-      ...sceneCtx,
-      startingFrameImageUrl: '/r2/frames/a.png',
-    });
+    const v4 = await computeMotionPromptInputHashV4(sceneCtx, BLANK_LEGACY);
+    const v4Image = await computeMotionPromptInputHashV4(
+      {
+        ...sceneCtx,
+        startingFrameImageUrl: '/r2/frames/a.png',
+      },
+      BLANK_LEGACY
+    );
     expect(v4Image).not.toBe(v4);
   });
 
@@ -720,7 +1259,7 @@ describe('prompt input hashes', () => {
     expect(
       await motionPromptInputHashMatches(stored, ctx, {
         legacyScriptDialogue: false,
-        voiceOnlyMoved: false,
+        ...VOICE_STILL,
         acceptLegacy: true,
       })
     ).toBe(true);
@@ -784,7 +1323,7 @@ describe('prompt input hashes', () => {
     expect(
       await motionPromptInputHashMatches(stamped, now, {
         legacyScriptDialogue: true,
-        voiceOnlyMoved: false,
+        ...VOICE_STILL,
       })
     ).toBe(true);
     // A node row: that is an edit, and it re-stales the prompt.
@@ -906,9 +1445,15 @@ describe('prompt input hashes', () => {
     });
     expect(withSpec).not.toBe(without);
     expect(reordered).toBe(withSpec);
+    // A stamp from before specs: the newest shape that has none.
+    const preSpec = await computeVisualPromptInputHashV4(
+      sceneCtx,
+      BLANK_LEGACY,
+      'v5-voiced'
+    );
     expect(
       await visualPromptInputHashMatches(
-        without,
+        preSpec,
         { ...sceneCtx, spec },
         {
           ...VOICE_STILL,
@@ -918,7 +1463,7 @@ describe('prompt input hashes', () => {
     ).toBe(true);
     expect(
       await visualPromptInputHashMatches(
-        without,
+        preSpec,
         { ...sceneCtx, spec },
         {
           ...VOICE_STILL,
@@ -1067,7 +1612,7 @@ describe('prompt input hashes', () => {
   it('dual-hash verify accepts a v4 visual digest of the same inputs', async () => {
     expect(LEGACY_HASH_UNTIL).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const current = await hashVisualPromptInput(sceneCtx);
-    const v4 = await computeVisualPromptInputHashV4(sceneCtx);
+    const v4 = await computeVisualPromptInputHashV4(sceneCtx, BLANK_LEGACY);
     expect(v4).not.toBe(current);
     expect(
       await visualPromptInputHashMatches(current, sceneCtx, VOICE_STILL)
@@ -1089,7 +1634,7 @@ describe('prompt input hashes', () => {
 
   it('dual-hash verify accepts a v4 motion digest of the same inputs', async () => {
     const current = await hashMotionPromptInput(sceneCtx);
-    const v4 = await computeMotionPromptInputHashV4(sceneCtx);
+    const v4 = await computeMotionPromptInputHashV4(sceneCtx, BLANK_LEGACY);
     expect(v4).not.toBe(current);
     expect(await motionPromptInputHashMatches(current, sceneCtx, NODE)).toBe(
       true

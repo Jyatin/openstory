@@ -17,6 +17,7 @@ import { InsufficientScopeError } from '@/platform/errors';
 import { getLogger, toErrorPayload } from '@/platform/logger';
 import { createScopedDb } from '@/platform/server/db/scoped';
 import type { McpAuthContext } from './auth';
+import { mcpJsonRpcError } from './json-rpc';
 import { serveResourceRequest } from './resources';
 import { MCP_RESOURCE_TEMPLATES } from './tools/resource-reads';
 import { SEQUENCE_CARD_URI } from './ui/sequence-card';
@@ -37,6 +38,7 @@ import { castMusicTools } from './tools/cast-music-edits';
 import { generationUploadTools } from './tools/generation-uploads';
 import { castAudioGenerationTools } from './tools/cast-audio-generation';
 import { studioTools } from './tools/studio';
+import { stitchTools } from './tools/stitch';
 import {
   executeGenerationTool,
   getOperationStatusTool,
@@ -117,6 +119,7 @@ export const mcpServer = createMCPServer({
     retryFailedWorkTool,
     planExportTool,
     startExportTool,
+    ...stitchTools,
   ],
   // Advertises the resources capability; `resources/*` requests never reach
   // these reads (see resources.ts).
@@ -182,8 +185,76 @@ export async function serveMcpRequest(
   if (method?.startsWith('resources/')) {
     return serveResourceRequest(request, context);
   }
+  if (method === 'subscriptions/listen') return listenNotSupported(request);
   const response = await mcpServer.handle(request, { context });
-  return method === 'tools/list' ? withToolViews(response) : response;
+  if (method === 'tools/list') return withToolViews(response);
+  if (method === 'server/discover' || method === 'initialize') {
+    return withServerIdentity(response, context.origin);
+  }
+  return response;
+}
+
+/**
+ * `subscriptions/listen` is refused at once (#2035). The SDK would answer it
+ * with an event stream that never ends, and ai-mcp turns the keep-alive off,
+ * so the Worker has nothing left to do and Cloudflare cancels the request as
+ * hung. Nothing here publishes a change event, so there is nothing to stream.
+ */
+async function listenNotSupported(request: Request): Promise<Response> {
+  const body = z
+    .object({ id: z.union([z.string(), z.number()]) })
+    .safeParse(await request.clone().json());
+  return mcpJsonRpcError(404, 'Subscriptions are not supported', {
+    code: -32601,
+    id: body.success ? body.data.id : null,
+  });
+}
+
+const SERVER_INFO_META = 'io.modelcontextprotocol/serverInfo';
+const serverInfoSchema = z.looseObject({ name: z.string() });
+const capabilitiesSchema = z.looseObject({
+  result: z.looseObject({
+    capabilities: z.record(z.string(), z.unknown()),
+    // `initialize` names the server here, `server/discover` under `_meta`.
+    serverInfo: serverInfoSchema.optional(),
+    _meta: z.looseObject({ [SERVER_INFO_META]: serverInfoSchema }).optional(),
+  }),
+});
+
+/** The app icon on its dark tile (#2084): the files the site favicon uses. */
+const serverIcons = (origin: string) => [
+  { src: `${origin}/icon-512.png`, mimeType: 'image/png', sizes: ['512x512'] },
+  { src: `${origin}/icon.svg`, mimeType: 'image/svg+xml', sizes: ['any'] },
+];
+
+/**
+ * What `initialize` and `server/discover` say about the server, fixed up:
+ *
+ * - `icons` are added (#2084). ai-mcp takes a name and a version only.
+ * - `listChanged` is dropped from the capabilities (#2035): the SDK sets it
+ *   on every server with a tool or resource, and a client that sees it opens
+ *   `subscriptions/listen`.
+ */
+function withServerIdentity(
+  response: Response,
+  origin: string
+): Promise<Response> {
+  return rewriteRpcBody(response, (body) => {
+    // An error response has no capabilities; it passes through.
+    const parsed = capabilitiesSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const { capabilities, serverInfo, _meta } = parsed.data.result;
+    const icons = serverIcons(origin);
+    if (serverInfo) serverInfo.icons = icons;
+    if (_meta) _meta[SERVER_INFO_META].icons = icons;
+    for (const [name, capability] of Object.entries(capabilities)) {
+      if (typeof capability !== 'object' || capability === null) continue;
+      capabilities[name] = Object.fromEntries(
+        Object.entries(capability).filter(([key]) => key !== 'listChanged')
+      );
+    }
+    return parsed.data;
+  });
 }
 
 /** MCP Apps views (#1673): tool name → its `ui://` resource. */
@@ -207,8 +278,35 @@ const toolsListSchema = z.looseObject({
  * deprecated flat key older hosts read. ai-mcp 0.6.0 drops a tool's `_meta`,
  * so it is added to the listed tools here; clients without MCP Apps ignore it.
  */
-export async function withToolViews(response: Response): Promise<Response> {
-  // Never fails the list: an unexpected shape loses the view links, logged.
+export function withToolViews(response: Response): Promise<Response> {
+  return rewriteRpcBody(response, (body) => {
+    // Never fails the list: an unexpected shape loses the view links, logged.
+    const parsed = toolsListSchema.safeParse(body);
+    if (!parsed.success) {
+      logger.warn('MCP tools/list shape unexpected; views not linked');
+      return null;
+    }
+    for (const tool of parsed.data.result.tools) {
+      const resourceUri = TOOL_VIEWS[tool.name];
+      if (!resourceUri) continue;
+      tool._meta = {
+        ...tool._meta,
+        ui: { resourceUri },
+        'ui/resourceUri': resourceUri,
+      };
+    }
+    return parsed.data;
+  });
+}
+
+/**
+ * Replaces a JSON-RPC response body with what `edit` returns; `null` (or a
+ * body that is not JSON) leaves the response as it is.
+ */
+async function rewriteRpcBody(
+  response: Response,
+  edit: (body: unknown) => unknown
+): Promise<Response> {
   // The legacy transport answers as one SSE event whose data lines hold the
   // JSON; the data line is replaced and the framing kept.
   const sse =
@@ -226,32 +324,20 @@ export async function withToolViews(response: Response): Promise<Response> {
   try {
     body = JSON.parse(text);
   } catch {
-    // reported below
+    // `edit` reports a body it cannot use
   }
-  const parsed = toolsListSchema.safeParse(body);
-  if (!parsed.success) {
-    logger.warn('MCP tools/list shape unexpected; views not linked');
-    return response;
-  }
-  for (const tool of parsed.data.result.tools) {
-    const resourceUri = TOOL_VIEWS[tool.name];
-    if (!resourceUri) continue;
-    tool._meta = {
-      ...tool._meta,
-      ui: { resourceUri },
-      'ui/resourceUri': resourceUri,
-    };
-  }
-  const linked = JSON.stringify(parsed.data);
+  const edited = edit(body);
+  if (edited === null) return response;
+  const rewritten = JSON.stringify(edited);
   const headers = new Headers(response.headers);
   headers.delete('content-length');
   return new Response(
     sse
       ? lines
-          .map((line, i) => (i === dataAt ? `data: ${linked}` : line))
+          .map((line, i) => (i === dataAt ? `data: ${rewritten}` : line))
           .filter((line, i) => i === dataAt || !line.startsWith('data:'))
           .join('\n')
-      : linked,
+      : rewritten,
     { status: response.status, headers }
   );
 }

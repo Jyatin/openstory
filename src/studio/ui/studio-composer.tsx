@@ -10,6 +10,11 @@
  *   - Frames    — a start frame, plus an end frame where the model takes one
  */
 
+import { readMediaDuration } from '@/cast/element-kind';
+import {
+  isSeedanceEdit,
+  seedanceEditLengthMessage,
+} from '@/motion/seedance-edit';
 import { useAuthGate } from '@/platform/ui/auth/auth-gate-provider';
 import { ActionCost } from '@/billing/ui/action-cost';
 import { AspectRatioIcon } from '@/ui/icons/aspect-ratio-icon';
@@ -64,10 +69,10 @@ import {
   useDraftStudioPrompt,
   useStudioPendingCreates,
   studioUploadKeys,
+  useUploadStudioMedia,
 } from './use-studio-assets';
 import { useQueryClient } from '@tanstack/react-query';
-import { useUploadTalentUserMedia } from '@/cast/ui/use-talent';
-import { PortraitAttestationFields } from '@/cast/ui/talent-library/portrait-attestation-fields';
+import { PortraitAttestationFields } from '@/cast/ui/portrait-attestation-fields';
 import { PORTRAIT_RIGHTS_V1 } from '@/platform/compliance/attestations';
 import {
   needsLikenessCheck,
@@ -76,14 +81,13 @@ import {
 import { useAttestUploads, useUploadRights } from '@/cast/ui/use-upload-rights';
 import { openAddCreditsDialog } from '@/billing/ui/use-add-credits-dialog';
 import { isInsufficientCreditsError } from '@/platform/errors';
-import { studioReferenceImages } from '@/studio/reference-rights';
+import { studioLikenessMedia } from '@/studio/reference-rights';
 import {
   capReferenceImages,
   DEFAULT_IMAGE_MODEL,
-  DEFAULT_VIDEO_MODEL,
+  defaultVideoModelFor,
   getCompatibleModel,
   IMAGE_TO_VIDEO_MODELS,
-  isOfferedVideoModel,
   supportsDraftMode,
   supportsReferenceImages,
   type ImageToVideoModel,
@@ -193,7 +197,7 @@ function referenceMentionItem(
   kind: StudioReferenceToken = 'Image'
 ): MentionItem {
   const slot = `${kind}${index + 1}`;
-  // A named reference (talent, location, element) keeps its name in the
+  // A named reference (character, location, element) keeps its name in the
   // prompt (#1748); everything else is spelled by its slot.
   const tag = reference.alias ?? slot;
   return {
@@ -354,7 +358,7 @@ export function StudioComposer({
   const create = useCreateStudioAssets();
   const draft = useDraftStudioPrompt();
   const pendingCreates = useStudioPendingCreates(activity);
-  const upload = useUploadTalentUserMedia();
+  const upload = useUploadStudioMedia();
   const attest = useAttestUploads();
   const queryClient = useQueryClient();
   const library = useStudioLibrary();
@@ -367,9 +371,7 @@ export function StudioComposer({
   // the platform default otherwise. The via query is warmed by the `_app`
   // loader, so a signed-in user gets the right answer on first paint.
   const [videoModel, setVideoModel] = useState<ImageToVideoModel>(() =>
-    isOfferedVideoModel('seedance_v2_5', vias)
-      ? 'seedance_v2_5'
-      : DEFAULT_VIDEO_MODEL
+    defaultVideoModelFor(vias)
   );
   const [aspectRatio, setAspectRatio] =
     useState<AspectRatio>(DEFAULT_ASPECT_RATIO);
@@ -552,6 +554,20 @@ export function StudioComposer({
     : mode === 'reference' && references.length + videoRefs.length === 0
       ? 'text'
       : mode;
+  // Length follows the clip, so the picker shows Auto and the estimate
+  // prices the model's longest clip (#2036).
+  const followsReferenceVideo = isSeedanceEdit({
+    model: compatibleVideoModel,
+    onArk: vias.byteplus === true,
+    prompt,
+    hasInputVideo:
+      effectiveMode === 'edit' ||
+      (effectiveMode === 'reference' && videoRefs.length > 0),
+    explicitEdit: effectiveMode === 'edit',
+  });
+  const pricedDuration: StudioDuration = followsReferenceVideo
+    ? 'auto'
+    : snappedDuration;
 
   const estimate = useMemo(() => {
     if (!pricing) return pricingPending ? undefined : null;
@@ -565,7 +581,7 @@ export function StudioComposer({
     }
     const motion = estimateStudioVideoCost(
       compatibleVideoModel,
-      studioBillableSeconds(snappedDuration, compatibleVideoModel),
+      studioBillableSeconds(pricedDuration, compatibleVideoModel),
       {
         pricing,
         mode: effectiveMode,
@@ -585,7 +601,7 @@ export function StudioComposer({
     pricingPending,
     references.length,
     resolution,
-    snappedDuration,
+    pricedDuration,
   ]);
 
   const trimmed = prompt.trim();
@@ -618,7 +634,7 @@ export function StudioComposer({
         videoModel: compatibleVideoModel,
         aspectRatio,
         resolution,
-        duration: snappedDuration,
+        duration: pricedDuration,
         count,
         generateAudio: audioCapable ? generateAudio : undefined,
         draft: draftCapable ? draftMode : undefined,
@@ -647,11 +663,11 @@ export function StudioComposer({
   // --- rights (#1581) ---------------------------------------------------------
   // Same rule the server gate applies: uploads and raw URLs get checked,
   // library rows do not. Logged out, nothing is asked until sign-in.
-  const tiles = [...references, startFrame, endFrame].filter(
+  const tiles = [...references, ...videoRefs, startFrame, endFrame].filter(
     (r): r is StudioReference => r !== null
   );
   const gatedUrls = [
-    ...new Set(studioReferenceImages(buildInput()).filter(needsLikenessCheck)),
+    ...new Set(studioLikenessMedia(buildInput()).filter(needsLikenessCheck)),
   ];
   const rights = useUploadRights(
     gatedUrls.map((url) => ({
@@ -709,7 +725,9 @@ export function StudioComposer({
       return url === startFrame?.url ? 'Start frame' : 'End frame';
     }
     const index = references.findIndex((r) => r.url === url);
-    return index >= 0 ? `@Image${index + 1}` : url;
+    if (index >= 0) return `@Image${index + 1}`;
+    const clip = videoRefs.findIndex((r) => r.url === url);
+    return clip >= 0 ? `@Video${clip + 1}` : url;
   };
   const badges = (urls: string[]) => urls.map(badgeFor).join(', ');
   const confirmRights = () => {
@@ -852,13 +870,31 @@ export function StudioComposer({
         continue;
       }
       taken[kind] += 1;
+      const durationSeconds =
+        kind === 'video' ? await readMediaDuration(file, 'video') : undefined;
+      if (
+        kind === 'video' &&
+        isSeedanceEdit({
+          model: compatibleVideoModel,
+          onArk: vias.byteplus === true,
+          prompt,
+          hasInputVideo: true,
+          explicitEdit: mode === 'edit',
+        })
+      ) {
+        const lengthMessage = seedanceEditLengthMessage(durationSeconds);
+        if (lengthMessage) {
+          toast.error(lengthMessage);
+          continue;
+        }
+      }
       setUploading((n) => n + 1);
       try {
-        const { url } = await upload.mutateAsync({
-          file,
-          type: kind === 'audio' ? 'recording' : kind,
-        });
-        placeReference({ url, label: file.name, kind }, target);
+        const { url } = await upload.mutateAsync({ file });
+        placeReference(
+          { url, label: file.name, kind, durationSeconds },
+          target
+        );
         void queryClient.invalidateQueries({ queryKey: studioUploadKeys.all });
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'Upload failed');
@@ -1154,6 +1190,15 @@ export function StudioComposer({
       setPromptTooLongOpen(true);
       return;
     }
+    if (followsReferenceVideo) {
+      for (const ref of videoRefs) {
+        const lengthMessage = seedanceEditLengthMessage(ref.durationSeconds);
+        if (lengthMessage) {
+          toast.error(lengthMessage);
+          return;
+        }
+      }
+    }
     if (trimmed.length === 0) {
       posthog.capture('empty_prompt_generate_clicked', {
         surface: 'studio',
@@ -1199,9 +1244,9 @@ export function StudioComposer({
       ? RESOLUTION_OPTIONS.find((r) => r.value === resolution)?.label
       : null,
     isVideo && durationCapable
-      ? snappedDuration === 'auto'
+      ? pricedDuration === 'auto'
         ? 'Auto length'
-        : `${snappedDuration}s`
+        : `${pricedDuration}s`
       : null,
     isVideo && audioCapable ? (generateAudio ? 'Audio' : 'Silent') : null,
     draftOn ? 'Draft 480p' : null,
@@ -1270,6 +1315,8 @@ export function StudioComposer({
                     key={`${reference.url}-${index}`}
                     reference={reference}
                     badge={`@Video${index + 1}`}
+                    checking={checking.has(reference.url)}
+                    realPerson={realPersonToggle(reference.url)}
                     onRemove={() => removeReference('video', index)}
                   />
                 ))}
@@ -1576,7 +1623,8 @@ export function StudioComposer({
                   <section className="flex flex-col gap-2">
                     <h3 className="text-sm font-medium">Duration</h3>
                     <Select
-                      value={String(snappedDuration)}
+                      value={String(pricedDuration)}
+                      disabled={followsReferenceVideo}
                       onValueChange={(value) => {
                         if (value === 'auto') {
                           setDuration('auto');
@@ -1615,6 +1663,11 @@ export function StudioComposer({
                         )}
                       </SelectContent>
                     </Select>
+                    {followsReferenceVideo && (
+                      <p className="text-xs text-muted-foreground">
+                        An edit keeps the clip's length.
+                      </p>
+                    )}
                   </section>
                 </>
               )}

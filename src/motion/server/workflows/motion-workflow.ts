@@ -95,6 +95,19 @@ import {
 } from '@/stills/server/workflows/content-soften';
 import type { TokenUsage } from '@tanstack/ai';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
+import {
+  explainSeedanceFailure,
+  isSeedanceInternalServiceError,
+  seedanceSubmitRefusal,
+  SEEDANCE_INTERNAL_BACKOFF,
+} from '@/motion/seedance-edit';
+import { UnusableReferencesError } from '@/motion/reference-support';
+import { requireUploadRights } from '@/cast/server/upload-rights';
+import {
+  getExtensionFromUrl,
+  getMimeTypeFromExtension,
+} from '@/platform/server/storage/file';
+import { AttestationRequiredError } from '@/platform/errors';
 import { NonRetryableError } from 'cloudflare:workflows';
 import {
   persistMotionCompletion,
@@ -149,6 +162,8 @@ function classifyMotionFailure(message: string): MotionPollOutcome {
 }
 
 export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowInput> {
+  protected override readonly failureLabel = 'Motion';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<MotionWorkflowInput>>,
     step: WorkflowStep,
@@ -697,6 +712,39 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
       }
     );
 
+    // A reference clip must be cleared or signed on the likeness ledger
+    // before any model sees it (#1930). A clip attached before the check has
+    // no row, and every trigger lands here, so the run asks.
+    const clipRefs = (referenceImages ?? []).filter(
+      (ref) => ref.kind === 'video'
+    );
+    if (clipRefs.length > 0) {
+      await step.do('check-reference-clip-rights', async () => {
+        for (const ref of clipRefs) {
+          // The ledger row was written for the stored type. A still
+          // classified as an image must not ride as a clip (#2153).
+          const mimeType = getMimeTypeFromExtension(
+            getExtensionFromUrl(ref.referenceImageUrl)
+          );
+          if (!mimeType.startsWith('video/')) {
+            throw new NonRetryableError(
+              `${ref.token ?? 'A reference clip'} is not a video file`
+            );
+          }
+          try {
+            await requireUploadRights(scopedDb.liveRead, [
+              ref.referenceImageUrl,
+            ]);
+          } catch (error) {
+            if (!(error instanceof AttestationRequiredError)) throw error;
+            throw new NonRetryableError(
+              `${ref.token ?? 'A reference clip'}: ${error.message}`
+            );
+          }
+        }
+      });
+    }
+
     // Step 3: Submit + poll with a bounded same-model retry on content-flag
     // rejections (#881). Each attempt resubmits a fresh fal job; a content
     // rejection from submit OR poll re-rolls the whole cycle, while
@@ -806,7 +854,10 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
         return rescued;
       });
 
+    let seedanceInternalRetried = false;
     for (let attempt = 0; attempt <= MAX_MOTION_ATTEMPTS; attempt++) {
+      let retrySeedanceInternal = false;
+      let internalError = '';
       const isRescue = attempt === MAX_MOTION_ATTEMPTS;
       // A final from a draft sends no prompt and cannot change model
       // (#1756): nothing to soften, nothing to swap.
@@ -947,7 +998,8 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
         }
       }
       const tag =
-        attempt === 0 ? '' : isRescue ? '-rescue' : `-retry-${attempt}`;
+        (attempt === 0 ? '' : isRescue ? '-rescue' : `-retry-${attempt}`) +
+        (seedanceInternalRetried ? '-internal' : '');
 
       // Step 3-pre: register the stills BytePlus must see as `asset://`
       // (#1519). CreateAsset is paced by `BYTEPLUS_ASSET_WRITE_QPM`, so
@@ -1003,6 +1055,9 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
         }
         try {
           const job = await submitMotionJob({
+            // `??`: a run queued before #2036 has no such field, and is not
+            // an edit.
+            heldSeedanceEditSeconds: input.seedanceEditSeconds ?? null,
             imageUrl: startImageUrl ?? undefined,
             referenceOnly: input.referenceOnly,
             prompt,
@@ -1018,7 +1073,7 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
             // and by the native xAI / Ark / Google inline vias; the rest
             // substitute tokens with descriptions.
             referenceImages,
-            scopedDb: scopedDb.credentials,
+            credentials: scopedDb.credentials,
             arkAssets,
             multiPrompt,
             draft: input.draft,
@@ -1041,6 +1096,18 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
               tooLong: true as const,
               rejection: extractFalErrorMessage(error),
             };
+          }
+          // Refused before anything was sent, and would be again.
+          if (error instanceof UnusableReferencesError) {
+            throw new NonRetryableError(error.message);
+          }
+          const providerMessage = extractFalErrorMessage(error);
+          const refusal = seedanceSubmitRefusal(providerMessage, submitVia);
+          if (refusal) {
+            logger.warn(
+              `[MotionWorkflow] Ark refused the submit for ${videoVersionId}: ${providerMessage}`
+            );
+            throw new NonRetryableError(refusal);
           }
           if (
             error instanceof Error &&
@@ -1139,7 +1206,8 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
         }
 
         const poll = await step.do(
-          `motion-poll-batch-${attempt}-${batch}`,
+          // The suffix keeps the second job's polls apart from the first's.
+          `motion-poll-batch-${attempt}-${batch}${seedanceInternalRetried ? '-internal' : ''}`,
           async (): Promise<MotionPollOutcome> => {
             const deadline = Date.now() + POLL_BATCH_DURATION_MS;
 
@@ -1248,7 +1316,23 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
           break;
         }
         if (poll.kind === 'failed') {
-          throw new NonRetryableError(poll.error);
+          // One new job, not a Cloudflare retry of the failed task (#2036).
+          if (
+            !seedanceInternalRetried &&
+            !isRescue &&
+            isSeedanceInternalServiceError(poll.error, job.via)
+          ) {
+            retrySeedanceInternal = true;
+            internalError = poll.error;
+            break;
+          }
+          const explained = explainSeedanceFailure(poll.error, job.via);
+          if (explained) {
+            logger.warn(
+              `[MotionWorkflow] Ark job ${job.jobId} failed for ${videoVersionId}: ${poll.error}`
+            );
+          }
+          throw new NonRetryableError(explained ?? poll.error);
         }
         // pending → poll the next batch
       }
@@ -1270,6 +1354,20 @@ export class MotionWorkflow extends OpenStoryWorkflowEntrypoint<MotionWorkflowIn
           );
         }
         break;
+      }
+
+      if (retrySeedanceInternal) {
+        seedanceInternalRetried = true;
+        logger.warn(
+          `[MotionWorkflow] Ark job ${job.jobId} failed for ${videoVersionId}; submitting one new job: ${internalError}`
+        );
+        await step.sleep(
+          'seedance-internal-backoff',
+          SEEDANCE_INTERNAL_BACKOFF
+        );
+        // Keeps the new job off the content-flag budget.
+        attempt -= 1;
+        continue;
       }
 
       if (rejected) {

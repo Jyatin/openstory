@@ -29,6 +29,20 @@ import { z } from 'zod';
 // Descriptions are short labels on purpose: they count toward Anthropic's
 // strict-output grammar budget (#1035), so the vocabulary and format rules
 // live in the `phase/scene-bibles-chat` prompt, which is not budgeted.
+/**
+ * One outfit of a character (#2015). `lookId` is a slug the bibles call makes
+ * up (`gala_gown`); once the cast is persisted it is the `character_looks.id`.
+ */
+const characterLookEntrySchema = z.object({
+  lookId: z.string(),
+  name: z.string(),
+  clothing: z.string(),
+  // Hair, makeup, injuries, accessories; '' when none. On the default look
+  // this holds what the bible called distinguishing features (#2065).
+  styling: z.string(),
+});
+export type CharacterLookEntry = z.infer<typeof characterLookEntrySchema>;
+
 export const characterBibleEntrySchema = z.object({
   characterId: z.string(),
   name: z.string(),
@@ -36,20 +50,37 @@ export const characterBibleEntrySchema = z.object({
   gender: z.string(),
   ethnicity: z.string(),
   physicalDescription: z.string(),
+  // The outfit worn here: the default look's, or — in a shot's prompt context
+  // — the look that shot's scene picks. Always `looks[0].clothing`.
   standardClothing: z.string(),
-  distinguishingFeatures: z.string(),
+  // Every outfit (#2015), the one worn first: the default look off the
+  // bibles call, the scene's pick in a shot's prompt context. An entry stored
+  // before looks parses to none, and `withBibleLooks` gives it a default
+  // look from `standardClothing`. The bibles call sends a leaner shape of
+  // its own (`characterBibleWireEntrySchema`).
+  looks: z.preprocess(
+    (value) => value ?? [],
+    z.array(characterLookEntrySchema)
+  ),
+  // No `distinguishingFeatures` (#2065): a permanent mark is part of
+  // `physicalDescription`, the rest is the default look's `styling`. An
+  // entry written before that is folded at the seam (`foldLegacyFeatures`).
   // Performance (#1561). Guidance lives in the bible prompt (grammar budget).
   personality: z.string(),
   movement: z.string(),
   // Hearable Voice Design brief (#1629). Drafted with the rest of the bible
   // so the Voice field is filled at Script, and Generate uses it as-is.
+  // The brief's shape is in the bibles prompt; the label was trimmed to
+  // make room for looks in the grammar budget (#2015).
   voiceDescription: z.string().meta({
-    description:
-      'Hearable Voice Design brief: Native language, gender, age, Excellent quality, persona, emotion, timbre, pacing. No appearance',
+    description: 'Hearable Voice Design brief. No appearance',
   }),
   // Narrator, radio voice, a caller on the phone: a voice with no face, so no
   // sheet, no talent match, no place in an image prompt (#1585).
   voiceOnly: z.boolean().meta({ description: 'Heard but never seen' }),
+  // What the character is rendered as (#2017), filled from the sequence's
+  // style by `bibleFromWire`, never asked of the model. '' when voice-only.
+  rendering: z.string(),
   // Person vs robot/animal/object. Legal `real` is never a bible fact —
   // it is stamped on the character row from a signed talent or upload (#1682).
   isPerson: z
@@ -96,6 +127,9 @@ export const locationBibleEntrySchema = z.object({
   architecturalStyle: z.string(),
   keyFeatures: z.string(),
   ambiance: z.string(),
+  // What the place is rendered as (#1695). Never asked of the model: the
+  // wire schema omits it and the analysis fills it from the sequence style.
+  rendering: z.string(),
   consistencyTag: z.string().meta({ description: 'snake_case name slug' }),
   firstMention: firstMentionSchema,
 });
@@ -397,6 +431,13 @@ const continuitySchema = z.object({
     description:
       "Snake_case slug of each character's name as written in the script (e.g., 'GIRL ONE' → 'girl_one'). Optional descriptive context may be appended after the name slug (e.g., 'girl_one_bathroom_morning'). One entry per character appearing in the scene.",
   }),
+  // The look each character wears in this scene (#2015): character tag →
+  // `character_looks.id`. A character with no entry wears its default look,
+  // so a scene stored before looks — which has no map at all — is every
+  // character in its default. Optional, not defaulted: continuity is read
+  // as typed JSON straight off the row (three SQL mappers, no parse seam),
+  // so a `.default({})` here would never run for a stored scene.
+  characterLooks: z.record(z.string(), z.string()).optional(),
   environmentTag: z.string().meta({
     description:
       'Snake_case tag matching the location bible consistencyTag format',
@@ -534,6 +575,7 @@ export type Scene = Omit<z.infer<typeof sceneSchema>, 'originalScript'> & {
   shots?: import('./shot-list.schema').ShotSpec[];
 };
 export type CharacterBibleEntry = z.infer<typeof characterBibleEntrySchema>;
+
 // Bible entry types as consumed downstream: firstMention carries the
 // server-derived sceneId (see FirstMentionWithScene). The raw z.infer of the
 // entry schemas is the LLM wire shape only.

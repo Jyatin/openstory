@@ -29,6 +29,8 @@ import {
   type PlanUnitRef,
 } from '@/sequences/generation-plan';
 import { useGenerationPlan } from '@/sequences/ui/use-generation-plan';
+import { useGenerationSettings } from '@/sequences/ui/use-generation-settings';
+import { sheetLookName } from '@/cast/character-looks';
 import { useSequenceCharacters } from '@/cast/ui/use-sequence-characters';
 import { useSequenceLocations } from '@/cast/ui/use-sequence-locations';
 import { useHydrated } from '@/ui/use-hydrated';
@@ -343,10 +345,19 @@ const SceneListComponent: React.FC<SceneListProps> = ({
   useEffect(() => {
     setDraftStartFrames(generateStartFrames);
   }, [generateStartFrames]);
-  const voicesUnavailable = useVoiceDesignAvailable() === false;
-  // No switch (#2004): the sequence's own setting, off where this deployment
-  // cannot design a voice. A character is turned off on the character.
-  const voices = voicesUnavailable ? false : generateVoices;
+  const voiceDesignAvailable = useVoiceDesignAvailable();
+  const { settings: generationSettings, isLoaded: generationSettingsLoaded } =
+    useGenerationSettings();
+  // Voices are on wherever this deployment can design one (#2067). Nobody
+  // passes a boolean. The recorded pipeline pins generation settings off;
+  // until that pin loads, keep the row so a replay does not ask for voices.
+  const voices =
+    voiceDesignAvailable === false
+      ? false
+      : voiceDesignAvailable === true &&
+          !(generationSettingsLoaded && !generationSettings.generateVoices)
+        ? true
+        : generateVoices;
   // Draft first (#1756): one local switch for the batch footer and the
   // continue slider, seeded from the sequence and persisted by either click.
   const [draftBatch, setDraftBatch] = useState(draftMotion);
@@ -471,7 +482,10 @@ const SceneListComponent: React.FC<SceneListProps> = ({
     !hideBatchButton &&
     Boolean(onContinueGeneration) &&
     (shots?.length ?? 0) > 0 &&
-    (savedPlan?.some((u) => u.state !== 'done') ?? false);
+    // A row stored with voices off still owes them (#2067). The steps stay
+    // up so Continue goes back to Dialogue without anyone passing a flag.
+    ((savedPlan?.some((u) => u.state !== 'done') ?? false) ||
+      (voices && !generateVoices));
   const switchesMoved =
     draftStartFrames !== generateStartFrames || voices !== generateVoices;
   // While a switch's plan loads the last one stays on screen; the click
@@ -533,9 +547,11 @@ const SceneListComponent: React.FC<SceneListProps> = ({
   const nameOf = (ref: PlanUnitRef) =>
     ref.kind === 'sheet:location'
       ? planLocations?.find((l) => l.id === ref.id)?.name
-      : ref.kind === 'sheet:character' || ref.kind === 'voice'
+      : ref.kind === 'voice'
         ? planCharacters?.find((c) => c.id === ref.id)?.name
-        : undefined;
+        : ref.kind === 'sheet:character'
+          ? sheetLookName(planCharacters ?? [], ref.id)
+          : undefined;
   const continueBlocked = blockedLines(
     footerPlan,
     continueStopAtClamped,
@@ -758,7 +774,8 @@ const SceneListComponent: React.FC<SceneListProps> = ({
       />
       {/* A picker per kind of model the run will use (#2004). */}
       {offerContinue && onModelsChange && (
-        <>
+        // Two to a row in the phone drawer, where the footer crowds the list.
+        <div className="flex flex-col gap-3 max-md:grid max-md:grid-cols-2 max-md:gap-2 max-md:[&>*:last-child:nth-child(odd)]:col-span-2">
           {/* Voice design writes its description and range script with it. */}
           {continueUses('voice', 'spec', 'prompt:music') && (
             <ModelSelector
@@ -805,7 +822,7 @@ const SceneListComponent: React.FC<SceneListProps> = ({
               disabled={isGenerating}
             />
           )}
-        </>
+        </div>
       )}
       {offerContinue && (
         <>
@@ -1068,9 +1085,11 @@ const SceneListComponent: React.FC<SceneListProps> = ({
       </ScrollArea>
 
       {(showSteps || showButton || showMusicFooter || showDraftFooter) && (
-        <div className="sticky bottom-0 border-t bg-background p-4 flex flex-col gap-4">
+        <div className="sticky bottom-0 border-t bg-background p-4 flex flex-col gap-4 max-md:gap-2 max-md:p-3">
           {showSteps && (
-            <div className="flex flex-col gap-3">{stepsSection}</div>
+            <div className="flex flex-col gap-3 max-md:gap-2">
+              {stepsSection}
+            </div>
           )}
 
           {/* Generate Motion — not while a switch turned on offers earlier

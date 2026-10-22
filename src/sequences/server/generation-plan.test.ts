@@ -12,17 +12,37 @@ import { asStub } from '@/test/as-stub';
 const frame = { id: 'f1', shotId: 's1', pendingPromoteVersionId: null };
 /** The anchor's selected still; null for a frame that has none yet. */
 let selectedStill: { url: string } | null = { url: 'https://x/still.jpg' };
+/** The one scene's look picks (#2015): character tag → look id. */
+let sceneLooks: Record<string, string> | null = null;
+let galaRemoved = false;
 /** Status of the anchor's newest primary `frame_variants` row (#1942). */
 let primaryImageStatus: string | null = null;
 
 vi.doMock('@/shots/server/shot-staleness', () => ({
   UNTRACKED_STALENESS: {},
-  loadShotStalenessBatch: vi.fn(() =>
-    Promise.resolve({
+  loadShotStalenessBatch: vi.fn(
+    async (scopedDb: ScopedDb, sequence: { id: string }) => ({
       anchorsByShot: new Map([['s1', frame]]),
-      sceneContext: new Map(),
+      sceneContext: new Map(
+        sceneLooks
+          ? [
+              [
+                'sc1',
+                {
+                  scene: { continuity: { characterLooks: sceneLooks } },
+                  script: null,
+                },
+              ],
+            ]
+          : []
+      ),
       selectedByFrame: new Map(selectedStill ? [['f1', selectedStill]] : []),
-      refs: { characters: [], locations: [], elements: [], style: null },
+      refs: {
+        characters: await scopedDb.characters.list(sequence.id),
+        locations: await scopedDb.locations.list(sequence.id),
+        elements: [],
+        style: null,
+      },
     })
   ),
   loadShotStalenessReads: vi.fn(() =>
@@ -69,15 +89,55 @@ vi.doMock('@/audio/server/music-staleness', () => ({
   readMusicPromptStaleness: () =>
     Promise.resolve({ musicPrompt: 'untracked', musicTrack: 'untracked' }),
 }));
+/** Looks whose owed sheet the planning point finds finished elsewhere (#2017). */
+let reusedLookIds: string[] = [];
+const buildPlanReferences = vi.fn((args: { units: { id: string }[] }) =>
+  Promise.resolve({
+    reusedSheets: args.units
+      .filter((unit) => reusedLookIds.includes(unit.id))
+      .map((unit) => ({ payload: { lookId: unit.id } })),
+  })
+);
+vi.doMock('@/shots/server/update-stale-references', () => ({
+  buildPlanReferences,
+}));
 vi.doMock('@/cast/server/production-staleness', () => ({
-  readReferenceStaleness: () => Promise.resolve({ status: 'fresh' }),
+  locationSheetStaleness: () => Promise.resolve({ status: 'fresh' }),
+  lookSheetStaleness: () => Promise.resolve({ status: 'fresh' }),
 }));
 
 const { computeGenerationPlan } = await import('./generation-plan');
 
+/** One look of Maya, as a scoped read returns it. */
+const mayaLook = (id: string, sheetImageUrl: string | null) => ({
+  id,
+  name: id,
+  isDefault: id === 'maya',
+  // Removed, but the scene still picks it: it is still worn.
+  deletedAt: id === 'gala' && galaRemoved ? new Date() : null,
+  clothing: id,
+  styling: null,
+  sheetImageUrl,
+  sheetStatus: sheetImageUrl ? 'completed' : 'pending',
+  sheetInputHash: null,
+  selectedSheetVersionId: null,
+  pendingPromoteSheetVersionId: null,
+});
+
 function character(id: string, name: string, sheetImageUrl: string | null) {
+  // Wearing its default look, whose id is the character's (#2015).
   return {
     id,
+    lookId: id,
+    lookName: 'Default',
+    looks:
+      id === 'maya' && sceneLooks
+        ? [
+            mayaLook('maya', sheetImageUrl),
+            mayaLook('gala', null),
+            mayaLook('unworn', null),
+          ]
+        : [],
     name,
     characterId: id,
     consistencyTag: null,
@@ -100,7 +160,8 @@ describe('computeGenerationPlan', () => {
   const planStates = async (
     includeMusic: boolean,
     existingMusic = false,
-    ownProcessing = false
+    ownProcessing = false,
+    mayaSheet: string | null = 'https://x/maya.png'
   ) => {
     const plan = await computeGenerationPlan(
       asScopedDb({
@@ -125,11 +186,16 @@ describe('computeGenerationPlan', () => {
         characters: {
           list: () =>
             Promise.resolve([
-              character('maya', 'Maya', 'https://x/maya.png'),
+              character('maya', 'Maya', mayaSheet),
               character('ravi', 'Ravi', null),
             ]),
         },
-        sequenceLocations: { list: () => Promise.resolve([]) },
+        locations: {
+          list: () => Promise.resolve([]),
+          listPhotosByLocationIds: () => Promise.resolve([]),
+        },
+        characterSheetVariants: { getByIds: () => Promise.resolve([]) },
+        locationSheetVariants: { getByIds: () => Promise.resolve([]) },
         frameVariants: {
           getPrimaryByFrameIds: () =>
             Promise.resolve(
@@ -162,6 +228,47 @@ describe('computeGenerationPlan', () => {
       'prompt:music:seq-1': 'missing',
       'music:seq-1': 'missing',
     });
+  });
+
+  it('owes a sheet for each look a scene picks, and none for a look nobody wears (#2015)', async () => {
+    sceneLooks = { maya: 'gala' };
+    try {
+      const states = await planStates(true);
+      expect(states).toMatchObject({
+        // The default look always has its sheet in the plan.
+        'sheet:character:maya': 'done',
+        'sheet:character:gala': 'missing',
+        'sheet:character:ravi': 'missing',
+      });
+      expect(states).not.toHaveProperty(['sheet:character:unworn']);
+    } finally {
+      sceneLooks = null;
+    }
+  });
+
+  it('a worn look is owed in the run that makes its default sheet (#2015)', async () => {
+    sceneLooks = { maya: 'gala' };
+    try {
+      const states = await planStates(true, false, false, null);
+      // Drawn after the default lands, in the same run: both are its work.
+      expect(states).toMatchObject({
+        'sheet:character:maya': 'missing',
+        'sheet:character:gala': 'missing',
+      });
+    } finally {
+      sceneLooks = null;
+    }
+  });
+
+  it('still owes the sheet of a removed look a scene picks', async () => {
+    sceneLooks = { maya: 'gala' };
+    galaRemoved = true;
+    try {
+      expect((await planStates(true))['sheet:character:gala']).toBe('missing');
+    } finally {
+      sceneLooks = null;
+      galaRemoved = false;
+    }
   });
 
   it('an existing track and prompt are done, so continuing to Music does not regenerate them', async () => {

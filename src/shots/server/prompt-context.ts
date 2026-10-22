@@ -1,5 +1,6 @@
 import {
   charactersToBible,
+  legacyStylingByCharacter,
   sequenceElementsToBible,
   sequenceLocationsToBible,
 } from '@/cast/server/bibles-from-scoped';
@@ -7,11 +8,14 @@ import {
   DEFAULT_ANALYSIS_MODEL,
   getAnalysisModelById,
 } from '@/models/models.config';
+import { wearBibleLooks } from '@/cast/bible-looks';
+import { dressForScene } from '@/cast/character-looks';
 import type { Scene } from '@/shots/scene-analysis.schema';
 import type { ScopedDb } from '@/platform/server/db/scoped';
 import { ValidationError } from '@/platform/errors';
 import { resolveSequenceStyleConfig } from '@/look/style-config';
 import type {
+  LegacyStylingByCharacter,
   MotionPromptHashInput,
   VisualPromptHashInput,
 } from '@/shots/input-hash';
@@ -24,7 +28,15 @@ import {
  * Everything a prompt hash reads except the shot's lines, which the motion
  * hash takes separately (`dialogue`, #1784) — the caller resolves them.
  */
-export type ShotPromptContext = Omit<MotionPromptHashInput, 'dialogue'>;
+export type ShotPromptContext = Omit<MotionPromptHashInput, 'dialogue'> & {
+  /**
+   * Verify only (#2065): the stored parts a digest stamped before the
+   * default look took the bible's features hashed, for every character of
+   * the sequence, each in the look this scene dresses it in. No stamp reads
+   * it, and it is never frozen on a payload.
+   */
+  legacyStyling: LegacyStylingByCharacter;
+};
 
 export type ShotPromptContextSequence = {
   id: string;
@@ -52,7 +64,7 @@ export type ShotPromptContextSequence = {
  */
 export type ShotPromptContextRefs = {
   characters: Awaited<ReturnType<ScopedDb['characters']['list']>>;
-  locations: Awaited<ReturnType<ScopedDb['sequenceLocations']['list']>>;
+  locations: Awaited<ReturnType<ScopedDb['locations']['list']>>;
   elements: Awaited<ReturnType<ScopedDb['sequenceElements']['list']>>;
   style: Awaited<ReturnType<ScopedDb['styles']['getById']>> | null;
 };
@@ -60,7 +72,7 @@ export type ShotPromptContextRefs = {
 export async function loadShotPromptContext(args: {
   scopedDb: Pick<
     ScopedDb,
-    'characters' | 'sequenceLocations' | 'sequenceElements' | 'styles'
+    'characters' | 'locations' | 'sequenceElements' | 'styles'
   >;
   sequence: ShotPromptContextSequence;
   scene: Scene;
@@ -96,7 +108,7 @@ export async function loadShotPromptContext(args: {
     ? [refs.characters, refs.locations, refs.elements, refs.style]
     : await Promise.all([
         scopedDb.characters.list(sequence.id),
-        scopedDb.sequenceLocations.list(sequence.id),
+        scopedDb.locations.list(sequence.id),
         scopedDb.sequenceElements.list(sequence.id),
         hasSnapshot || !sequence.styleId
           ? Promise.resolve(null)
@@ -112,13 +124,17 @@ export async function loadShotPromptContext(args: {
     getAnalysisModelById(sequence.analysisModel)?.id ??
     DEFAULT_ANALYSIS_MODEL;
 
+  // Each character in the outfit this scene picks for it (#2015): the
+  // prompt, and its hash, read that look's clothing.
+  const dressed = dressForScene(characters, scene.continuity?.characterLooks);
   return {
     scene,
     styleConfig: resolveSequenceStyleConfig({
       snapshot: sequence.styleConfig,
       live: style?.config,
     }),
-    characterBible: charactersToBible(characters),
+    characterBible: charactersToBible(dressed),
+    legacyStyling: legacyStylingByCharacter(dressed),
     locationBible: sequenceLocationsToBible(locations),
     elementBible: sequenceElementsToBible(elements),
     aspectRatio: sequence.aspectRatio,
@@ -138,7 +154,7 @@ export async function loadShotPromptContext(args: {
 export async function loadNarrowShotPromptContext(args: {
   scopedDb: Pick<
     ScopedDb,
-    'characters' | 'sequenceLocations' | 'sequenceElements' | 'styles'
+    'characters' | 'locations' | 'sequenceElements' | 'styles'
   >;
   sequence: ShotPromptContextSequence;
   scene: Scene;
@@ -173,12 +189,18 @@ export function narrowShotPromptContext<T extends VisualPromptHashInput>(
   const continuity = scene.continuity;
   const resolved = resolveShotReferences(
     {
-      characters: [...ctx.characterBible],
+      // Each entry in the look this scene picks for it (#2015). A context
+      // loaded from D1 is dressed already; one frozen on a payload is not.
+      characters: wearBibleLooks(
+        ctx.characterBible,
+        continuity?.characterLooks
+      ),
       locations: [...ctx.locationBible],
       elements: [...ctx.elementBible],
     },
     {
       characterTags: continuity?.characterTags,
+      characterLooks: continuity?.characterLooks,
       environmentTag: continuity?.environmentTag,
       sceneLocation: scene.metadata?.location,
       elementTags: continuity?.elementTags,

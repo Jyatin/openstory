@@ -155,7 +155,11 @@ function makeStep(): WorkflowStep {
   return asStub<WorkflowStep>({ do: run });
 }
 
-const claimSheet = vi.fn(async (id: string) => `csv-${id}`);
+// A sheet claim is a look's (#2015); a default look's id is its character's.
+const claimSheet = vi.fn(async (lookId: string) => ({
+  versionId: `csv-${lookId}`,
+  held: true,
+}));
 const failSheetClaim = vi.fn(async () => undefined);
 const claimReference = vi.fn(async (id: string) => `lrv-${id}`);
 const claimMusic = vi.fn(async (): Promise<string | null> => 'music-claim');
@@ -168,13 +172,12 @@ const createPendingVoiceClaim = vi.fn(async (id: string) => ({
 function makeScopedDb(): WorkflowScopedDb {
   // minimal stub for the paths under test
   return asStub<WorkflowScopedDb>({
+    characterLooks: { claimSheet, failSheetClaim },
     characters: {
-      claimSheet,
-      failSheetClaim,
       createPendingVoiceClaim,
       markVoiceClaimTerminal: vi.fn(),
     },
-    sequenceLocations: { claimReference },
+    locations: { claimReference },
     sequenceVariants: { claimMusic, failMusicClaim },
     frameVariants: {
       markTerminal: vi.fn(),
@@ -215,7 +218,7 @@ function makeScopedDb(): WorkflowScopedDb {
       apiKeys: { hasUsableKey: vi.fn(async () => false) },
       billing: { hasEnoughCredits: vi.fn(async () => true) },
       characters: { listWithSheets: vi.fn(async () => []) },
-      sequenceLocations: { listWithReferences: vi.fn(async () => []) },
+      locations: { listWithReferences: vi.fn(async () => []) },
       sequenceElements: { list: vi.fn(async () => []) },
       shots: {
         getById: vi.fn(async (id: string) => ({
@@ -274,7 +277,12 @@ function target(shotId: string, referenceIds: string[]): PlanTarget {
     staleVideoVersionId: null,
     referenceIds,
     attachSceneHeader: false,
-    motionRender: { packedScene: {}, description: '', selectedModel: null },
+    motionRender: {
+      packedScene: {},
+      description: '',
+      selectedModel: null,
+      characterLooks: null,
+    },
     regenDialogue: false,
     dialogue: { presence: false, lines: [] },
     dialogueContext: [],
@@ -337,10 +345,19 @@ const payloadOf = (step: string) =>
     .childPayload;
 
 const references = {
-  characterSheets: [{ characterDbId: 'maya' }, { characterDbId: 'ravi' }],
+  characterSheets: [
+    { characterDbId: 'maya', lookId: 'maya', lookVersionId: 'lv-maya' },
+    {
+      characterDbId: 'ravi',
+      lookId: 'ravi',
+      lookVersionId: 'lv-ravi',
+      bibleVersionId: 'bible-ravi',
+    },
+  ],
+  lookSheetsAfterDefault: [],
   locationSheets: [{ locationDbId: 'hall' }],
   elementSheets: { entries: [{ elementId: 'mug' }] },
-  voices: [{ characterDbId: 'maya' }],
+  voices: [{ characterDbId: 'maya', characterBible: { name: 'Maya' } }],
   cost: { sheets: 0, voices: 0 },
 };
 
@@ -366,24 +383,193 @@ describe('UpdateStaleShotsWorkflow — a continue (#1818)', () => {
         'spawn-character-voice-maya',
       ].sort()
     );
-    expect(payloadOf('spawn-character-sheet-ravi')).toEqual({
-      characterDbId: 'ravi',
-      sheetVersionId: 'csv-ravi',
-    });
+    expect(payloadOf('spawn-character-sheet-ravi')).toEqual(
+      expect.objectContaining({
+        characterDbId: 'ravi',
+        lookId: 'ravi',
+        sheetVersionId: 'csv-ravi',
+      })
+    );
     expect(payloadOf('spawn-location-sheet-hall')).toEqual({
       locationDbId: 'hall',
       referenceVersionId: 'lrv-hall',
     });
     expect(payloadOf('spawn-character-voice-maya')).toEqual({
       characterDbId: 'maya',
+      characterBible: { name: 'Maya' },
       targetVersionId: 'husk-maya',
     });
-    expect(claimSheet).toHaveBeenCalledWith('ravi', { markGenerating: true });
+    // The claim is taken on the look the payload names, as it was frozen.
+    expect(claimSheet).toHaveBeenCalledWith(
+      'ravi',
+      {
+        lookVersionId: 'lv-ravi',
+        bibleVersionId: 'bible-ravi',
+      },
+      {
+        markGenerating: true,
+        // The start line commits with the claim, named for who ran it.
+        activity: {
+          sequenceId: expect.any(String),
+          actorId: expect.any(String),
+          summary: expect.stringContaining('Started a sheet for'),
+        },
+      }
+    );
     expect(result.failures).toEqual([]);
     // The banner moves under a continue.
     expect(emit).toHaveBeenCalledWith(
       'generation.phase:start',
       expect.objectContaining({ phase: 2 })
+    );
+  });
+
+  it('claims and spawns each look on its own, from the snapshot it was built from (#2015)', async () => {
+    await run(
+      plan({
+        // payload stubs
+        references: asStub<never>({
+          ...references,
+          characterSheets: [
+            {
+              characterDbId: 'maya',
+              lookId: 'maya',
+              lookVersionId: 'lookver-default',
+              bibleVersionId: 'bible-1',
+            },
+            {
+              characterDbId: 'maya',
+              lookId: 'gala',
+              lookVersionId: 'lookver-gala',
+              bibleVersionId: 'bible-1',
+            },
+          ],
+          locationSheets: [],
+          elementSheets: null,
+          voices: [],
+        }),
+      })
+    );
+    expect(spawned().sort()).toEqual([
+      'spawn-character-sheet-gala',
+      'spawn-character-sheet-maya',
+    ]);
+    expect(claimSheet).toHaveBeenCalledWith(
+      'gala',
+      {
+        lookVersionId: 'lookver-gala',
+        bibleVersionId: 'bible-1',
+      },
+      expect.objectContaining({ markGenerating: true })
+    );
+    expect(payloadOf('spawn-character-sheet-gala')).toMatchObject({
+      lookId: 'gala',
+      sheetVersionId: 'csv-gala',
+    });
+  });
+
+  it('draws a look after its default sheet lands, from that sheet, in the same run (#2015)', async () => {
+    const gala = {
+      characterDbId: 'maya',
+      characterName: 'Maya',
+      lookId: 'gala',
+      lookVersionId: 'lookver-gala',
+      lookStyling: null,
+      bibleVersionId: 'bible-1',
+      // what the hash reads
+      characterMetadata: {
+        name: 'Maya',
+        age: '30s',
+        gender: '',
+        ethnicity: '',
+        physicalDescription: '',
+        standardClothing: 'red gown',
+        distinguishingFeatures: '',
+        rendering: 'Photoreal live action',
+        consistencyTag: 'maya',
+      },
+      imageModel: 'nano_banana_2',
+    };
+    await run(
+      plan({
+        // payload stubs
+        references: asStub<never>({
+          ...references,
+          characterSheets: [references.characterSheets[0]],
+          lookSheetsAfterDefault: [gala],
+          locationSheets: [],
+          elementSheets: null,
+          voices: [],
+        }),
+      })
+    );
+    // The look is spawned after the default, never beside it.
+    expect(spawned()).toEqual([
+      'spawn-character-sheet-maya',
+      'spawn-character-sheet-gala',
+    ]);
+    // Its claim was taken at kickoff, before the default's child ran: a
+    // user regenerate between the waves takes a newer claim, and this run's
+    // sheet (landing under the older id) parks — the newer click wins
+    // (sheet-claims.test: "lets a newer kickoff win over a late completion").
+    const galaClaim =
+      claimSheet.mock.invocationCallOrder[
+        claimSheet.mock.calls.findIndex(([lookId]) => lookId === 'gala')
+      ];
+    const mayaSpawn =
+      spawnAndAwaitChild.mock.invocationCallOrder[
+        spawnAndAwaitChild.mock.calls.findIndex(
+          ([, args]) => args.spawnStepName === 'spawn-character-sheet-maya'
+        )
+      ];
+    expect(galaClaim).toBeLessThan(mayaSpawn ?? 0);
+    // Its face is the sheet this run landed, not a re-read.
+    expect(payloadOf('spawn-character-sheet-gala')).toMatchObject({
+      lookId: 'gala',
+      face: {
+        url: 'https://x/new-maya.png',
+        versionId: 'new-maya-version',
+      },
+      snapshotInputHash: expect.any(String),
+      sheetVersionId: 'csv-gala',
+    });
+  });
+
+  it('fails a look whose default sheet did not land, and holds what wears it', async () => {
+    failCharacter.add('maya');
+    const result = await run(
+      plan({
+        // payload stubs
+        references: asStub<never>({
+          ...references,
+          characterSheets: [references.characterSheets[0]],
+          lookSheetsAfterDefault: [
+            {
+              characterDbId: 'maya',
+              characterName: 'Maya',
+              lookId: 'gala',
+              lookVersionId: 'lookver-gala',
+            },
+          ],
+          locationSheets: [],
+          elementSheets: null,
+          voices: [],
+        }),
+      })
+    );
+    expect(spawned()).toEqual(['spawn-character-sheet-maya']);
+    expect(result.failures.map((failure) => failure.shotId)).toEqual(
+      expect.arrayContaining(['maya', 'gala'])
+    );
+    expect(
+      result.failures.find((failure) => failure.shotId === 'gala')?.error
+    ).toContain('default look sheet did not land in this run');
+    // The claim taken at kickoff is cleared, by its own id: nothing is left
+    // holding the look.
+    expect(failSheetClaim).toHaveBeenCalledWith(
+      'gala',
+      'csv-gala',
+      expect.stringContaining('did not land')
     );
   });
 
@@ -433,6 +619,7 @@ const clipTarget = (id: string): PlanTarget => ({
     sceneId: 'scene-1',
     renderSegmentId: 'segment-1',
     packedScene: { location: 'Frozen room' },
+    characterLooks: null,
     description: '',
     selectedModel: 'kling_v3_pro',
   },
@@ -483,6 +670,7 @@ describe('executor packed clips', () => {
           sceneId: 'scene-1',
           renderSegmentId: 'segment-1',
           referenceOnly: true,
+          seedanceEditSeconds: null,
           packedScene: header,
           attachSceneHeader: true,
           duration: 2,
@@ -936,7 +1124,10 @@ it('overlays first generated sheets onto the pending bible rows before a fresh s
     plan({
       // minimal child payloads
       references: asStub<never>({
-        characterSheets: [{ characterDbId: 'maya' }],
+        characterSheets: [
+          { characterDbId: 'maya', lookId: 'maya', lookVersionId: 'lv-maya' },
+        ],
+        lookSheetsAfterDefault: [],
         locationSheets: [{ locationDbId: 'hall' }],
         elementSheets: null,
         voices: [],
@@ -945,7 +1136,13 @@ it('overlays first generated sheets onto the pending bible rows before a fresh s
       // pending row identity and media are the exercised fields
       renderRefs: asStub<never>({
         characters: [
-          { id: 'maya', sheetImageUrl: null, selectedSheetVersionId: null },
+          {
+            id: 'maya',
+            lookId: 'maya',
+            looks: [],
+            sheetImageUrl: null,
+            selectedSheetVersionId: null,
+          },
         ],
         locations: [
           {

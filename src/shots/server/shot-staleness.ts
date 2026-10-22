@@ -24,7 +24,18 @@ import {
 } from '@/shots/shot-spec-currency';
 import { resolveShotReferences } from '@/shots/scene-matching';
 import {
+  effectiveStyling,
+  pickedLook,
+  wearsDefaultLook,
+} from '@/cast/character-looks';
+import {
+  characterToBible,
+  legacyStylingParts,
+  locationToBible,
+} from '@/cast/server/bibles-from-scoped';
+import {
   loadNarrowShotPromptContext,
+  type ShotPromptContext,
   type ShotPromptContextRefs,
   type ShotPromptContextSequence,
 } from './prompt-context';
@@ -33,6 +44,7 @@ import type { AspectRatio } from '@/models/aspect-ratios';
 import type {
   CharacterBible,
   CharacterBibleVersion,
+  CharacterLookVersion,
   DbSceneId,
   SceneNarrative,
   SceneScriptVersion,
@@ -176,7 +188,7 @@ export async function loadShotStalenessBatch(
       scopedDb.frames.listAnchorsBySequence(sequence.id),
       loadSceneContextBySequence(scopedDb, sequence.id),
       scopedDb.characters.list(sequence.id),
-      scopedDb.sequenceLocations.list(sequence.id),
+      scopedDb.locations.list(sequence.id),
       scopedDb.sequenceElements.list(sequence.id),
       sequence.styleId
         ? scopedDb.styles.getById(sequence.styleId)
@@ -226,6 +238,8 @@ export type ShotStalenessReads = {
  */
 type InputHistory = {
   characters: ReadonlyMap<string, readonly CharacterBibleVersion[]>;
+  /** Look definitions by look id (#2015). */
+  looks: ReadonlyMap<string, readonly CharacterLookVersion[]>;
   locations: ReadonlyMap<string, readonly LocationBibleVersion[]>;
   scenes: ReadonlyMap<string, readonly SceneScriptVersion[]>;
   style: readonly SequenceStyleVersion[];
@@ -235,10 +249,8 @@ type InputHistory = {
 
 type InputHistoryDb = {
   characters: Pick<ScopedDb['characters'], 'listBibleVersionsBySequence'>;
-  sequenceLocations: Pick<
-    ScopedDb['sequenceLocations'],
-    'listBibleVersionsBySequence'
-  >;
+  characterLooks: Pick<ScopedDb['characterLooks'], 'listVersionsBySequence'>;
+  locations: Pick<ScopedDb['locations'], 'listBibleVersionsBySequence'>;
   sceneScriptVersions: Pick<ScopedDb['sceneScriptVersions'], 'listBySequence'>;
   sequences: Pick<ScopedDb['sequences'], 'listStyleVersions'>;
   shotDialogue: Pick<ScopedDb['shotDialogue'], 'getSelectedBySequence'>;
@@ -258,15 +270,18 @@ async function loadInputHistory(
   scopedDb: InputHistoryDb,
   sequenceId: string
 ): Promise<InputHistory> {
-  const [characters, locations, scenes, style, dialogue] = await Promise.all([
-    scopedDb.characters.listBibleVersionsBySequence(sequenceId),
-    scopedDb.sequenceLocations.listBibleVersionsBySequence(sequenceId),
-    scopedDb.sceneScriptVersions.listBySequence(sequenceId),
-    scopedDb.sequences.listStyleVersions(sequenceId),
-    scopedDb.shotDialogue.getSelectedBySequence(sequenceId),
-  ]);
+  const [characters, looks, locations, scenes, style, dialogue] =
+    await Promise.all([
+      scopedDb.characters.listBibleVersionsBySequence(sequenceId),
+      scopedDb.characterLooks.listVersionsBySequence(sequenceId),
+      scopedDb.locations.listBibleVersionsBySequence(sequenceId),
+      scopedDb.sceneScriptVersions.listBySequence(sequenceId),
+      scopedDb.sequences.listStyleVersions(sequenceId),
+      scopedDb.shotDialogue.getSelectedBySequence(sequenceId),
+    ]);
   return {
     characters: groupBy(characters, (v) => v.characterId),
+    looks: groupBy(looks, (v) => v.lookId),
     locations: groupBy(locations, (v) => v.locationId),
     scenes: groupBy(
       scenes.map((row) => row.version),
@@ -513,7 +528,7 @@ export async function computeShotStaleness(args: {
           ? [refs.characters, refs.locations, refs.elements]
           : await Promise.all([
               scopedDb.characters.list(sequence.id),
-              scopedDb.sequenceLocations.list(sequence.id),
+              scopedDb.locations.list(sequence.id),
               scopedDb.sequenceElements.list(sequence.id),
             ]);
 
@@ -575,6 +590,76 @@ export async function computeShotStaleness(args: {
         : await scopedDb.characters.listBibleVersionsBySequence(sequence.id),
       at
     );
+  // A digest stamped before #2012 hashed the whole scene roster. Each
+  // character and location this prompt does not name goes back to its bible
+  // as it stood at the stamp, so only an edit to what the shot shows can
+  // stale it. Elements keep no history, so an off-shot one still can.
+  const legacyRoster = async (
+    loaded: { shot: ShotPromptContext; sceneRoster: ShotPromptContext },
+    at: Date
+  ): Promise<ShotPromptContext> => {
+    const shownCharacters = new Set(
+      loaded.shot.characterBible.map((c) => c.characterId)
+    );
+    const shownLocations = new Set(
+      loaded.shot.locationBible.map((l) => l.locationId)
+    );
+    const [characters, locations, history] = await Promise.all([
+      refs?.characters ?? scopedDb.characters.list(sequence.id),
+      refs?.locations ?? scopedDb.locations.list(sequence.id),
+      reads ? reads.inputHistory() : loadInputHistory(scopedDb, sequence.id),
+    ]);
+    // What a legacy digest hashed for each rebuilt entry (#2065): the
+    // look's own styling and the bible's features, both as they stood then.
+    const legacyStyling = { ...loaded.sceneRoster.legacyStyling };
+    return {
+      ...loaded.sceneRoster,
+      legacyStyling,
+      characterBible: loaded.sceneRoster.characterBible.map((entry) => {
+        const row = shownCharacters.has(entry.characterId)
+          ? undefined
+          : characters.find((r) => r.characterId === entry.characterId);
+        const then =
+          row && versionAt(history.characters.get(row.id), at.getTime());
+        // Clothing is the look's (#2015): the default look as it stood then,
+        // which is what a digest from before looks hashed.
+        const defaultLookId =
+          row && (row.looks.find((l) => l.isDefault)?.id ?? row.lookId);
+        const lookThen =
+          defaultLookId &&
+          versionAt(history.looks.get(defaultLookId), at.getTime());
+        if (!row || !then) return entry;
+        const features = then.legacyDistinguishingFeatures;
+        legacyStyling[entry.characterId] = {
+          distinguishingFeatures: features,
+          styling: lookThen
+            ? lookThen.styling
+            : legacyStylingParts(row).styling,
+        };
+        return characterToBible({
+          ...row,
+          ...then,
+          characterId: row.characterId,
+          ...(lookThen
+            ? {
+                standardClothing: lookThen.clothing,
+                styling: effectiveStyling(lookThen.styling, features),
+              }
+            : {}),
+        });
+      }),
+      locationBible: loaded.sceneRoster.locationBible.map((entry) => {
+        const row = shownLocations.has(entry.locationId)
+          ? undefined
+          : locations.find((r) => r.locationId === entry.locationId);
+        const then =
+          row && versionAt(history.locations.get(row.id), at.getTime());
+        return row && then
+          ? locationToBible({ ...row, ...then, locationId: row.locationId })
+          : entry;
+      }),
+    };
+  };
   let selectedMotion: {
     inputHash: string | null;
     createdAt: Date;
@@ -629,13 +714,19 @@ export async function computeShotStaleness(args: {
             voiceOnlyMoved: await voiceOnlyMoved(
               reference?.createdAt ?? new Date(0)
             ),
+            legacyStyling: input.legacyStyling,
             acceptLegacy,
           });
         visualPrompt =
           referenceHash === liveHash ||
           (await matches(ctx)) ||
           // Stamped on the scene roster, before #2012.
-          (acceptLegacy && (await matches({ ...loaded.sceneRoster, spec })))
+          (acceptLegacy &&
+            reference &&
+            (await matches({
+              ...(await legacyRoster(loaded, reference.createdAt)),
+              spec,
+            })))
             ? 'fresh'
             : 'stale';
       }
@@ -713,6 +804,7 @@ export async function computeShotStaleness(args: {
             voiceOnlyMoved: await voiceOnlyMoved(
               reference?.createdAt ?? new Date(0)
             ),
+            legacyStyling: input.legacyStyling,
             acceptLegacy,
           });
         motionPrompt =
@@ -720,7 +812,11 @@ export async function computeShotStaleness(args: {
           (await matches(ctx)) ||
           // Stamped on the scene roster, before #2012.
           (acceptLegacy &&
-            (await matches({ ...loaded.sceneRoster, ...channels })))
+            reference &&
+            (await matches({
+              ...(await legacyRoster(loaded, reference.createdAt)),
+              ...channels,
+            })))
             ? 'fresh'
             : 'stale';
       }
@@ -833,7 +929,7 @@ export async function computeShotStaleness(args: {
     try {
       const resolvedRefs: ShotStalenessRefs = refs ?? {
         characters: await scopedDb.characters.list(sequence.id),
-        locations: await scopedDb.sequenceLocations.list(sequence.id),
+        locations: await scopedDb.locations.list(sequence.id),
         elements: await scopedDb.sequenceElements.list(sequence.id),
         style: sequence.styleId
           ? await scopedDb.styles.getById(sequence.styleId)
@@ -885,14 +981,40 @@ const CHARACTER_LABELS: Record<keyof CharacterBible, string> = {
   gender: 'gender',
   ethnicity: 'ethnicity',
   physicalDescription: 'description',
-  standardClothing: 'clothing',
-  distinguishingFeatures: 'features',
+  rendering: 'rendering',
   personality: 'personality',
   movement: 'movement',
   voiceOnly: 'voice only',
   isPerson: 'person',
   consistencyTag: 'tag',
 };
+
+/**
+ * The look fields a cause names (#2015). The name is a label: renaming a
+ * look redraws nothing.
+ */
+const LOOK_LABELS = { clothing: 'clothing', styling: 'styling' } as const;
+
+/**
+ * What moved in a look since the version live then. Styling is compared as
+ * the look read resolves it (`effectiveStyling`, #2065): `thenFeatures` is
+ * the legacy features text of the bible version pinned then, for the default
+ * look, and null for any other. So text that only changed where it is stored
+ * is not a cause.
+ */
+const lookMoved = (
+  then: CharacterLookVersion,
+  thenFeatures: string | null,
+  now: { standardClothing: string | null; styling: string | null }
+): string[] => [
+  ...((then.clothing ?? null) === (now.standardClothing ?? null)
+    ? []
+    : [LOOK_LABELS.clothing]),
+  ...((effectiveStyling(then.styling, thenFeatures) ?? null) ===
+  (now.styling ?? null)
+    ? []
+    : [LOOK_LABELS.styling]),
+];
 
 const LOCATION_LABELS: Record<keyof LocationBible, string> = {
   name: 'name',
@@ -901,6 +1023,7 @@ const LOCATION_LABELS: Record<keyof LocationBible, string> = {
   architecturalStyle: 'architecture',
   keyFeatures: 'features',
   ambiance: 'ambiance',
+  rendering: 'rendering',
   consistencyTag: 'tag',
 };
 
@@ -915,11 +1038,20 @@ function bibleMoved<V extends { createdAt: Date }>(
   at: number,
   diff: (then: V) => string[]
 ): string[] | null {
+  const then = versionAt(history, at);
+  return then ? diff(then) : null;
+}
+
+/** The version live at `at`: the newest created at or before it. */
+function versionAt<V extends { createdAt: Date }>(
+  history: readonly V[] | undefined,
+  at: number
+): V | undefined {
   let then: V | undefined;
   for (const v of history ?? []) {
     if (v.createdAt.getTime() <= at) then = v;
   }
-  return then ? diff(then) : null;
+  return then;
 }
 
 /** Plain words for the style knobs a cause names (the hash body's keys). */
@@ -947,10 +1079,7 @@ function styleMoved(
   live: unknown,
   at: number
 ): string[] | null {
-  let then: SequenceStyleVersion | undefined;
-  for (const v of history) {
-    if (v.createdAt.getTime() <= at) then = v;
-  }
+  const then = versionAt(history, at);
   if (!then || live == null) return null;
   try {
     const before = styleConfigHashBody(parseStyleConfig(then.config)) ?? {};
@@ -1002,10 +1131,7 @@ function sceneCauses(
   live: SceneContext,
   at: number
 ): string[] {
-  let then: SceneScriptVersion | undefined;
-  for (const v of history ?? []) {
-    if (v.createdAt.getTime() <= at) then = v;
-  }
+  const then = versionAt(history, at);
   if (!then) {
     if (after(live.scriptCreatedAt, at)) return ['Script'];
     return after(live.scene.updatedAt, at) ? ['Scene details'] : [];
@@ -1091,19 +1217,25 @@ async function findStalenessCauses(args: {
   const causes: string[] = [];
 
   let ctx: SceneContext | null | undefined;
+  let sceneThen: SceneScriptVersion | undefined;
   if (shot.sceneId) {
     const sceneId = dbSceneId(shot.sceneId);
     ctx = sceneContext
       ? sceneContext.get(sceneId)
       : await loadSceneContext(scopedDb, sceneId);
     if (ctx) {
-      causes.push(...sceneCauses(inputHistory.scenes.get(sceneId), ctx, at));
+      const history = inputHistory.scenes.get(sceneId);
+      causes.push(...sceneCauses(history, ctx, at));
+      sceneThen = versionAt(history, at);
     }
   }
-  // Only what this shot's prompts reference (#2012): the union of the two
-  // channels, the same resolution each prompt hash and the clip compare use.
+  // Only what this shot's stale prompts reference (#2012): the union of the
+  // stale channels, the same resolution each prompt hash and the clip compare
+  // use. A channel with nothing stale names nothing — an unwritten visual
+  // prompt (a reference-only shot) would otherwise name the scene's cast.
   const sceneRefs = {
     characterTags: ctx?.scene.continuity?.characterTags,
+    characterLooks: ctx?.scene.continuity?.characterLooks,
     environmentTag: ctx?.scene.continuity?.environmentTag,
     sceneLocation: ctx?.scene.location,
     elementTags: ctx?.scene.continuity?.elementTags,
@@ -1114,16 +1246,28 @@ async function findStalenessCauses(args: {
     locations: [...refs.locations],
     elements: [...refs.elements],
   };
-  const visual = resolveShotReferences(all, sceneRefs, {
-    channel: 'visual',
-    prompt: args.visualPrompt,
-  });
-  const motion = resolveShotReferences(all, sceneRefs, {
-    channel: 'motion',
-    prompt: args.motionPrompt,
-    referenceOnly: args.referenceOnly,
-  });
-  const characters = [...new Set([...visual.characters, ...motion.characters])];
+  const none = { characters: [], locations: [], elements: [] };
+  const visual =
+    generatedAt.thumbnail || generatedAt.visualPrompt
+      ? resolveShotReferences(all, sceneRefs, {
+          channel: 'visual',
+          prompt: args.visualPrompt,
+        })
+      : none;
+  const motion = generatedAt.motionPrompt
+    ? resolveShotReferences(all, sceneRefs, {
+        channel: 'motion',
+        prompt: args.motionPrompt,
+        referenceOnly: args.referenceOnly,
+      })
+    : none;
+  // By id: each resolve dresses the cast for the scene (#2015), so the same
+  // character is a different object in the two channels.
+  const characters = [
+    ...new Map(
+      [...visual.characters, ...motion.characters].map((c) => [c.id, c])
+    ).values(),
+  ];
   const locations = [...new Set([...visual.locations, ...motion.locations])];
   const elements = [...new Set([...visual.elements, ...motion.elements])];
 
@@ -1141,7 +1285,7 @@ async function findStalenessCauses(args: {
   // A snapshot with history names the knobs that moved (#1600) in place of
   // the bare "Style" a switch event would give.
   const styleKnobs = styleMoved(inputHistory.style, sequence.styleConfig, at);
-  // Older events also list model switches, which never stale (#1785).
+  // Events also list model switches, which never stale (#1785).
   for (const f of fields) {
     if (f === 'styleId' && styleKnobs !== null) continue;
     const label = SETTINGS_CHANGED_LABELS[f];
@@ -1155,13 +1299,37 @@ async function findStalenessCauses(args: {
     if (!fields.has('styleId')) causes.push('Style');
   }
 
+  // Each character is dressed for this shot's scene (#2015): `c` carries the
+  // clothing and sheet of the look the scene picks, and the cause names it.
   for (const c of characters) {
-    const moved = bibleMoved(inputHistory.characters.get(c.id), at, (then) =>
-      characterBibleChanged(then, c).map((k) => CHARACTER_LABELS[k])
-    );
+    const bibleThen = versionAt(inputHistory.characters.get(c.id), at);
+    const bible = bibleThen
+      ? characterBibleChanged(bibleThen, c).map((k) => CHARACTER_LABELS[k])
+      : null;
+    // The default look's styling then also held the bible's legacy
+    // features (#2065); no other look's did.
+    const featuresThen = wearsDefaultLook(c)
+      ? (bibleThen?.legacyDistinguishingFeatures ?? null)
+      : null;
+    // A look added after the artifact has no version that old; the scene
+    // switching to it is the cause.
+    const look =
+      bibleMoved(inputHistory.looks.get(c.lookId), at, (then) =>
+        lookMoved(then, featuresThen, c)
+      ) ?? [];
+    // The scene dressed this character in another look back then.
+    const wornThen =
+      sceneThen &&
+      (pickedLook(c, sceneThen.continuity?.characterLooks)?.id ??
+        c.looks.find((l) => l.isDefault)?.id ??
+        c.lookId);
+    const switched = wornThen && wornThen !== c.lookId ? ['look'] : [];
     const sheet = after(c.sheetGeneratedAt, at) ? ['sheet'] : [];
-    const cause = namedCause(`Character "${c.name}"`, moved, sheet, () =>
-      after(c.updatedAt, at)
+    const cause = namedCause(
+      `Character "${c.name}"${wearsDefaultLook(c) ? '' : ` (${c.lookName})`}`,
+      bible === null ? null : [...bible, ...look],
+      [...switched, ...sheet],
+      () => after(c.updatedAt, at)
     );
     if (cause) causes.push(cause);
   }

@@ -10,7 +10,15 @@
  * together or not at all.
  */
 
-import { and, eq, isNotNull, isNull, notExists, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notExists,
+  sql,
+} from 'drizzle-orm';
 import type { SQL, SQLWrapper } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/sqlite-core';
 import type {
@@ -20,52 +28,42 @@ import type {
   SQLiteUpdateSetSource,
 } from 'drizzle-orm/sqlite-core';
 import type { Database } from '@/platform/server/db/client';
+import { generateId } from '@/platform/id';
 import {
+  buildEventInsertIfPresent,
+  eventNotLogged,
+} from '@/sequences/server/db/sequence-events';
+import type { SequenceEventTargetType } from '@/platform/server/db/schema';
+import {
+  characterLooks,
   characterSheetVariants,
   characters,
   locationSheetVariants,
-  sequenceLocations,
-  talent,
+  locations,
 } from '@/platform/server/db/schema';
 import type {
   CharacterSheetInputHash,
   LocationSheetInputHash,
 } from '@/shots/input-hash';
 
-/** Clear every character sheet claim matching `where`. */
+/**
+ * Clear the sheet claim of every look (#2015) of the characters matching
+ * `where`, a condition on `characters`: the bible and the style feed all
+ * of a character's sheets.
+ */
 export const demoteCharacterSheetClaims = (db: Database, where: SQL) =>
   db
-    .update(characters)
+    .update(characterLooks)
     .set({ pendingPromoteSheetVersionId: null })
-    .where(and(where, isNotNull(characters.pendingPromoteSheetVersionId)));
-
-/** Clear every sequence-location reference claim matching `where`. */
-export const demoteLocationReferenceClaims = (db: Database, where: SQL) =>
-  db
-    .update(sequenceLocations)
-    .set({ pendingPromoteReferenceVersionId: null })
     .where(
-      and(where, isNotNull(sequenceLocations.pendingPromoteReferenceVersionId))
+      and(
+        isNotNull(characterLooks.pendingPromoteSheetVersionId),
+        inArray(
+          characterLooks.characterId,
+          db.select({ id: characters.id }).from(characters).where(where)
+        )
+      )
     );
-
-/** Clear a library talent's sheet claim. */
-export const demoteTalentSheetClaim = (db: Database, talentId: string) =>
-  db
-    .update(talent)
-    .set({ pendingPromoteSheetId: null })
-    .where(
-      and(eq(talent.id, talentId), isNotNull(talent.pendingPromoteSheetId))
-    );
-
-/** Every sheet claim in a sequence: its style is an input to all of them. */
-export const demoteSequenceSheetClaims = (db: Database, sequenceId: string) =>
-  [
-    demoteCharacterSheetClaims(db, eq(characters.sequenceId, sequenceId)),
-    demoteLocationReferenceClaims(
-      db,
-      eq(sequenceLocations.sequenceId, sequenceId)
-    ),
-  ] as const;
 
 export type SheetLanding = 'promoted' | 'parked';
 
@@ -84,6 +82,14 @@ type LandArgs<H> = {
   bibleVersionId: string | null;
   model: string;
   workflowRunId: string;
+  /** The history line. Null for a run started from no sequence. */
+  activity: {
+    sequenceId: string;
+    actorId: string | null;
+    targetType: Extract<SequenceEventTargetType, 'character' | 'location'>;
+    targetId: string;
+    summary: string;
+  } | null;
 };
 
 /** What {@link landSheetVersion} needs from one sheet entity's tables. */
@@ -122,44 +128,80 @@ type SheetLandSpec<P extends SQLiteTable, V extends SQLiteTable> = {
 async function landSheetVersion<P extends SQLiteTable, V extends SQLiteTable>(
   db: Database,
   spec: SheetLandSpec<P, V>,
-  { versionId, claimed }: Pick<LandArgs<unknown>, 'versionId' | 'claimed'>
+  args: Pick<LandArgs<unknown>, 'versionId' | 'claimed' | 'activity'>
 ): Promise<SheetLanding> {
-  const [, , , , [row]] = await db.batch([
-    db.insert(spec.variants).values(spec.version).onConflictDoNothing(),
-    db
-      .update(spec.parent)
-      .set(spec.promote)
-      .where(
-        and(
-          spec.isParent,
-          claimed ? eq(spec.claim, versionId) : isNull(spec.claim)
-        )
-      ),
-    db
-      .update(spec.variants)
-      .set(spec.park)
-      .where(
-        and(
-          eq(spec.versionIdColumn, versionId),
-          isNull(spec.divergedAt),
-          notExists(
-            db
-              .select({ one: sql`1` })
-              .from(spec.parent)
-              .where(and(spec.isParent, eq(spec.selected, versionId)))
-          ),
-          notExists(spec.twinParked)
-        )
-      ),
-    db
-      .update(spec.parent)
-      .set(spec.settle)
-      .where(and(spec.isParent, isNull(spec.claim), spec.isGenerating)),
-    db
-      .select({ selected: spec.selected })
-      .from(spec.parent)
-      .where(spec.isParent),
-  ]);
+  const { versionId, claimed, activity } = args;
+  const insertVersion = db
+    .insert(spec.variants)
+    .values(spec.version)
+    .onConflictDoNothing();
+  const promote = db
+    .update(spec.parent)
+    .set(spec.promote)
+    .where(
+      and(
+        spec.isParent,
+        claimed ? eq(spec.claim, versionId) : isNull(spec.claim)
+      )
+    );
+  const park = db
+    .update(spec.variants)
+    .set(spec.park)
+    .where(
+      and(
+        eq(spec.versionIdColumn, versionId),
+        isNull(spec.divergedAt),
+        notExists(
+          db
+            .select({ one: sql`1` })
+            .from(spec.parent)
+            .where(and(spec.isParent, eq(spec.selected, versionId)))
+        ),
+        notExists(spec.twinParked)
+      )
+    );
+  const settle = db
+    .update(spec.parent)
+    .set(spec.settle)
+    .where(and(spec.isParent, isNull(spec.claim), spec.isGenerating));
+  const read = db
+    .select({ selected: spec.selected })
+    .from(spec.parent)
+    .where(spec.isParent);
+  const results = activity
+    ? await db.batch([
+        insertVersion,
+        promote,
+        park,
+        settle,
+        read,
+        buildEventInsertIfPresent(
+          db,
+          {
+            id: generateId(),
+            sequenceId: activity.sequenceId,
+            actorId: activity.actorId,
+            kind: 'sheet.generated',
+            targetType: activity.targetType,
+            targetId: activity.targetId,
+            summary: activity.summary,
+            data: { sheetVersionId: versionId },
+          },
+          spec.parent,
+          and(
+            spec.isParent,
+            eventNotLogged(
+              db,
+              activity.sequenceId,
+              'sheet.generated',
+              'sheetVersionId',
+              versionId
+            )
+          )
+        ),
+      ])
+    : await db.batch([insertVersion, promote, park, settle, read]);
+  const row = results[4][0];
   if (!row) throw new Error(`${spec.entity} not found`);
   return row.selected === versionId ? 'promoted' : 'parked';
 }
@@ -177,23 +219,32 @@ const versionRow = <H>(args: LandArgs<H>, now: Date) => ({
   bibleVersionId: args.bibleVersionId,
 });
 
-/** Land a character sheet run's result: {@link landSheetVersion}. */
+/**
+ * Land a look's sheet run (#2015): {@link landSheetVersion}, with the look
+ * as the parent — it holds the pointer and the claim. The caller makes sure
+ * the look row exists (`requireLook`).
+ */
 export function landCharacterSheet(
   db: Database,
-  args: LandArgs<CharacterSheetInputHash> & { characterId: string }
+  args: LandArgs<CharacterSheetInputHash> & {
+    characterId: string;
+    lookId: string;
+    /** The look version the run read; null when unknown. */
+    lookVersionId: string | null;
+  }
 ): Promise<SheetLanding> {
-  const { characterId, versionId } = args;
+  const { characterId, lookId, versionId } = args;
   const now = new Date();
   const twin = alias(characterSheetVariants, 'twin');
   return landSheetVersion(
     db,
     {
-      entity: `Character ${characterId}`,
-      parent: characters,
-      isParent: eq(characters.id, characterId),
-      selected: characters.selectedSheetVersionId,
-      claim: characters.pendingPromoteSheetVersionId,
-      isGenerating: eq(characters.sheetStatus, 'generating'),
+      entity: `Look ${lookId}`,
+      parent: characterLooks,
+      isParent: eq(characterLooks.id, lookId),
+      selected: characterLooks.selectedSheetVersionId,
+      claim: characterLooks.pendingPromoteSheetVersionId,
+      isGenerating: eq(characterLooks.sheetStatus, 'generating'),
       promote: {
         selectedSheetVersionId: versionId,
         pendingPromoteSheetVersionId: null,
@@ -203,7 +254,12 @@ export function landCharacterSheet(
       },
       settle: { sheetStatus: 'completed', sheetError: null, updatedAt: now },
       variants: characterSheetVariants,
-      version: { ...versionRow(args, now), characterId },
+      version: {
+        ...versionRow(args, now),
+        characterId,
+        lookId,
+        lookVersionId: args.lookVersionId,
+      },
       versionIdColumn: characterSheetVariants.id,
       divergedAt: characterSheetVariants.divergedAt,
       park: { divergedAt: now, updatedAt: now },
@@ -212,7 +268,7 @@ export function landCharacterSheet(
         .from(twin)
         .where(
           and(
-            eq(twin.characterId, characterId),
+            eq(twin.lookId, lookId),
             eq(twin.model, args.model),
             eq(twin.inputHash, sql`${characterSheetVariants.inputHash}`),
             isNotNull(twin.divergedAt)
@@ -223,9 +279,10 @@ export function landCharacterSheet(
   );
 }
 
-/** Land a sequence location reference run's result: {@link landSheetVersion}. */
+/** Land a location reference run's result: {@link landSheetVersion}. */
 export function landLocationReference(
   db: Database,
+  teamId: string,
   args: LandArgs<LocationSheetInputHash> & { locationId: string }
 ): Promise<SheetLanding> {
   const { locationId, versionId } = args;
@@ -234,12 +291,12 @@ export function landLocationReference(
   return landSheetVersion(
     db,
     {
-      entity: `SequenceLocation ${locationId}`,
-      parent: sequenceLocations,
-      isParent: eq(sequenceLocations.id, locationId),
-      selected: sequenceLocations.selectedReferenceVersionId,
-      claim: sequenceLocations.pendingPromoteReferenceVersionId,
-      isGenerating: eq(sequenceLocations.referenceStatus, 'generating'),
+      entity: `Location ${locationId}`,
+      parent: locations,
+      isParent: sql`${eq(locations.id, locationId)} and ${eq(locations.teamId, teamId)}`,
+      selected: locations.selectedReferenceVersionId,
+      claim: locations.pendingPromoteReferenceVersionId,
+      isGenerating: eq(locations.referenceStatus, 'generating'),
       promote: {
         selectedReferenceVersionId: versionId,
         pendingPromoteReferenceVersionId: null,
@@ -255,8 +312,7 @@ export function landLocationReference(
       variants: locationSheetVariants,
       version: {
         ...versionRow(args, now),
-        parentType: 'sequence_location',
-        parentId: locationId,
+        locationId,
       },
       versionIdColumn: locationSheetVariants.id,
       divergedAt: locationSheetVariants.divergedAt,
@@ -266,8 +322,7 @@ export function landLocationReference(
         .from(twin)
         .where(
           and(
-            eq(twin.parentType, 'sequence_location'),
-            eq(twin.parentId, locationId),
+            eq(twin.locationId, locationId),
             eq(twin.model, args.model),
             eq(twin.inputHash, sql`${locationSheetVariants.inputHash}`),
             isNotNull(twin.divergedAt)

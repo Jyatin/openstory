@@ -40,8 +40,8 @@ describe('sequence composer draft', () => {
       script: 'Shuffled brief',
       styleId: 'noir',
       sampleStyleId: 'noir',
-      selectedTalentIds: [],
       selectedLocationIds: [],
+      castCharacterIds: [],
       elementUploads: [],
     });
     expect(readSequenceDraft()).toMatchObject({
@@ -55,8 +55,8 @@ describe('sequence composer draft', () => {
       JSON.stringify({
         script: 'Typed before sampleStyleId existed',
         styleId: 'auto',
-        selectedTalentIds: [],
         selectedLocationIds: [],
+        castCharacterIds: [],
         elementUploads: [],
         savedAt: Date.now(),
       })
@@ -73,8 +73,8 @@ describe('sequence composer draft', () => {
       script: 'stale',
       styleId: 'auto',
       sampleStyleId: null,
-      selectedTalentIds: [],
       selectedLocationIds: [],
+      castCharacterIds: [],
       elementUploads: [],
     });
     vi.setSystemTime(new Date('2026-08-30T12:00:01Z'));

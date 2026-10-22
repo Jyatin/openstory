@@ -10,7 +10,7 @@ It composes with [scoped-db-context-implementation.md](./scoped-db-context-imple
 
 **1. Lost-work mid-generation.** Content-generation workflows must not read mutable DB state for anything that should be frozen at trigger time. Before the snapshot pattern, `regenerateShotsWorkflow` (`RegenerateShotsWorkflow` in `src/shots/server/workflows/regenerate-shots-workflow.ts`) could re-resolve sequence fields or sheet references mid-flight. If a user edits a character, location, or prompt while the workflow is running, generation can read a mix of pre- and post-edit inputs. The result is written as the primary artifact either way, with no signal that what landed isn't what the user had in mind when they triggered the workflow. `RegenerateShotsWorkflow` is the reference fix: it inlines per-shot snapshot DTOs and a batch `snapshotInputHash` at trigger time via `src/shots/server/workflows/regenerate-shots-snapshot.ts`.
 
-**2. Silent staleness.** After a character recast or location swap, downstream shots (and their anchor-frame stills), character sheets, location sheets, and talent sheets still display their prior outputs. Nothing in the schema records which inputs those outputs were derived from, so the UI can't distinguish "still current" from "stale but not yet regenerated" — and neither can a workflow about to apply a new result.
+**2. Silent staleness.** After a character recast or location swap, downstream shots (and their anchor-frame stills), character sheets and location sheets still display their prior outputs. Nothing in the schema records which inputs those outputs were derived from, so the UI can't distinguish "still current" from "stale but not yet regenerated" — and neither can a workflow about to apply a new result.
 
 Both failure modes collapse into one missing primitive: **every generated artifact needs to remember the inputs it was generated from**, and every workflow needs to **freeze those inputs at start time and verify them at write time**.
 
@@ -43,11 +43,9 @@ The rule is: anything that, if changed, should cause the user to see a "regenera
 - **Motion prompt** (`shot_prompt_versions.inputHash`, per version) — the same upstream context and the shot's reference-only flag, with the script's lines replaced by the shot's own (`shotDialogueResolver`). A `current` digest omits the starting-frame URL and includes the spec content on the same rule. Legacy digests still carry the still URL.
 - **Sequence music prompt** (`sequence_music_prompt_versions.inputHash`, the row `sequences.selectedMusicPromptVersionId` points at) — one summary per scene (story beat, heading, time of day, summed shot durations) + analysis model (#1783).
 - **Sequence music track** (`sequence_music_variants.inputHash`) — music prompt text, tags, the duration billed, audio model.
-- **Character sheet** (`character_sheet_variants.inputHash`, read back as `sheetInputHash`) — character bible entry, talent reference hash (if any), and when cast the talent's own description plus the default talent sheet's image and look (#1785), style config, image model.
-- **Sequence location reference** (`location_sheet_variants.inputHash`, read back as `referenceInputHash`) — every location bible field the sheet prompt reads (#1785), library reference hash (if any), style config, image model. **Library location template** (`location_library.referenceInputHash`) — description, reference media, style config, image model. Nothing verifies it; it reaches staleness only through the sequence location sheet.
-- **Talent sheet** (`talent_sheets.inputHash`) — talent description, reference media hashes, image model. Nothing verifies it; it reaches staleness only through the character sheet.
-
-Model _version strings_ are in the hashes, but verify recomputes each artifact with the model that made it (#1785), so switching a sequence's image, script or video model never stales existing work — the switch applies to the next generation, and the staleness causes never name it. An uploaded sheet, which has no model of its own, is the one artifact that follows the sequence model. See `prompt-staleness-dependency-graph.md` §3.
+- **Character sheet** (`character_sheet_variants.inputHash`, read back as `sheetInputHash`) — one per look (#2015): character bible entry, the look's clothing and (only when set) its styling — on the default look that styling includes the features text a bible version from before #2065 still holds (`effectiveStyling`), and a sheet stamped before #2065 verifies against the `pre-2065` shape built from the two stored parts — the default look's sheet version on every other look (the selected version, or that look's id when the pointer is still null — the #1419 row; only when set, in every digest shape, so a look drawn before that face existed goes stale once the default sheet is completed), `talentSheetHash` (always null, kept so stored digests still verify), style config, image model. The clothing keeps the bible's old key (`characterBible.standardClothing`), so a default look backfilled from the bible hashes to the digest its sheet was stamped with. The face rides the workflow payload as `face: { url, versionId } | null` (null exactly on the default look); the hash stores the version id. The face is the default look's selected sheet whatever its last attempt did, so a failed re-roll does not drop it.
+- **Location sheet** (`location_sheet_variants.inputHash`, read back as `referenceInputHash`): every location bible field the sheet prompt reads (#1785), `rendering` included, the uploaded reference photos as an unordered set, and the image model. No sequence style and no library hash (#1695): the location is the team's, and every sequence that uses it verifies the same digest. A digest stamped before #1695 still verifies until `LEGACY_HASH_UNTIL`; see `team-locations.md` § Migration.
+  Model _version strings_ are in the hashes, but verify recomputes each artifact with the model that made it (#1785), so switching a sequence's image, script or video model never stales existing work — the switch applies to the next generation, and the staleness causes never name it. An uploaded sheet, which has no model of its own, is the one artifact that follows the sequence model. See `prompt-staleness-dependency-graph.md` §3.
 
 ### Editor batch read (#1795)
 
@@ -63,9 +61,6 @@ One column per artifact per row. The column is nullable because pre-existing row
 | `frame_prompt_versions`          | `inputHash` (per visual prompt version) + `pendingInputHash` on a live claim                                           |
 | `shot_prompt_versions`           | `inputHash` (per motion prompt version) + `pendingInputHash` on a live claim                                           |
 | `sequence_music_prompt_versions` | `inputHash` per music prompt version (the selected one is the sequence's)                                              |
-| `location_sheets`                | `inputHash`                                                                                                            |
-| `location_library`               | `referenceInputHash`                                                                                                   |
-| `talent_sheets`                  | `inputHash`                                                                                                            |
 | `shot_variants`                  | `inputHash` (video/audio divergent alternates; image variants retired to `frame_variants`)                             |
 | `video_variants`                 | `inputHash` over the render `manifest` (see "Clip provenance")                                                         |
 | `dialogue_speeches`              | `inputHash` (the speech key); append-only, no selection of its own                                                     |
@@ -73,15 +68,16 @@ One column per artifact per row. The column is nullable because pre-existing row
 | `*_sheet_variants`               | `inputHash` per sheet version (the selected one is the character's / location's hash) + `divergedAt` on divergent rows |
 | `sequence_music_variants`        | `inputHash` per track + `divergedAt` on a primary track whose claim moved (#1115)                                      |
 
-We deliberately do **not** add a `content_hash` column on upstream entities themselves (characters, locations, talent) — the referenced-sheet's `input_hash` _is_ the content hash for downstream staleness. This avoids a second-order invalidation layer.
+We deliberately do **not** add a `content_hash` column on upstream entities themselves (characters, locations) — the referenced-sheet's `input_hash` _is_ the content hash for downstream staleness. This avoids a second-order invalidation layer.
 
 ### Bible history (#1600)
 
 A character's or sequence location's bible is append-only history:
 `character_bible_versions` / `location_bible_versions`, one row per change,
-and `selectedBibleVersionId` on the parent names the live one. Every writer
+and `selectedBibleVersionId` on the parent names the live one, read by
+every sequence that casts the character (#2017, `team-characters.md`). Every writer
 goes through one append path (`bibleWrite` / the upserts in
-`src/cast/server/db/characters.ts` and `sequence-locations.ts`): analysis
+`src/cast/server/db/characters.ts` and `locations.ts`): analysis
 and re-analysis (`source: 'analysis'`, only when a field moved), a
 person's edit through the form, API or MCP (`'edit'`, with `createdBy`), a
 recast (`'recast'`), and an upload's likeness verdict (`isPerson`, an
@@ -102,24 +98,30 @@ What this buys:
 - **A sheet records the bible it was made from.** The trigger snapshots
   `bibleVersionId` onto the payload and the land batch stamps it on the
   sheet's version row, promoted or parked.
-- **Causes name the field, and only for this shot (#2012).** `findStalenessCauses` looks up the version live
-  when the stale artifact was made (the newest created at or before it) and
-  diffs it against the live bible: `Character "Jack": clothing, sheet`. A row
-  touched without a bible change (a claim, a voice) is no longer named. An
-  artifact older than the row's history falls back to the old timestamp guess.
+- **Causes name the field, and only for this shot (#2012).** `findStalenessCauses` looks up the version
+  live when the stale artifact was made (the newest created at or before
+  it) and diffs it against the live one: `Character "Jack": clothing,
+sheet`. A row touched without a bible change (a claim, a voice) is not
+  named. An artifact older than the row's history falls back to the old
+  timestamp guess.
   Characters, locations and elements come from `resolveShotReferences`: the
-  union of what the shot's visual and motion prompts name, the same
+  union of what the shot's stale prompts name, the same
   resolution each prompt hash and the clip's `referenceKeys` compare use. A
   living-room shot does not name a bathroom edited elsewhere in the
   sequence, and a prompt that names no one does not name the scene's cast.
+  A channel with nothing stale names nothing: a reference-only shot's
+  unwritten visual prompt does not pull in the scene's cast.
   Every prompt digest is stamped and verified through the same view
   (`narrowShotPromptContext` takes a required `ShotPromptView`: the channel
   and its text). A digest stamped on the scene roster before #2012 is
   accepted at verify, when the stamp's spec is still the selected spec,
-  until `LEGACY_HASH_UNTIL`; it goes stale when any bible on that roster
-  moves, as it always did.
+  until `LEGACY_HASH_UNTIL`. Verify reads each roster character and
+  location the prompt does not name as its bible stood at the stamp (bible
+  history; a character's clothing and styling from its default look's history, #2015, joined with the features that bible version held, #2065), so the digest goes stale only when someone or somewhere the
+  shot shows moves. Elements keep no history, so an off-shot element edit
+  still stales it.
 - **The hash edge stays a hash edge.** The sheet and prompt hashes read more
-  than the bible (talent, style, model, the scene), so a pointer compare
+  than the bible (style, model, the scene), so a pointer compare
   could not replace them without moving every stored digest.
 
 ### Scene narrative (#1600)
@@ -286,10 +288,10 @@ For the workflows that do content generation, "input" is specifically:
 
 - **`regenerateShotsWorkflow`** (`RegenerateShotsWorkflowInput`, `src/shots/server/workflows/regenerate-shots-workflow.ts`) — **reference implementation.** Trigger time inlines `shotSnapshots` (per-shot prompt, reference URLs, and sheet hashes via `buildRegenerateShotSnapshot`), freezes `aspectRatio`, and sets `snapshotInputHash` from `computeRegenerateShotsBatchHash`. The workflow body reads only the inlined DTO; start-time validation runs in `step.do('validate-snapshot')`.
 - **`shotImagesWorkflow`** (`ShotImagesWorkflowInput`, `src/stills/server/workflows/shot-images-workflow.ts`) — inlines `sceneSnapshots` (per-scene upstream sheet hashes) and optional `snapshotInputHash`. Hash helpers live in `image-workflow-snapshot.ts` and `sheet-snapshots.ts`.
-- **`characterSheetWorkflow`** (`CharacterSheetWorkflowInput`) — inlines character/talent metadata and reference URLs; carries `snapshotInputHash` (stamped on the version row) and the claim `sheetVersionId`. Lands through `characterSheetVariants.promoteIfPending`; a missed claim parks the row as divergent and `reportParkedSheet` emits `stale:detected`. The character and sequence-location workflows share this landing: one batch (`landSheetVersion` in `sheet-claims.ts`) and one run helper (`landSheetRun` in `sheet-divergence.ts`, #1865). Pipeline sheets (`CharacterBibleWorkflow`) are claimed and hashed like any other since #1113 — they used to carry no hash and read "untracked".
-- **`locationSheetWorkflow`** (`LocationSheetWorkflowInput`) — the same, with `referenceVersionId` and `locationSheetVariants.promoteIfPending`; `LocationBibleWorkflow` claims and hashes its children.
-- **`libraryTalentSheetWorkflow`** (`LibraryTalentSheetWorkflowInput`) — inlines `referenceImageUrls`, `talentDescription`, `snapshotInputHash`, and the claim `sheetId` (the `talent_sheets` id it writes). Lands through `talent.landSheet`; a missed claim parks the sheet and skips the headshot.
-- **`libraryLocationSheetWorkflow`** (`LibraryLocationSheetWorkflowInput`) — carries `referenceClaimId`; publishes its preview through `locations.updateReferenceIfClaimed`, else parks it in `location_sheet_variants`.
+- **`characterSheetWorkflow`** (`CharacterSheetWorkflowInput`) — inlines character metadata and reference URLs; carries `snapshotInputHash` (stamped on the version row) and the claim `sheetVersionId`. Lands through `characterSheetVariants.promoteIfPending`; a missed claim parks the row as divergent and `reportParkedSheet` emits `stale:detected`. The character and sequence-location workflows share this landing: one batch (`landSheetVersion` in `sheet-claims.ts`) and one run helper (`landSheetRun` in `sheet-divergence.ts`, #1865). Pipeline sheets (`CharacterBibleWorkflow`) are claimed and hashed like any other since #1113 — they used to carry no hash and read "untracked".
+- **`locationSheetWorkflow`** (`LocationSheetWorkflowInput`): inlines the location bible (`locationMetadata`, `rendering` included) and the uploaded photos (`referencePhotoUrls`); carries `snapshotInputHash`, `bibleVersionId` and the claim `referenceVersionId`, and lands through `locationSheetVariants.promoteIfPending`. `sequenceId` is null for a run started from the Locations page (#1695). It carries no style and no library fields. `LocationBibleWorkflow` claims and hashes its children, and spawns none for a location the sequence only links to. A payload queued before #1695 fails at the top (`assertQueuedWithLocationRendering`).
+
+- **`storyboardWorkflow` → `analyzeScriptWorkflow` → `sceneSplitWorkflow`** carry the sequence's cast at the click (`cast: AttachedCastSnapshot[]`, #2050): each character as the sequence casts her, with `shared` (held by the library or another sequence). Analysis reads only this; a shared character's pinned bible wins over the model's entry and she is linked, never rewritten. No hash moves: the snapshot is the same projection (`characterToBible`) the prompt hashes already read.
 
 - **A continue (#1818)** is an `UpdateStaleShotsWorkflow` run whose plan the trigger builds from the generation plan's units (`computePlan({ units })`, `buildPlanReferences` for the sheet / element / voice payloads). There is no checkpoint: every input is read from D1 at the click, like any other snapshot. **Update all (#1819)** builds its plan the same way, from the generation plan filtered to `stale` (`planUpdateAll`).
 
@@ -328,7 +330,7 @@ if (landing === 'parked') {
 }
 ```
 
-Divergence is event-driven: nothing re-hashes live state at write time. Every write that changes a sheet input, or picks a sheet, clears the claim in the same batch as its own write — character bible edits (only the fields the sheet reads: `CHARACTER_SHEET_BIBLE_FIELDS` / `LOCATION_SHEET_BIBLE_FIELDS`, derived from the hash schemas in `src/shots/input-hash.ts`, #1865), a recast, a cast talent's new/changed/removed sheet or edited description, a sequence location's bible or library link, the library location's reference, and the sequence's style; for the library runs, the talent's description or a deleted reference photo, and the library location's description (a rename never diverged: neither library hash covers the name). The claim is what the run checks.
+Divergence is event-driven: nothing re-hashes live state at write time. Every write that changes a sheet input, or picks a sheet, clears the claim in the same batch as its own write — character bible edits (only the fields the sheet reads: `CHARACTER_SHEET_BIBLE_FIELDS` / `LOCATION_SHEET_BIBLE_FIELDS`, derived from the hash schemas in `src/shots/input-hash.ts`, #1865), a location's bible, and a location's reference photos added or removed (#1695); The claim is what the run checks.
 
 Per-shot **image** artifacts do not check for drift at all (#989): the workflow appends a new `frame_variants` version stamped with its snapshot's `inputHash` and promotes it through its claim (`frameVariants.selectIfPendingPromoteIs`) even if the prompt or references moved mid-flight. The still then reads stale against the live inputs. Only a newer kickoff or the user's own pick cancels the promote. `regenerate-shots-workflow` fans out to `image-workflow` children and does not perform its own divergence emit — `divergedShotIds` is always empty today.
 
@@ -342,7 +344,7 @@ A picked 3×3 tile (`kind: 'framing'`) has no snapshot of its own: it inherits t
 
 **B. Divergent alternates (sheets, music, legacy shot video/audio).** A missed sheet claim (#1113) or music claim (#1115) parks a row in a `*_variants` table with `divergedAt`, then emits `generation.stale:detected` with a required `divergedVariantId`:
 
-- **Character / location / talent sheets** → `character_sheet_variants`, `location_sheet_variants`, `talent_sheet_variants`. Character and sequence-location rows park inside their land batch (`src/cast/server/db/sheet-claims.ts`); library-location previews and talent sheets park via `sheet-divergence.ts`.
+- **Character / location sheets** → `character_sheet_variants`, `location_sheet_variants`. Rows park inside their land batch (`src/cast/server/db/sheet-claims.ts`).
 - **Sequence music** → `sequence_music_variants`: `completeMusicClaim` stamps `divergedAt` in the same batch that would have moved the pointer; `music-workflow.ts` emits. A new upload also parks the previous upload, so the banner still offers it back.
 - **Shot video / audio** (when the divergent path is used) → `shot_variants` with partial unique indexes `shot_variants_primary_key` (WHERE `divergedAt IS NULL`) and `shot_variants_divergent_key` (WHERE `divergedAt IS NOT NULL`). No production workflow emits divergent **image** rows on `shot_variants` today — images moved to model A.
 
@@ -368,7 +370,7 @@ A picked 3×3 tile (`kind: 'framing'`) has no snapshot of its own: it inherits t
     snapshotInputHash: z.string(),
     divergedVariantId: z.string(),
   }),
-  // ...location, library-location, talent, and sequence (music) branches
+  // ...location and sequence (music) branches
 ]),
 ```
 
@@ -393,21 +395,21 @@ Each domain spells the three methods its own way:
 | Voices                   | `characters.createPendingVoiceClaim`        | `characters.markVoiceClaimTerminal`             | `characters.promoteVoiceClaimIfPending`    |
 | Image and motion prompts | `*PromptVersions.createPending`             | `*PromptVersions.markTerminal`                  | `*PromptVersions.completePendingAiVersion` |
 | Dialogue                 | `shotDialogue.claimSpeech`                  | `shotDialogue.failClaims`                       | `shotDialogue.appendSpeech`                |
-| Character sheets         | `characters.claimSheet`                     | `characters.failSheetClaim`                     | `characterSheetVariants.promoteIfPending`  |
-| Location sheets          | `sequenceLocations.claimReference`          | `sequenceLocations.failReferenceClaim`          | `locationSheetVariants.promoteIfPending`   |
-| Library location refs    | `locations.claimReference`                  | `locations.clearReferenceClaimIf`               | `locations.updateReferenceIfClaimed`       |
-| Library talent sheets    | `talent.claimSheet`                         | `talent.clearSheetClaimIf`                      | `talent.landSheet`                         |
+| Character sheets         | `characterLooks.claimSheet`                 | `characterLooks.failSheetClaim`                 | `characterSheetVariants.promoteIfPending`  |
+| Location sheets          | `locations.claimReference`                  | `locations.failReferenceClaim`                  | `locationSheetVariants.promoteIfPending`   |
 | Music tracks             | `sequenceVariants.claimMusic`               | `sequenceVariants.failMusicClaim`               | `sequenceVariants.completeMusicClaim`      |
 
 Stills and video keep the claim as a pointer column on the parent row. Prompts keep it on the pending row itself (live status plus `pendingInputHash`). Dialogue keeps it in a `shot_dialogue_claims` row, because a section row cannot be its own placeholder. Upscale takes the stills claim like any other still (#1129). Previews (`frame_variants.kind = 'preview'`) are never selectable, so they never claim — but they keep rule 1 (#1152): the image workflow opens the preview's row (`openPreview`, `generating`) in its first step, lands it in place on success (`recordPreview`) and fails it with the run (`markFailedByWorkflowRun`), so a preview that fails is a `failed` record the reconciler sweeps, not a gap (#1149).
 
-**Sheets (#1113)** keep a pointer claim on the parent row (`characters.pendingPromoteSheetVersionId`, `sequence_locations.pendingPromoteReferenceVersionId`, `talent.pendingPromoteSheetId`, `location_library.pendingReferenceClaimId`). The claim names the id the run's result row _will_ carry — they bend rule 1: there is no pending row, because the sheet history tables are read by many surfaces and a row appended at completion under the claimed id needs no failed-husk bookkeeping. Completion is one batch: append the row, move the pointer only while the claim names it, else mark the row divergent (a miss parks rather than landing as plain history, so the sheet banner offers it), and settle the status to `completed` only if no newer run holds the claim. A failure marks the sheet failed only while it holds the claim or nobody does. Library talent triggers can be deduplicated onto an in-flight run, so the funnel claims only after the trigger started a new run; a reusing trigger leaves the claim alone. That claim is conditional on the snapshot inputs still holding (same description, every reference photo still present): an edit that landed before it found nothing to revoke, so it fails the claim and the run parks. (Claiming first and handing back loses to two concurrent reusing triggers: one hands back the other's claim and the reused run parks.) A payload queued before #1113 has no claim and lands unconditionally (pinned as unclaimed writers). A re-analysis bible upsert revokes the claim in the same batch as the bible version it appends when a sheet input moved; an identical rewrite appends no version and keeps it (#1600). The bible parents claim pointer-only (`markGenerating: false`): their upsert already set the status, and a parent replaying across the deploy must not flip a finished sheet back to `generating`.
+**Sheets (#1113)** keep a pointer claim on the parent row (`character_looks.pendingPromoteSheetVersionId` — a character's sheets belong to its looks, #2015 — and `sequence_locations.pendingPromoteReferenceVersionId`, the `locations` table; one claim per location, shared by every sequence that uses it, #1695). The claim names the id the run's result row _will_ carry — they bend rule 1: there is no pending row, because the sheet history tables are read by many surfaces and a row appended at completion under the claimed id needs no failed-husk bookkeeping. Completion is one batch: append the row, move the pointer only while the claim names it, else mark the row divergent (a miss parks rather than landing as plain history, so the sheet banner offers it), and settle the status to `completed` only if no newer run holds the claim. A failure marks the sheet failed only while it holds the claim or nobody does. A trigger can be deduplicated onto an in-flight run, so it claims only after the trigger started a new run; a reusing trigger leaves the claim alone. That claim is conditional on the snapshot inputs still holding (same description, every reference photo still present): an edit that landed before it found nothing to revoke, so it fails the claim and the run parks. (Claiming first and handing back loses to two concurrent reusing triggers: one hands back the other's claim and the reused run parks.) A payload queued before #1113 has no claim and lands unconditionally (pinned as unclaimed writers). A re-analysis bible upsert revokes the claim in the same batch as the bible version it appends when a sheet input moved; an identical rewrite appends no version and keeps it (#1600). The bible parents claim pointer-only (`markGenerating: false`): their upsert already set the status, and a parent replaying across the deploy must not flip a finished sheet back to `generating`. The location bible parent's claim is conditional too (`locations.claimReferenceIfUnmoved`, #1863): one guarded UPDATE that lands only while the bible version its upsert returned is still live. A bible edit between the upsert and the claim step had no claim to revoke, so the claim is not taken and the child parks. A style write on the sequence revokes no sheet claim: neither a character's sheet (#2017) nor a location's (#1695) reads the sequence's style.
+
+**Look sheets (#2015)** are the character-sheet claim with the look as the parent: one claim per look, shared by every sequence that casts the character (#2017), so two looks of one character generate and land independently. A look edit that moves clothing or styling revokes that look's claim in the batch that appends the look version (`lookDefinitionWrite`); a rename does not. A bible edit to a field the sheets read revokes every look's claim (`demoteCharacterSheetClaims`). The claim itself is conditional: `characterLooks.claimSheet(lookId, snapshot)` (#1863) takes it only while `character_looks.selectedLookVersionId` and `characters.selectedBibleVersionId` still equal the payload's. Every trigger passes its own payload as the snapshot, including the plan run and the bible workflow, which used to claim unconditionally after the snapshot was taken. A claim that is not taken returns `held: false` and still mints the id: the run goes ahead and parks its sheet under it. The condition does not cover the style. A style change between the snapshot and the claim is caught only by the demote that follows a later write.
 
 **Music (#1115)** keeps a pointer claim on the sequence (`sequences.pendingPromoteMusicVariantId`), taken in one batch with the track's `pending` row: `claimMusic` opens the row only if the claim landed, so a lost compare-and-swap opens nothing. `sequence_music_variants` is append-only — the old one-row-per-(sequence, model) partial unique indexes and the `sequences.music_*` mirror are gone. The sequence plays `selectedMusicVariantId` and reads its prompt from `selectedMusicPromptVersionId`; every scoped sequence read projects both under the old field names, and derives `musicStatus` / `musicError` from the newest `isPrimary` row (`pending` → generating, `failed` → failed with its error; otherwise completed with a selected track, else pending). Triggers compare-and-swap the claim they observed (`ifPendingIs`): of two rapid clicks the second starts nothing. Update-stale claims only while no primary run holds it (`ifPendingIs: null`), which replaced its live `musicStatus` / `musicPromptInputHash` guards; a prompt-only regeneration has no guard (the hash index keeps the write idempotent). The run adopts the trigger's row (`stampMusicRun`) or, as a pipeline child, opens its own in its first step. `completeMusicClaim` lands the row and, in the same batch, moves the pointer only while the claim names it, else parks the row (`divergedAt`). `failMusicClaim` fails the run's pending row and clears the claim only while it names it; a primary run that died before any row existed records a failed row. A failed music prompt fails the track claim its parent took, or records a failed track row, so the sequence never reads a silent `pending`. Added audio models (#547) open `isPrimary: false` rows with no claim. The user's pick (`selectMusic`: Set Music, Promote) clears the claim and un-parks the row; an upload is a completed primary row selected in the same batch (`appendUploadedMusic`), parking the previous upload. The prompt itself is not claimed: `sequenceMusicPromptVersions.write` appends and selects (pinned as an unclaimed writer). The cron sweeps `pending` track rows like voice husks.
 
 **Prompts are only partly claimed.** Only a regeneration the user queued (a run with `targetVersionId`) takes a claim. The pipeline's prompt passes (analysis, a prompt run with no `targetVersionId`, the motion batch) call `write` / `writeAiVersion`, which select their output with no claim and demote live claims, superseding a user override (it stays in history). Two drain paths do the same: a pre-#1786 run's typed edit, and a pre-#1715 voice payload with no husk. These call sites are pinned, not endorsed.
 
-**Pinned by** `src/platform/server/workflow/claim-discipline.test.ts`. It scans the schema for every table a workflow writes results into (a `…WorkflowRunId` column) or that holds generated history (`*_variants`, `*_versions`). Each must belong to a claim domain or sit on its exceptions list with a reason. It also checks that each domain still has its three methods, that no workflow calls a domain's user selector (`frameVariants.select` and the like), and that every workflow call to an unclaimed pointer writer (prompt `write` / `writeAiVersion`, `sequenceMusicPromptVersions.write`, `characters.updateVoice`, and the pre-#1113 sheet drain writers `characters.updateSheet`, `sequenceLocations.updateReference`, `locations.updateReference`) is on its pinned list. The exceptions today are the music prompt (appended and selected, like the pipeline prompt passes), the authored script and dialogue-line versions (a re-analysis replaces them by design), the bible versions (authored, #1600), the style snapshots (#1600), and tables with no selection pointer (studio assets, exports, provenance, legacy `shot_variants`, the sequence run slot).
+**Pinned by** `src/platform/server/workflow/claim-discipline.test.ts`. It scans the schema for every table a workflow writes results into (a `…WorkflowRunId` column) or that holds generated history (`*_variants`, `*_versions`). Each must belong to a claim domain or sit on its exceptions list with a reason. It also checks that each domain still has its three methods, that no workflow calls a domain's user selector (`frameVariants.select` and the like), and that every workflow call to an unclaimed pointer writer (prompt `write` / `writeAiVersion`, `sequenceMusicPromptVersions.write`, `characters.updateVoice`, and the pre-#1113 sheet drain writer `characters.updateSheet`; the location drain writers went with #1695) is on its pinned list. The exceptions today are the music prompt (appended and selected, like the pipeline prompt passes), the authored script and dialogue-line versions (a re-analysis replaces them by design), the bible versions (authored, #1600), the style snapshots (#1600), and tables with no selection pointer (studio assets, exports, provenance, legacy `shot_variants`, the sequence run slot).
 
 ## How it composes with existing patterns
 
@@ -425,10 +427,10 @@ Much of the original "stage 1" plan is live. This section separates what exists 
 ### Shipped
 
 - **`src/shots/input-hash.ts`** — per-artifact SHA-256 helpers + unit tests.
-- **Hash columns** — on every version row (`frame_variants`, `frame_prompt_versions`, `shot_prompt_versions`, `video_variants`, `*_sheet_variants`, `sequence_music_variants`, `sequence_music_prompt_versions`), plus `location_sheets`, `location_library`, `talent_sheets` and `shot_variants`.
+- **Hash columns** — on every version row (`frame_variants`, `frame_prompt_versions`, `shot_prompt_versions`, `video_variants`, `*_sheet_variants`, `sequence_music_variants`, `sequence_music_prompt_versions`), plus `location_sheets`, `location_library`, `shot_variants`.
 - **Workflow snapshots** — per-workflow `*-snapshot.ts` modules; `RegenerateShotsWorkflow` is the reference implementation.
 - **Image versions (#989)** — `frame_variants` flat versions + `frames.selectedImageVersionId` pointer; drift = unselected version, not `stale:detected`.
-- **Sheet divergent alternates** — `character_sheet_variants`, `location_sheet_variants`, `talent_sheet_variants` + `sheet-divergence.ts` + `generation.stale:detected`.
+- **Sheet divergent alternates** — `character_sheet_variants`, `location_sheet_variants` + `sheet-divergence.ts` + `generation.stale:detected`.
 - **Music claims (#1115)** — append-only `sequence_music_variants` + the sequence's track / prompt pointers and claim; a missed claim parks the track and `music-workflow.ts` emits `stale:detected`.
 - **Prompt version history** — `frame_prompt_versions` (visual) and `shot_prompt_versions` (motion); each version row carries its own `inputHash`.
 - **Realtime** — `realtimeSchema.generation['stale:detected']` discriminated union is live.

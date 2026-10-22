@@ -1,40 +1,43 @@
 /**
- * CharacterSheetWorkflow: the reuse money path (#1248) and landing through
- * the sheet claim (#1113).
+ * CharacterSheetWorkflow: generating a sheet from the character bible and
+ * look, and landing through the sheet claim (#1113).
  *
- * Casting with a matching costume copies the talent sheet into the
- * characters bucket and must not call fal or deduct credits. The result
- * lands through the trigger's claim: promoted while held, parked (with
- * `stale:detected`) when it moved; a pre-#1113 payload lands unconditionally.
+ * The result lands through the trigger's claim: promoted while held, parked
+ * (with `stale:detected`) when it moved; a pre-#1113 payload lands
+ * unconditionally.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { STORAGE_BUCKETS } from '@/platform/server/storage/buckets';
 import type { CharacterBibleEntry } from '@/shots/scene-analysis.schema';
 import type { WorkflowScopedDb } from '@/platform/server/db/scoped-workflow';
 import type { CharacterSheetWorkflowInput } from '@/platform/server/workflow/types';
 import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
 import { asStub } from '@/test/as-stub';
 
-const mockCopyStoredImage = vi.fn();
 const mockGenerateImageWithProvider = vi.fn();
+const mockStoreGeneratedPng = vi.fn();
 const mockDeductWorkflowCredits = vi.fn();
+const mockRecordFalUsageStep = vi.fn();
 const mockRecordProvenance = vi.fn();
 const mockEmit = vi.fn();
+const mockTriggerSheetPortrait = vi.fn();
 
-vi.doMock('@/platform/server/storage/copy-stored-image', () => ({
-  copyStoredImage: mockCopyStoredImage,
-}));
 vi.doMock('@/stills/server/image-generation', () => ({
   generateImageWithProvider: mockGenerateImageWithProvider,
+}));
+vi.doMock('@/stills/server/image-storage', () => ({
+  storeGeneratedPng: mockStoreGeneratedPng,
 }));
 vi.doMock('@/billing/server/workflow-deduction', () => ({
   deductWorkflowCredits: mockDeductWorkflowCredits,
   extractImageCost: () => 0,
-  recordFalUsageStep: vi.fn(),
+  recordFalUsageStep: mockRecordFalUsageStep,
 }));
 vi.doMock('@/platform/server/compliance/provenance', () => ({
   recordProvenance: mockRecordProvenance,
+}));
+vi.doMock('@/cast/server/sheets/sheet-portrait-trigger', () => ({
+  triggerSheetPortrait: mockTriggerSheetPortrait,
 }));
 vi.doMock('@/platform/realtime', () => ({
   getGenerationChannel: () => ({ emit: mockEmit }),
@@ -78,17 +81,21 @@ function makeStep(): WorkflowStep {
 const mockPromoteIfPending = vi.fn();
 const mockUpdateSheetStatus = vi.fn();
 const mockFailSheetClaim = vi.fn();
+const mockFailSheetClaimByVersion = vi.fn();
 
 function makeScopedDb(): WorkflowScopedDb {
   // stub covering only the scoped-db surface runImpl touches
   return asStub<WorkflowScopedDb>({
-    characters: {
-      updateSheetStatus: mockUpdateSheetStatus,
+    characters: { updateSheetStatus: mockUpdateSheetStatus },
+    characterLooks: {
       failSheetClaim: mockFailSheetClaim,
+      failSheetClaimByVersion: mockFailSheetClaimByVersion,
     },
     characterSheetVariants: { promoteIfPending: mockPromoteIfPending },
     provenance: {},
-    liveRead: {},
+    liveRead: {
+      compliance: { listEnforcementFor: vi.fn().mockResolvedValue([]) },
+    },
     credentials: {},
   });
 }
@@ -101,12 +108,13 @@ const characterMetadata: CharacterBibleEntry = {
   ethnicity: '',
   physicalDescription: '',
   standardClothing: 'duster',
-  distinguishingFeatures: '',
+  looks: [],
   personality: '',
   movement: '',
   voiceDescription: '',
   voiceOnly: false,
   isPerson: true,
+  rendering: 'Photoreal live action',
   consistencyTag: 'sam',
 };
 
@@ -118,12 +126,13 @@ async function makeEvent(
     teamId: 'team-1',
     sequenceId: 'seq-1',
     characterDbId: 'char-1',
+    lookId: 'look-1',
+    lookVersionId: 'lookver-1',
+    lookStyling: null,
+    face: null,
     bibleVersionId: null,
     characterName: 'Sam',
     characterMetadata,
-    referenceImageUrl: '/r2/talent/team-1/tal-1/sheet.png',
-    reuseTalentSheet: true,
-    castTalentDescription: null,
     sheetVersionId: 'ver-1',
     ...overrides,
   };
@@ -140,37 +149,54 @@ async function makeEvent(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockCopyStoredImage.mockResolvedValue({
-    publicUrl: '/r2/characters/team-1/seq-1/char-1/copied.png',
-    path: 'team-1/seq-1/char-1/copied.png',
-    fullPath: 'characters/team-1/seq-1/char-1/copied.png',
+  mockGenerateImageWithProvider.mockResolvedValue({
+    imageUrls: ['https://fal.example/out.png'],
+    metadata: { usedOwnKey: false, requestId: 'req-1' },
+    via: 'fal',
   });
+  mockStoreGeneratedPng.mockResolvedValue({
+    url: '/r2/characters/team-1/seq-1/char-1/out.png',
+    path: 'team-1/seq-1/char-1/out.png',
+  });
+  mockRecordFalUsageStep.mockResolvedValue({});
+  mockDeductWorkflowCredits.mockResolvedValue(undefined);
   mockRecordProvenance.mockResolvedValue(undefined);
   mockEmit.mockResolvedValue(undefined);
   mockPromoteIfPending.mockResolvedValue('promoted');
 });
 
-describe('CharacterSheetWorkflow reuseTalentSheet', () => {
-  it('copies the talent sheet into CHARACTERS and does not generate or deduct', async () => {
-    const result = await makeWorkflow().runBody(
-      await makeEvent(),
+describe('CharacterSheetWorkflow looks', () => {
+  it('draws a look from the default sheet (#2015)', async () => {
+    await makeWorkflow().runBody(
+      await makeEvent({
+        lookId: 'gala',
+        face: {
+          url: '/r2/characters/team-1/char-1/default.png',
+          versionId: 'char-1',
+        },
+      }),
       makeStep(),
       makeScopedDb()
     );
 
-    expect(mockCopyStoredImage).toHaveBeenCalledTimes(1);
-    expect(mockCopyStoredImage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceUrl: '/r2/talent/team-1/tal-1/sheet.png',
-        destBucket: STORAGE_BUCKETS.CHARACTERS,
-      })
+    expect(mockGenerateImageWithProvider).toHaveBeenCalledTimes(1);
+    const params = mockGenerateImageWithProvider.mock.calls[0]?.[0];
+    expect(params.referenceImageUrls).toEqual([
+      '/r2/characters/team-1/char-1/default.png',
+    ]);
+    expect(params.prompt).toContain("this character's default look");
+
+    // The sheet lands first; its portrait run is started after, for the
+    // version that landed.
+    expect(mockTriggerSheetPortrait).toHaveBeenCalledTimes(1);
+    expect(mockTriggerSheetPortrait.mock.calls[0]?.[0]).toMatchObject({
+      subject: { kind: 'character', characterId: 'char-1', lookId: 'gala' },
+      versionId: 'ver-1',
+      sheetUrl: '/r2/characters/team-1/seq-1/char-1/out.png',
+    });
+    expect(mockPromoteIfPending.mock.invocationCallOrder[0] ?? 0).toBeLessThan(
+      mockTriggerSheetPortrait.mock.invocationCallOrder[0] ?? 0
     );
-    expect(mockGenerateImageWithProvider).not.toHaveBeenCalled();
-    expect(mockDeductWorkflowCredits).not.toHaveBeenCalled();
-    expect(result.sheetImageUrl).toBe(
-      '/r2/characters/team-1/seq-1/char-1/copied.png'
-    );
-    expect(result.diverged).toBeUndefined();
   });
 });
 
@@ -187,7 +213,7 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
         characterId: 'char-1',
         versionId: 'ver-1',
         claimed: true,
-        url: '/r2/characters/team-1/seq-1/char-1/copied.png',
+        url: '/r2/characters/team-1/seq-1/char-1/out.png',
       })
     );
     expect(result.sheetVersionId).toBe('ver-1');
@@ -240,13 +266,66 @@ describe('CharacterSheetWorkflow sheet claim (#1113)', () => {
     delete asStub<Partial<CharacterSheetWorkflowInput>>(legacy.payload)
       .sheetVersionId;
     await makeWorkflow().failBody(legacy, makeScopedDb());
-    expect(mockFailSheetClaim).toHaveBeenCalledWith('char-1', null, 'boom');
+    expect(mockFailSheetClaim).toHaveBeenCalledWith('look-1', null, 'boom');
     expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
   });
 
-  it('fails only its own claim', async () => {
+  it('fails only its own claim, on its own look', async () => {
     await makeWorkflow().failBody(await makeEvent(), makeScopedDb());
-    expect(mockFailSheetClaim).toHaveBeenCalledWith('char-1', 'ver-1', 'boom');
+    expect(mockFailSheetClaim).toHaveBeenCalledWith('look-1', 'ver-1', 'boom');
     expect(mockUpdateSheetStatus).not.toHaveBeenCalled();
+  });
+
+  it('lands on the look the payload names, stamping its version (#2015)', async () => {
+    mockPromoteIfPending.mockResolvedValue('promoted');
+    const result = await makeWorkflow().runBody(
+      await makeEvent(),
+      makeStep(),
+      makeScopedDb()
+    );
+    expect(mockPromoteIfPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        characterId: 'char-1',
+        lookId: 'look-1',
+        lookVersionId: 'lookver-1',
+      })
+    );
+    expect(result.lookId).toBe('look-1');
+  });
+
+  it('fails a run queued before every look carried a face, at the top', async () => {
+    const legacy = await makeEvent({ lookId: 'gala' });
+    const payload = asStub<Partial<CharacterSheetWorkflowInput>>(
+      legacy.payload
+    );
+    delete payload.face;
+
+    await expect(
+      makeWorkflow().runBody(legacy, makeStep(), makeScopedDb())
+    ).rejects.toThrow(
+      'Queued before looks were drawn from the default look. Run it again.'
+    );
+    expect(mockGenerateImageWithProvider).not.toHaveBeenCalled();
+    expect(mockPromoteIfPending).not.toHaveBeenCalled();
+  });
+
+  it('fails a run queued before #2015, and clears its claim by the claim id', async () => {
+    const legacy = await makeEvent();
+    // a pre-#2015 payload names no look
+    const payload = asStub<Partial<CharacterSheetWorkflowInput>>(
+      legacy.payload
+    );
+    delete payload.lookId;
+    delete payload.lookVersionId;
+    delete payload.lookStyling;
+
+    await expect(
+      makeWorkflow().runBody(legacy, makeStep(), makeScopedDb())
+    ).rejects.toThrow('Queued before character looks shipped. Run it again.');
+    expect(mockPromoteIfPending).not.toHaveBeenCalled();
+    // No look is guessed: the claim is found by its own id.
+    await makeWorkflow().failBody(legacy, makeScopedDb());
+    expect(mockFailSheetClaim).not.toHaveBeenCalled();
+    expect(mockFailSheetClaimByVersion).toHaveBeenCalledWith('ver-1', 'boom');
   });
 });

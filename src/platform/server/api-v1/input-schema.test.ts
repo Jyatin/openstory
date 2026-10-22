@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { apiEnhanceScriptSchema } from './enhance-input-schema';
-import { apiCreateSequenceSchema } from './input-schema';
+import { apiCreateSequenceSchema, apiStopAt } from './input-schema';
 
 describe('apiCreateSequenceSchema', () => {
   it('defaults enhance to auto and motion/music to false', () => {
@@ -10,6 +10,26 @@ describe('apiCreateSequenceSchema', () => {
     expect(parsed.enhance).toBe('auto');
     expect(parsed.motion).toBe(false);
     expect(parsed.music).toBe(false);
+  });
+
+  it('stops where the app does unless told otherwise', () => {
+    const base = { stopAt: undefined, motion: false, music: false };
+    expect(apiStopAt(base)).toBe('dialogue');
+    expect(apiStopAt({ ...base, motion: true })).toBe('motion');
+    expect(apiStopAt({ ...base, motion: true, music: true })).toBe('music');
+    expect(apiStopAt({ ...base, motion: true, stopAt: 'images' })).toBe(
+      'images'
+    );
+  });
+
+  it('refuses reference images on an inline character rather than dropping them (#2135)', () => {
+    const result = apiCreateSequenceSchema.safeParse({
+      script: 'A valid length script here.',
+      characters: [
+        { name: 'Ada', referenceImageUrls: ['https://cdn.example/a.png'] },
+      ],
+    });
+    expect(result.success).toBe(false);
   });
 
   it('rejects music without motion', () => {

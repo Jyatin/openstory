@@ -10,6 +10,7 @@ import { shotKeys } from '@/shots/ui/use-shots';
 import { locationSheetVariantKeys } from '@/cast/ui/use-location-sheet-variants';
 import { sequenceCharacterKeys } from '@/cast/ui/use-sequence-characters';
 import { sequenceLocationKeys } from '@/cast/ui/use-sequence-locations';
+import { teamLocationKeys } from '@/cast/ui/use-team-locations';
 import {
   musicPromptStalenessKey,
   sequenceKeys,
@@ -192,6 +193,11 @@ export function updateQueryCacheFromEvent(
             shotKeys.dialogueSections(shotId),
             `dialogue-sections:${shotId}`
           );
+          debouncedInvalidate(
+            queryClient,
+            shotKeys.dialogueClaimsBySequence(sequenceId),
+            `dialogue-claims:${sequenceId}`
+          );
           // A new reading is a new clip: the video rendered with the old one
           // now reads stale, and that verdict rides the segments list.
           debouncedInvalidate(
@@ -219,6 +225,7 @@ export function updateQueryCacheFromEvent(
         data,
         'previewThumbnailUrl'
       );
+      const previewCreatedAt = getOptionalString(data, 'previewCreatedAt');
       const status = data.status;
       // A finished or failed artifact changes what the plan owes.
       if (status === 'completed' || status === 'failed') {
@@ -252,6 +259,9 @@ export function updateQueryCacheFromEvent(
                   // refetch; the row itself is not in this cache.
                   previewThumbnailUrl:
                     previewThumbnailUrl ?? f.previewThumbnailUrl,
+                  previewCreatedAt: previewCreatedAt
+                    ? new Date(previewCreatedAt)
+                    : f.previewCreatedAt,
                   pendingUpscaleUrl:
                     status === 'completed' || status === 'failed'
                       ? null
@@ -606,9 +616,10 @@ export function updateQueryCacheFromEvent(
     case 'generation.stale:detected': {
       // A divergent regeneration parked its result in a `*_variants` table.
       // This handler runs on the sequence channel, so it only fires for
-      // entityTypes routed there: `shot`, `character`, `location`. Per-entity
-      // channels handle their own invalidation (`useTalentSheetRealtime`,
-      // `useLocationSheetRealtime`) for `talent` and `library-location`.
+      // entityTypes routed there: `shot`, `character`, `location`. A run
+      // started from no sequence reports on the entity's own channel, where
+      // the page that started it listens (the character and location
+      // detail views).
       const entityType = getString(data, 'entityType');
       const entityId = getString(data, 'entityId');
       if (!entityId) break;
@@ -658,8 +669,7 @@ export function updateQueryCacheFromEvent(
           break;
 
         case 'location':
-          // Sequence-location reference diverged into
-          // `location_sheet_variants` (parentType `sequence_location`).
+          // A location's sheet diverged into `location_sheet_variants`.
           debouncedInvalidate(
             queryClient,
             sequenceLocationKeys.list(sequenceId),
@@ -667,7 +677,7 @@ export function updateQueryCacheFromEvent(
           );
           debouncedInvalidate(
             queryClient,
-            locationSheetVariantKeys.divergentBySequence(sequenceId),
+            locationSheetVariantKeys.divergent(),
             `location-sheet-divergent:${sequenceId}`
           );
           break;
@@ -707,9 +717,8 @@ export function updateQueryCacheFromEvent(
 
     case 'generation.character-sheet:progress':
     case 'generation.character-voice:progress':
-    case 'generation.talent:matched':
-      // Cast was created / cast / had its sheet generated during a run.
-      // Refresh the character list so the cast grid (TalentView) and the
+      // Cast was created or had its sheet generated during a run.
+      // Refresh the character list so the cast grid and the
       // per-scene cast (SceneCastTab) populate live instead of only after a
       // page refresh. Debounced because character-sheet:progress fires
       // generating + completed for every character. History keys too — the
@@ -735,15 +744,21 @@ export function updateQueryCacheFromEvent(
         sequenceLocationKeys.list(sequenceId),
         `sequence-locations:${sequenceId}`
       );
+      // A match links the sequence to a team location (#1695): the team
+      // list's sequence counts and order move.
+      debouncedInvalidate(queryClient, teamLocationKeys.all, 'team-locations');
       invalidateSceneFacets(queryClient, sequenceId);
       break;
 
     case 'generation.location-sheet:progress':
+      // The sheet is the location's (#1695): its detail read, every
+      // sequence that uses it and the team list show the same one.
       debouncedInvalidate(
         queryClient,
-        sequenceLocationKeys.list(sequenceId),
-        `sequence-locations:${sequenceId}`
+        sequenceLocationKeys.all,
+        'sequence-locations'
       );
+      debouncedInvalidate(queryClient, teamLocationKeys.all, 'team-locations');
       debouncedInvalidate(
         queryClient,
         locationSheetVariantKeys.all,

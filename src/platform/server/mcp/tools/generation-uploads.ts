@@ -482,7 +482,7 @@ const selectSequenceModelTool = openstoryTool({
 
 const uploadMediaTool = openstoryTool({
   name: 'upload_media',
-  description: `Upload a file (for example one the user attached in chat) to use in a sequence or the Studio. Send url (a public http(s) link) or data (base64, at most ${MAX_INLINE_UPLOAD_BYTES / 1024 / 1024} MB decoded; larger files need a url) with mimeType. use says what it is for: shot_image, character_sheet, location_sheet (JPEG, PNG, WebP, GIF), shot_video (MP4, WebM, MOV), music (MP3, WAV, OGG, M4A) or element (an image, MP3/WAV or MP4/MOV), or studio (the same types as element; no sequenceId) for a Studio reference, start or end frame. Images are checked for a real person; one who is needs portraitAttestation, the uploader’s confirmation they hold the rights to that likeness. Returns upload, which the set_*_from_upload, element and Studio tools take. Uploading changes nothing in the sequence or the Studio.`,
+  description: `Upload a file (for example one the user attached in chat) to use in a sequence or the Studio. Send url (a public http(s) link) or data (base64, at most ${MAX_INLINE_UPLOAD_BYTES / 1024 / 1024} MB decoded; larger files need a url) with mimeType. use says what it is for: shot_image, character_sheet, location_sheet (JPEG, PNG, WebP, GIF), shot_video (MP4, WebM, MOV), music (MP3, WAV, OGG, M4A) or element (an image, MP3/WAV or MP4/MOV), or studio (the same types as element; no sequenceId) for a Studio reference, start or end frame. Images, and element or studio clips, are checked for a real person; one who is needs portraitAttestation, the uploader’s confirmation they hold the rights to that likeness. Returns upload, which the set_*_from_upload, element and Studio tools take. Uploading changes nothing in the sequence or the Studio.`,
   scope: 'sequences:write',
   annotations: writeAnnotations,
   inputSchema: z
@@ -640,7 +640,7 @@ const setMusicFromUploadTool = openstoryTool({
 const setCharacterSheetFromUploadTool = openstoryTool({
   name: 'set_character_sheet_from_upload',
   description:
-    'Make an uploaded image (upload_media use character_sheet) the character’s selected reference sheet. Stills of shots with the character become stale. Starts no generation.',
+    'Make an uploaded image (upload_media use character_sheet) the selected reference sheet of one look of a character (lookId; the default look if omitted). Allowed for any look at any time. A look other than the default is stamped with the default look’s sheet as it is now (none if it has none), so it reads stale once a new default sheet lands. Stills of shots that wear the look become stale. Starts no generation.',
   scope: 'sequences:write',
   annotations: writeAnnotations,
   inputSchema: z.strictObject({
@@ -648,6 +648,9 @@ const setCharacterSheetFromUploadTool = openstoryTool({
     characterId: ulidSchema.describe(
       'Database character ID (list_characters).'
     ),
+    lookId: ulidSchema
+      .optional()
+      .describe('Look ID (get_character looks[].id); default look if omitted.'),
     upload: uploadRef,
   }),
   outputSchema: z.object({ characterId: z.string() }),
@@ -661,7 +664,11 @@ const setCharacterSheetFromUploadTool = openstoryTool({
     );
     await setCharacterSheetFromUpload(
       { scopedDb, user: { id: userId }, teamId: scopedDb.teamId, sequence },
-      { characterId: character.id, publicUrl: storedUpload(input.upload) }
+      {
+        characterId: character.id,
+        lookId: input.lookId ?? character.id,
+        publicUrl: storedUpload(input.upload),
+      }
     );
     return {
       data: { characterId: character.id },
@@ -673,7 +680,7 @@ const setCharacterSheetFromUploadTool = openstoryTool({
 const setLocationSheetFromUploadTool = openstoryTool({
   name: 'set_location_sheet_from_upload',
   description:
-    'Make an uploaded image (upload_media use location_sheet) the location’s selected reference. Stills of shots at the location become stale. Starts no generation.',
+    'Make an uploaded image (upload_media use location_sheet) the location’s selected reference sheet. The location is the team’s: every sequence that uses it reads this sheet, and stills of shots at the location become stale in each. Starts no generation.',
   scope: 'sequences:write',
   annotations: writeAnnotations,
   inputSchema: z.strictObject({

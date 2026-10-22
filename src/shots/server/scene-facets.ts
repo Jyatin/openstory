@@ -23,8 +23,8 @@ export async function loadSceneFacets(scopedDb: ScopedDb, sequence: Sequence) {
   const [shots, locations, characters, elements, sceneContext, anchors] =
     await Promise.all([
       scopedDb.shots.listBySequence(sequence.id),
-      scopedDb.sequenceLocations.list(sequence.id),
-      scopedDb.characters.listWithTalent(sequence.id),
+      scopedDb.locations.list(sequence.id),
+      scopedDb.characters.list(sequence.id),
       scopedDb.sequenceElements.list(sequence.id),
       loadSceneContextBySequence(scopedDb, sequence.id),
       scopedDb.frames.listAnchorsBySequence(sequence.id),
@@ -58,6 +58,7 @@ export async function loadSceneFacets(scopedDb: ScopedDb, sequence: Sequence) {
 
     characterIdsByShot[shot.id] = matchCharactersToShotImage(characters, {
       characterTags: scene?.continuity?.characterTags,
+      characterLooks: scene?.continuity?.characterLooks,
       visualPrompt: promptByShotId.get(shot.id),
     }).map((c) => c.id);
 

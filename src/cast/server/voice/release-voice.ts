@@ -1,6 +1,6 @@
 /**
  * Freeing ElevenLabs voice slots (#1553). One voice id can sit on several
- * rows (character ↔ talent copies), so the slot is released only when the
+ * rows (several characters can name one voice), so the slot is released only when the
  * last reference goes. Provider FIRST, row second: a failed delete leaves
  * the pointer on the row, so the next release attempt can try again. A
  * caller whose own row still holds the id passes `heldBy: 1` so that row
@@ -104,7 +104,13 @@ export async function releaseReplacedVoice(
   }
 }
 
-/** Free the slot if nothing else uses it, then drop the character's pointer. */
+/**
+ * Free the slot if nothing else uses it, then drop the character's pointer.
+ * "Nothing else" is exact: the reference the write below drops — the
+ * character's current pointer, when it names the voice — is counted first
+ * (`getOwnVoiceHolds`), so another character still naming the
+ * voice keeps it.
+ */
 export async function releaseCharacterVoice(
   scopedDb: ScopedDb,
   character: { id: string; voiceId: string | null },
@@ -112,13 +118,18 @@ export async function releaseCharacterVoice(
   createdBy: string | null
 ): Promise<void> {
   if (!character.voiceId) return;
-  await releaseVoiceIfUnreferenced(scopedDb, character.voiceId, { heldBy: 1 });
+  const heldBy = await scopedDb.characters.getOwnVoiceHolds(
+    character.voiceId,
+    character.id
+  );
+  await releaseVoiceIfUnreferenced(scopedDb, character.voiceId, { heldBy });
   await scopedDb.characters.updateVoice(
     character.id,
     { voiceId: null },
     // 'removed' says the character dropped the id; only `releasedAt` says the
     // provider slot was actually freed.
     'removed',
-    createdBy
+    createdBy,
+    null
   );
 }

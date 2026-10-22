@@ -6,6 +6,7 @@
  * of shots; this stage keeps every sequence as scenes-of-one-shot.
  */
 
+import { NotFoundError } from '@/platform/errors';
 import type { Database } from '@/platform/server/db/client';
 import {
   sceneScriptVersions,
@@ -374,7 +375,9 @@ export function createScenesMethods(db: Database) {
       opts: { actorId: string | null }
     ): Promise<void> => {
       const [existing] = await selectScenes().where(eq(scenes.id, sceneId));
-      if (!existing) return;
+      // Loud: a write addressed to a row that is not there is a wrong id,
+      // and returning quietly hid one (#2015).
+      if (!existing) throw new NotFoundError(`Scene ${sceneId} not found`);
       const statements = await narrativeWrite(
         existing,
         { continuity },
@@ -382,6 +385,26 @@ export function createScenesMethods(db: Database) {
       );
       const [first, ...rest] = statements;
       if (first) await db.batch([first, ...rest]);
+    },
+
+    /**
+     * The statements {@link updateContinuity} would run, for a caller's own
+     * batch: a one-off character copy re-points every scene's look picks in
+     * the batch that makes the copy (#2017), so a part-way failure leaves no
+     * scene pointing at a look the cast does not have.
+     */
+    updateContinuityStatements: async (
+      sceneId: DbSceneId,
+      continuity: NonNullable<SceneNarrative['continuity']>,
+      opts: { actorId: string | null }
+    ) => {
+      const [existing] = await selectScenes().where(eq(scenes.id, sceneId));
+      if (!existing) throw new NotFoundError(`Scene ${sceneId} not found`);
+      return await narrativeWrite(
+        existing,
+        { continuity },
+        { source: 'edit', createdBy: opts.actorId }
+      );
     },
 
     delete: async (sceneId: DbSceneId): Promise<boolean> => {

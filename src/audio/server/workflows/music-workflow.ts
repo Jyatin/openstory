@@ -28,6 +28,8 @@ import { getLogger } from '@/platform/logger';
 const logger = getLogger(['openstory', 'workflow', 'music']);
 
 export class MusicWorkflow extends OpenStoryWorkflowEntrypoint<MusicWorkflowInput> {
+  protected override readonly failureLabel = 'Music generation';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<MusicWorkflowInput>>,
     step: WorkflowStep,
@@ -107,7 +109,7 @@ export class MusicWorkflow extends OpenStoryWorkflowEntrypoint<MusicWorkflowInpu
         model,
         teamId,
         sequenceId,
-        scopedDb: scopedDb.credentials,
+        credentials: scopedDb.credentials,
         observability: {
           observationName: 'music',
           tags: ['music'],

@@ -99,6 +99,8 @@ type SceneImageContext = {
 };
 
 export class ShotImagesWorkflow extends OpenStoryWorkflowEntrypoint<ShotImagesWorkflowInput> {
+  protected override readonly failureLabel = 'Image generation';
+
   protected override async runImpl(
     event: Readonly<WorkflowEvent<ShotImagesWorkflowInput>>,
     step: WorkflowStep,
@@ -229,6 +231,7 @@ export class ShotImagesWorkflow extends OpenStoryWorkflowEntrypoint<ShotImagesWo
         // snapshot, never a scene-keyed map whose last shot wins for everyone.
         matchCharactersToShotImage(charactersWithSheets, {
           characterTags: scene.continuity?.characterTags,
+          characterLooks: scene.continuity?.characterLooks,
           visualPrompt,
         })
       );

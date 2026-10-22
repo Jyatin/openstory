@@ -11,12 +11,15 @@ import {
   SidebarGroupContent,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarSeparator,
   useSidebar,
 } from '@/ui/shadcn/sidebar';
 import { FeedbackDialog } from '@/platform/ui/feedback/feedback-dialog';
+import { SearchDialog } from '@/platform/ui/search/search-dialog';
+import { useUser } from '@/platform/ui/use-user';
 import { MODELS_ENABLED } from '@/platform/flags';
 import { SITE_CONFIG } from '@/ui/marketing/constants';
 import { Link, useRouterState } from '@tanstack/react-router';
@@ -31,7 +34,9 @@ import {
   Mail,
   MapPin,
   Palette,
+  Plug,
   Plus,
+  Search,
   Users,
   Video,
 } from 'lucide-react';
@@ -124,14 +129,14 @@ function useLowBalanceWarning() {
 }
 
 const navLinks = [
-  { to: '/sequences', label: 'Sequences', icon: Video },
+  { to: '/sequences', label: 'Sequences', icon: Film },
   { to: '/images', label: 'Images', icon: Images },
-  { to: '/videos', label: 'Videos', icon: Film },
+  { to: '/clips', label: 'Clips', icon: Video },
   ...(MODELS_ENABLED
     ? [{ to: '/models', label: 'Models', icon: Boxes } as const]
     : []),
   { to: '/styles', label: 'Styles', icon: Palette },
-  { to: '/talent', label: 'Talent', icon: Users },
+  { to: '/characters', label: 'Characters', icon: Users },
   { to: '/locations', label: 'Locations', icon: MapPin },
   { to: '/gallery', label: 'Gallery', icon: Clapperboard },
 ] as const;
@@ -143,10 +148,29 @@ export function AppSidebar() {
   const posthog = usePostHog();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Search reads the team's own work, so a visitor has nothing to search.
+  const { data: user } = useUser();
+  const canSearch = Boolean(user);
 
   useEffect(() => {
     if (isMobile) setOpenMobile(false);
   }, [pathname, isMobile, setOpenMobile]);
+
+  useEffect(() => {
+    if (!canSearch) return;
+    const onKey = (event: Event) => {
+      // Chrome autofill fires a bare `keydown` Event with no `key` (#2132).
+      if (!(event instanceof KeyboardEvent)) return;
+      if (event.key.toLowerCase() !== 'k') return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
+        return;
+      event.preventDefault();
+      setSearchOpen(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [canSearch]);
 
   return (
     <Sidebar collapsible="icon">
@@ -187,6 +211,18 @@ export function AppSidebar() {
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+              {canSearch && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    tooltip="Search"
+                    aria-keyshortcuts="Meta+K Control+K"
+                    onClick={() => setSearchOpen(true)}
+                  >
+                    <Search />
+                    <span>Search</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
               {navLinks.map(({ to, label, icon: Icon }) => (
                 <SidebarMenuItem key={label}>
                   <SidebarMenuButton asChild tooltip={label}>
@@ -214,6 +250,17 @@ export function AppSidebar() {
                 <span>Docs</span>
               </Link>
             </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton asChild tooltip="Skills & MCP">
+              <Link to="/connect" activeProps={{ 'data-active': 'true' }}>
+                <Plug />
+                <span>Skills &amp; MCP</span>
+              </Link>
+            </SidebarMenuButton>
+            <SidebarMenuBadge className="bg-primary/15 text-primary">
+              New
+            </SidebarMenuBadge>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton asChild tooltip="Pricing">
@@ -269,6 +316,9 @@ export function AppSidebar() {
         </SidebarMenu>
       </SidebarFooter>
       <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
+      {canSearch && (
+        <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
+      )}
     </Sidebar>
   );
 }

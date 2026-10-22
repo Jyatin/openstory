@@ -164,14 +164,14 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
     'hasEnoughCredits' | 'checkAutoTopUp' | 'getBalance'
   >;
   /**
-   * `getById`: the pending-promote pointer at Voice Design persist (#1715) —
+   * `getVoice`: the pending-promote pointer at Voice Design persist (#1715) —
    * demote must win. `listWithSheets`: live
    * bibles for a re-render. `getVoiceReferenceCount`: slot occupancy when
    * releasing a replaced or demoted designed voice.
    */
   characters: Pick<
     ScopedDb['characters'],
-    'getById' | 'listWithSheets' | 'getVoiceReferenceCount'
+    'getVoice' | 'listWithSheets' | 'getVoiceReferenceCount'
   >;
   /**
    * `getSelected` only, and only for `getAnchorImageUrl`
@@ -182,8 +182,15 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
   frameVariants: Pick<ScopedDb['frameVariants'], 'getSelected'>;
   /** Existence guards, plus the anchor fallback for triggers that carry no `frameId`. */
   frames: Pick<ScopedDb['frames'], 'getAnchorByShot' | 'getById'>;
-  /** `getByIds`: wait-for-sheets polling. */
-  locations: Pick<ScopedDb['locations'], 'getByIds'>;
+  /**
+   * `getCurrentByIds`: the team locations a matching run's writer picked.
+   * `listWithReferences`: live
+   * bibles for a re-render.
+   */
+  locations: Pick<
+    ScopedDb['locations'],
+    'getCurrentByIds' | 'listWithReferences'
+  >;
   /** Existence guard on the segment a motion render promotes into. */
   renderSegments: Pick<ScopedDb['renderSegments'], 'getById'>;
   /** Idempotency guards, live bibles, and element-vision polling. */
@@ -191,8 +198,6 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
     ScopedDb['sequenceElements'],
     'getById' | 'getByToken' | 'list' | 'listByIds'
   >;
-  /** `listWithReferences`: live bibles for a re-render. */
-  sequenceLocations: Pick<ScopedDb['sequenceLocations'], 'listWithReferences'>;
   /**
    * The ready-email title (#1453) — scene-split writes it mid-run, so the
    * trigger snapshot only ever holds the placeholder.
@@ -203,8 +208,6 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
    * those numbers are this run's own writes, not knowable at the trigger.
    */
   shots: Pick<ScopedDb['shots'], 'getById' | 'getByIds' | 'listBySequence'>;
-  /** `getByIds`: wait-for-sheets polling. */
-  talent: Pick<ScopedDb['talent'], 'getByIds'>;
   /** Spawn-time billing guards — video has no claim rows to hold the slot. */
   videoVariants: Pick<
     ScopedDb['videoVariants'],
@@ -214,7 +217,17 @@ type WorkflowLiveReads = Pick<ScopedDb, 'teamId' | 'userId'> & {
    * Spawn-time enforcement — a ban applied after the parent started must
    * stop work that has not started yet. Same class as a billing guard.
    */
-  compliance: Pick<ScopedDb['compliance'], 'listEnforcementFor'>;
+  compliance: Pick<ScopedDb['compliance'], 'listEnforcementFor'> & {
+    /**
+     * The likeness ledger, before a reference clip reaches a model (#1930).
+     * Same class: a clip attached before the check has no row, and every
+     * trigger lands in the run, so the run asks.
+     */
+    attestations: Pick<
+      ScopedDb['compliance']['attestations'],
+      'listForSubject'
+    >;
+  };
 };
 
 export type WorkflowScopedDb = WorkflowDomains & {

@@ -501,6 +501,14 @@ describe('createStudioAssets', () => {
   it('keeps a short Seedance 2.5 reference clip when the prompt does not say edit (#2036)', async () => {
     bytePlusLive = true;
     const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['/r2/uploads/short.mp4'],
+      'other',
+      {}
+    );
 
     await createStudioAssets(scopedDb, {
       activity: 'video',
@@ -587,6 +595,15 @@ describe('createStudioAssets', () => {
       'bytedance/seedance-2.5/text-to-video': rate,
     });
     const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+
+    const { recordLikenessFinding } =
+      await import('@/cast/server/upload-rights');
+    await recordLikenessFinding(
+      scopedDb,
+      ['https://example.com/walk.mp4'],
+      'other',
+      {}
+    );
 
     await createStudioAssets(scopedDb, {
       activity: 'video',
@@ -884,6 +901,62 @@ describe('upload rights gate (#1581)', () => {
         startImageUrl: uploadUrl,
       })
     ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // An uploaded reference clip is checked like a still (#1930).
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01WALK.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    expect(mockReserveRunCredits).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Studio clip whose chain began at an unchecked upload (#1930)', async () => {
+    const { AttestationRequiredError, ValidationError } =
+      await import('@/platform/errors');
+    const scopedDb = createScopedDb(TEAM_ID, USER_ID);
+    const old = await scopedDb.generatedAssets.insert({
+      provider: 'byteplus',
+      endpointId: 'dreamina-seedance-2-5-260628',
+      activity: 'video',
+      modelName: 'Seedance 2.5',
+      source: 'studio',
+      input: {
+        mode: 'reference',
+        referenceVideos: [`/r2/talent/${TEAM_ID}/uploads/01OLD.mp4`],
+      },
+      status: 'completed',
+    });
+
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/video.mp4`],
+      })
+    ).rejects.toBeInstanceOf(AttestationRequiredError);
+    // Any other stored clip, ours or not, needs its own ledger row.
+    for (const clip of [
+      `/r2/teams/${generateId()}/studio/${old.id}/video.mp4`,
+      `/r2/elements/${TEAM_ID}/seq-1/01COPY.mp4`,
+    ]) {
+      await expect(
+        createStudioAssets(scopedDb, {
+          ...video,
+          mode: 'reference',
+          referenceVideos: [clip],
+        })
+      ).rejects.toBeInstanceOf(AttestationRequiredError);
+    }
+    // A clip stored as a still was judged as a still.
+    await expect(
+      createStudioAssets(scopedDb, {
+        ...video,
+        mode: 'reference',
+        referenceVideos: [`/r2/teams/${TEAM_ID}/studio/${old.id}/image.png`],
+      })
+    ).rejects.toBeInstanceOf(ValidationError);
     expect(mockReserveRunCredits).not.toHaveBeenCalled();
   });
 

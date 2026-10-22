@@ -1,9 +1,9 @@
 /**
- * Talent reference vision helper.
+ * Likeness vision for an uploaded photo (#1581).
  *
- * Classifies uploaded talent media as a character/talent sheet vs a regular
- * photo, and describes appearance so we can fill a talent description and
- * sheet metadata without a second model call.
+ * `classifyUpload` uses `subjectKind` to decide whether the rights gate
+ * must ask for a portrait release. The other fields are what the same
+ * call returns; recorded fixtures still parse them.
  */
 
 import type { Microdollars } from '@/billing/money';
@@ -35,7 +35,7 @@ export const talentMediaAnalysisSchema = z.object({
   distinguishingFeatures: z.string(),
 });
 
-export type TalentMediaAnalysis = z.infer<typeof talentMediaAnalysisSchema>;
+type TalentMediaAnalysis = z.infer<typeof talentMediaAnalysisSchema>;
 
 export type AnalyzeTalentMediaInput = {
   imageUrls: string[];
@@ -63,6 +63,8 @@ export type TalentVisionResult = TalentMediaAnalysis & {
   usedOwnKey: boolean;
 };
 
+// Recorded e2e fixtures match this prompt text; changing it means
+// re-recording them.
 const SYSTEM_PROMPT = `You are a talent reference analyst for a film/video production tool. You will be shown one or more images stored as library talent — a real person, an illustrated or 3D character, a creature, or similar.
 
 First classify WHAT the subject is. Do NOT default to human.
